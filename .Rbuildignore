@@ -1,0 +1,10 @@
+^.*\.Rproj$
+^\.Rproj\.user$
+^\.git$
+^\.gitignore$
+^\.cursor$
+^LICENSE\.md$
+^README\.Rmd$
+^\.Rcheck$
+^StructuralModelTester\.Rcheck$
+^.*\.tar\.gz$
