@@ -2,9 +2,12 @@ Package: StructuralModelTester
 Title: Visual Structural Model Tester
 Version: 0.1.0
 Authors@R: person("Baptiste", email = "baptiste@example.com", role = c("aut", "cre"))
-Description: Jamovi-inspired Shiny interface for defining structural models,
-    mapping data to nodes, and testing links with p-values or AIC/BIC model search
-    using lavaan.
+Description: Jamovi-inspired Shiny workbench for path / SEM models: draw
+    confirmatory, exploratory, fixed, measurement, and interaction links on a
+    canvas; fit with p-values or AIC/BIC search (optional Σw rejection and model
+    averaging); simulate from unstandardized expected slopes; inspect
+    conditional / marginal effects; and run confirmatory Monte Carlo power
+    analysis.
 License: MIT + file LICENSE
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
