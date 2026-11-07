@@ -1,3 +1,21 @@
+#' Package version string for the UI chrome
+#' @keywords internal
+smt_package_version <- function() {
+  v <- tryCatch(
+    as.character(utils::packageVersion("StructuralModelTester")),
+    error = function(e) NA_character_
+  )
+  if (is.na(v) || !nzchar(v)) {
+    desc <- tryCatch({
+      root <- get_dev_pkg_root()
+      as.character(read.dcf(file.path(root, "DESCRIPTION"))[1, "Version"])
+    }, error = function(e) NA_character_)
+    if (!is.na(desc) && nzchar(desc)) v <- desc
+  }
+  if (is.na(v) || !nzchar(v)) v <- "?"
+  v
+}
+
 #' @keywords internal
 smt_ui <- function() {
   shiny::fluidPage(
@@ -29,6 +47,11 @@ smt_ui <- function() {
               choiceNames = list("Data", "Prepare", "Model"),
               choiceValues = list("data", "prepare", "model"),
               selected = "model", inline = TRUE
+            ),
+            shiny::span(
+              class = "smt-version",
+              title = "StructuralModelTester package version",
+              paste0("v", smt_package_version())
             )
           )
         ),

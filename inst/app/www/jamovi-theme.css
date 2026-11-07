@@ -246,6 +246,22 @@ html, body {
   min-width: 0;
 }
 
+.smt-view-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.smt-version {
+  font-family: var(--smt-font);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--smt-muted, #6b6b73);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  user-select: none;
+}
+
 .smt-view-toggle .shiny-options-group {
   display: flex;
   gap: 0;
@@ -321,15 +337,21 @@ html, body {
 }
 
 /* Shiny wraps conditionalPanel in a non-flex div — make it fill the center
-   or the graph host (flex: 1 1 0) collapses to 0 and the canvas disappears. */
+   or the graph host (flex: 1 1 0) collapses to 0 and the canvas disappears.
+   Shiny ≥ 1.14 toggles visibility with `.shiny-conditional--shown` (not
+   inline `display:none`). Forcing flex on every panel broke that and showed
+   Data + Prepare + Model stacked at once. */
 .smt-center > .shiny-panel-conditional {
   flex: 1 1 0;
   min-height: 0;
   min-width: 0;
   overflow: hidden;
+  display: none !important;
 }
 
-.smt-center > .shiny-panel-conditional:not([style*="display: none"]) {
+.smt-center > .shiny-panel-conditional.shiny-conditional--shown,
+.smt-center > .shiny-panel-conditional[style*="display: block"],
+.smt-center > .shiny-panel-conditional[style*="display:block"] {
   display: flex !important;
   flex-direction: column;
 }

@@ -1,6 +1,6 @@
 Package: StructuralModelTester
 Title: Visual Structural Model Tester
-Version: 0.2.0
+Version: 0.2.1
 Authors@R: person("Baptiste Jacquet", email = "contact@bjacquet.fr", role = c("aut", "cre"))
 Description: Jamovi-inspired Shiny workbench for path / SEM models: draw
     confirmatory, exploratory, fixed, measurement, and interaction links on a
