@@ -10,23 +10,30 @@
 #' StructuralModelTester::run_app()
 #' }
 run_app <- function(launch.browser = TRUE, ...) {
-  app_dir <- system.file("app", package = "StructuralModelTester")
-  if (!nzchar(app_dir) || !dir.exists(app_dir)) {
-    pkg_root <- Sys.getenv("SMT_PKG_ROOT", unset = "")
-    if (!nzchar(pkg_root)) {
-      pkg_root <- tryCatch(get_dev_pkg_root(), error = function(e) "")
-    }
-    app_dir <- file.path(pkg_root, "inst", "app")
+  requireNamespace("StructuralModelTester", quietly = TRUE)
+  # Prefer the source-tree app when developing (pkgload::load_all). The installed
+  # copy under system.file() can lag behind and serve stale JS/CSS that breaks
+  # plots and canvas updates.
+  pkg_root <- Sys.getenv("SMT_PKG_ROOT", unset = "")
+  if (!nzchar(pkg_root)) {
+    pkg_root <- tryCatch(get_dev_pkg_root(), error = function(e) "")
   }
-  if (!dir.exists(app_dir)) {
+  app_dir <- ""
+  if (nzchar(pkg_root)) {
+    cand <- file.path(pkg_root, "inst", "app")
+    if (dir.exists(cand)) app_dir <- cand
+  }
+  if (!nzchar(app_dir) || !dir.exists(app_dir)) {
+    app_dir <- system.file("app", package = "StructuralModelTester")
+  }
+  if (!nzchar(app_dir) || !dir.exists(app_dir)) {
     stop(
       "Cannot find Shiny app directory. Install the package with ",
-      "devtools::install() or remotes::install_local().",
+      "devtools::install() or remotes::install_local(), or run from the ",
+      "package root after pkgload::load_all().",
       call. = FALSE
     )
   }
-  # Ensure namespace is loaded so app.R can call package functions
-  requireNamespace("StructuralModelTester", quietly = TRUE)
   # ragg can be ABI-incompatible after R upgrades ("Version de l'API graphiques incompatible")
   options(shiny.useragg = FALSE)
   shiny::runApp(app_dir, launch.browser = launch.browser, ...)
@@ -36,9 +43,13 @@ run_app <- function(launch.browser = TRUE, ...) {
 get_dev_pkg_root <- function() {
   if (file.exists(file.path(getwd(), "DESCRIPTION"))) {
     desc <- tryCatch(read.dcf("DESCRIPTION")[, "Package"], error = function(e) "")
-    if (identical(as.character(desc), "StructuralModelTester")) return(normalizePath(getwd()))
+    if (identical(as.character(desc), "StructuralModelTester")) {
+      return(normalizePath(getwd()))
+    }
   }
-  # Walk up from this file when sourced via load_all
-  path <- getwd()
-  stop("Package not installed. From the package root run: devtools::load_all(); run_app()", call. = FALSE)
+  stop(
+    "Package not installed. From the package root run: ",
+    "devtools::load_all(); run_app()",
+    call. = FALSE
+  )
 }

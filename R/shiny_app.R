@@ -250,9 +250,9 @@ smt_ui <- function() {
                     width = "160px"
                   )
                 ),
-                shiny::div(
+                  shiny::div(
                   class = "smt-edge-plot-body",
-                  shiny::plotOutput("edge_plot", height = "100%")
+                  shiny::plotOutput("edge_plot", height = "240px")
                 )
               )
             )
@@ -266,6 +266,19 @@ smt_ui <- function() {
             shiny::h3(shiny::textOutput("right_panel_title", inline = TRUE)),
             shiny::uiOutput("status_msg"),
             shiny::uiOutput("inspector_panel"),
+            # Residual plot must stay outside renderUI — remounting plotOutput
+            # leaves a blank panel even when renderPlot succeeds.
+            shiny::uiOutput("dv_resid_controls"),
+            # Keep plotOutput in the DOM (static) so remounts do not blank it;
+            # hide the host when there is nothing plottable for the selection.
+            shiny::conditionalPanel(
+              condition = "output.dv_resid_has_plot === true",
+              shiny::div(
+                class = "smt-resid-plot-wrap",
+                id = "smt_resid_plot_host",
+                shiny::plotOutput("dv_resid_plot", height = "320px")
+              )
+            ),
             shiny::h4("Path coefficients"),
             DT::DTOutput("coef_table"),
             shiny::h4("Best vs confirmatory"),
@@ -682,6 +695,24 @@ smt_server <- function(input, output, session) {
   # Layout-only updates must not clear fit results: remounting the inspector can
   # re-fire mapping/coding inputs, so freeze those values for this flush.
   skip_graph_render <- shiny::reactiveVal(FALSE)
+  # Remounted inspector inputs arrive after freezeReactiveValue expires; ignore
+  # writebacks briefly after selection / move / fit so they cannot clear results.
+  suppress_inspector_writes <- shiny::reactiveVal(FALSE)
+  suppress_deadline <- shiny::reactiveVal(0)
+  begin_inspector_suppress <- function(ms = 700) {
+    suppress_inspector_writes(TRUE)
+    suppress_deadline(as.numeric(Sys.time()) + ms / 1000)
+  }
+  inspector_writes_allowed <- function() {
+    !isTRUE(shiny::isolate(suppress_inspector_writes()))
+  }
+  shiny::observe({
+    if (!isTRUE(suppress_inspector_writes())) return()
+    shiny::invalidateLater(100, session)
+    if (as.numeric(Sys.time()) >= shiny::isolate(suppress_deadline())) {
+      suppress_inspector_writes(FALSE)
+    }
+  })
   freeze_inspector_inputs <- function() {
     for (nm in c(
       "inspector_map_column",
@@ -690,13 +721,18 @@ smt_server <- function(input, output, session) {
       "dv_cluster_column",
       "cat_factor_base",
       "cat_factor_ordered",
-      "cat_factor_levels",
-      "dv_diag_equation",
-      "edge_rel_kind"
+      "cat_factor_levels"
+      # Do NOT freeze edge_rel_kind or dv_diag_equation — residual / edge
+      # renderPlot reads them; freezing silently aborts the plot flush and
+      # leaves a blank panel after a node or edge click.
     )) {
       try(shiny::freezeReactiveValue(input, nm), silent = TRUE)
     }
   }
+
+  # Bumped on every canvas selection so edge_plot always re-executes.
+  edge_plot_tick <- shiny::reactiveVal(0L)
+  resid_plot_tick <- shiny::reactiveVal(0L)
   shiny::observeEvent(input$smt_node_moved, {
     mv <- input$smt_node_moved
     shiny::req(mv)
@@ -710,6 +746,7 @@ smt_server <- function(input, output, session) {
       shiny::req(mv$id)
       st <- apply_node_position(st, mv$id, mv$x, mv$y)
     }
+    begin_inspector_suppress()
     freeze_inspector_inputs()
     skip_graph_render(TRUE)
     state(st)
@@ -722,9 +759,17 @@ smt_server <- function(input, output, session) {
     st <- state()
     dat <- analysis_rv()
     if (isTRUE(shiny::isolate(skip_graph_render()))) {
+      smt_debug(
+        "R graph observe SKIPPED render | n_edges=", nrow(st$edges),
+        " has_result=", !is.null(shiny::isolate(last_result()))
+      )
       shiny::isolate(skip_graph_render(FALSE))
       return()
     }
+    smt_debug(
+      "R graph observe SEND render | n_nodes=", nrow(st$nodes),
+      " n_edges=", nrow(st$edges)
+    )
     session$sendCustomMessage("smt_render_graph", graph_payload(st, dat))
   })
 
@@ -753,35 +798,71 @@ smt_server <- function(input, output, session) {
   # spurious select/checkbox events cannot clear last_result / fit estimates.
   skip_rel_kind_write <- shiny::reactiveVal(FALSE)
   shiny::observeEvent(input$graph_selected, {
-    freeze_inspector_inputs()
     sel <- input$graph_selected
     eid <- if (!is.null(sel$edges) && length(sel$edges)) as.character(sel$edges[[1]]) else NULL
-    st <- ensure_edge_to_port(state())
-    rk <- "linear"
-    if (!is.null(eid) && eid %in% st$edges$id) {
-      rk <- st$edges$rel_kind[match(eid, st$edges$id)]
-      if (is.na(rk) || !nzchar(rk)) rk <- "linear"
+    nids <- if (!is.null(sel$nodes) && length(sel$nodes)) {
+      paste(as.character(unlist(sel$nodes)), collapse = ",")
+    } else {
+      ""
     }
+    tick <- shiny::isolate(edge_plot_tick()) + 1L
+    edge_plot_tick(tick)
+    resid_plot_tick(shiny::isolate(resid_plot_tick()) + 1L)
+    smt_debug(
+      "R graph_selected | edges=", smt_debug_fmt(sel$edges),
+      " eid=", eid %||% "NULL",
+      " nodes=[", nids, "]",
+      " has_result=", !is.null(last_result()),
+      " suppress=", isTRUE(shiny::isolate(suppress_inspector_writes())),
+      " edge_plot_tick=", tick
+    )
+    begin_inspector_suppress()
+    freeze_inspector_inputs()
+    # Only sync the relationship dropdown when a structural edge is selected.
+    # Syncing on node clicks (defaulting to "linear") can re-fire the writer and
+    # clear fit results / remount the canvas so the edge plot never appears.
+    if (is.null(eid) || !nzchar(eid)) return()
+    st <- ensure_edge_to_port(state())
+    if (!eid %in% st$edges$id) {
+      smt_debug("R graph_selected | eid not in state$edges$id")
+      return()
+    }
+    rk <- st$edges$rel_kind[match(eid, st$edges$id)]
+    if (is.na(rk) || !nzchar(rk)) rk <- "linear"
     current <- as.character(input$edge_rel_kind %||% "")
     if (!identical(current, as.character(rk))) {
+      smt_debug("R graph_selected | sync edge_rel_kind ", current, " -> ", rk)
       skip_rel_kind_write(TRUE)
       shiny::updateSelectInput(session, "edge_rel_kind", selected = rk)
-    } else {
-      skip_rel_kind_write(FALSE)
     }
   }, ignoreNULL = FALSE)
+
+  shiny::observeEvent(input$smt_debug_event, {
+    ev <- input$smt_debug_event
+    if (is.null(ev)) return()
+    smt_debug(
+      "JS ", as.character(ev$kind %||% "?"),
+      " | ", smt_debug_fmt(ev)
+    )
+  }, ignoreNULL = TRUE)
 
   shiny::observeEvent(input$edge_rel_kind, {
     if (isTRUE(skip_rel_kind_write())) {
       skip_rel_kind_write(FALSE)
       return()
     }
+    if (!inspector_writes_allowed()) return()
     sel <- input$graph_selected
     eid <- if (!is.null(sel$edges) && length(sel$edges)) as.character(sel$edges[[1]]) else NULL
     if (is.null(eid) || !nzchar(eid)) return()
-    rk <- input$edge_rel_kind %||% "linear"
+    rk <- as.character(input$edge_rel_kind %||% "linear")
+    st0 <- ensure_edge_to_port(state())
+    if (!eid %in% st0$edges$id) return()
+    cur <- st0$edges$rel_kind[match(eid, st0$edges$id)]
+    if (is.na(cur) || !nzchar(cur)) cur <- "linear"
+    if (identical(as.character(cur), rk)) return()
     skip_graph_render(TRUE)
-    st <- set_edge_rel_kind(state(), eid, rk)
+    st <- set_edge_rel_kind(st0, eid, rk)
     state(clear_fit_results(st))
     if (!is.null(last_result())) {
       last_result(NULL)
@@ -812,36 +893,69 @@ smt_server <- function(input, output, session) {
   }, ignoreInit = TRUE)
 
   output$edge_plot <- shiny::renderPlot({
-    sel <- input$graph_selected
+    tick <- edge_plot_tick()
+    sel <- shiny::isolate(input$graph_selected)
     eid <- NULL
     if (!is.null(sel$edges) && length(sel$edges)) {
       eid <- as.character(sel$edges[[1]])
     }
+    smt_debug(
+      "R edge_plot render | tick=", tick,
+      " eid=", eid %||% "NULL",
+      " sel_edges=", smt_debug_fmt(sel$edges),
+      " has_data=", !is.null(shiny::isolate(analysis_rv())),
+      " has_result=", !is.null(shiny::isolate(last_result())),
+      " rel_kind_input=", as.character(shiny::isolate(input$edge_rel_kind) %||% "NULL")
+    )
     if (is.null(eid) || !nzchar(eid)) {
+      smt_debug("R edge_plot -> placeholder (no edge selected)")
       return(edge_plot_placeholder())
     }
-    dat <- analysis_rv()
+    dat <- shiny::isolate(analysis_rv())
     if (is.null(dat)) {
+      smt_debug("R edge_plot -> no data message")
       return(edge_plot_message("No data", "Load a dataset to plot this link."))
     }
-    st <- ensure_edge_to_port(state())
+    st <- ensure_edge_to_port(shiny::isolate(state()))
     idx <- match(eid, st$edges$id)
+    if (is.na(idx)) {
+      smt_debug("R edge_plot -> placeholder (eid not in edges: ", eid, ")")
+      return(edge_plot_placeholder())
+    }
     rk <- "linear"
-    if (!is.na(idx)) {
-      stored <- st$edges$rel_kind[idx]
-      if (!is.na(stored) && nzchar(stored)) rk <- stored
+    stored <- st$edges$rel_kind[idx]
+    if (!is.na(stored) && nzchar(stored)) rk <- stored
+    rk_in <- shiny::isolate(input$edge_rel_kind)
+    if (!is.null(rk_in) && nzchar(as.character(rk_in))) {
+      rk <- as.character(rk_in)
     }
-    if (!is.null(input$edge_rel_kind) && nzchar(as.character(input$edge_rel_kind))) {
-      rk <- as.character(input$edge_rel_kind)
-    }
-    show_fit <- !is.null(last_result())
-    p <- edge_relationship_plot(
-      st, dat, eid,
-      show_fit = show_fit,
-      rel_kind = rk
+    show_fit <- !is.null(shiny::isolate(last_result()))
+    smt_debug(
+      "R edge_plot building | from=", st$edges$from[idx],
+      " to=", st$edges$to[idx],
+      " type=", st$edges$type[idx],
+      " rk=", rk, " show_fit=", show_fit,
+      " nrow_data=", nrow(dat)
     )
-    if (is.null(p)) edge_plot_placeholder() else p
+    p <- tryCatch(
+      edge_relationship_plot(
+        st, dat, eid,
+        show_fit = show_fit,
+        rel_kind = rk
+      ),
+      error = function(e) {
+        smt_debug("R edge_plot ERROR: ", e$message)
+        edge_plot_message("Plot error", e$message)
+      }
+    )
+    if (is.null(p)) {
+      smt_debug("R edge_plot -> placeholder (plot fn returned NULL)")
+      return(edge_plot_placeholder())
+    }
+    smt_debug("R edge_plot -> ggplot OK | class=", paste(class(p), collapse = ","))
+    p
   })
+  shiny::outputOptions(output, "edge_plot", suspendWhenHidden = FALSE)
 
   shiny::observeEvent(input$run_analysis, {
     st <- ensure_edge_to_port(state())
@@ -896,6 +1010,11 @@ smt_server <- function(input, output, session) {
           )
         }
         shiny::setProgress(value = 0.95, detail = "Updating canvas")
+        begin_inspector_suppress()
+        freeze_inspector_inputs()
+        # Never skip this redraw — a leftover skip_graph_render from move/rel-kind
+        # would leave coefficient labels stuck on the canvas.
+        skip_graph_render(FALSE)
         if (!is.null(res$comparison) && isTRUE(input$model_average) &&
               !is.null(res$state_averaged)) {
           res$model_averaged <- TRUE
@@ -905,6 +1024,11 @@ smt_server <- function(input, output, session) {
           state(res$state)
         }
         last_result(res)
+        resid_plot_tick(shiny::isolate(resid_plot_tick()) + 1L)
+        session$sendCustomMessage(
+          "smt_render_graph",
+          graph_payload(shiny::isolate(state()), shiny::isolate(analysis_rv()))
+        )
         unc_info <- res$uncertainty
         unc_txt <- if (!is.null(unc_info) && !identical(unc_info$method %||% "none", "none")) {
           sprintf(
@@ -1031,6 +1155,8 @@ smt_server <- function(input, output, session) {
   })
 
   shiny::observeEvent(input$dv_repeated_measures, {
+    if (!inspector_writes_allowed()) return()
+    if (is.null(input$dv_repeated_measures)) return()
     dv <- selected_dv_id()
     if (is.null(dv)) return()
     en <- isTRUE(input$dv_repeated_measures)
@@ -1051,6 +1177,7 @@ smt_server <- function(input, output, session) {
   }, ignoreInit = TRUE)
 
   shiny::observeEvent(input$dv_cluster_column, {
+    if (!inspector_writes_allowed()) return()
     if (is.null(input$dv_cluster_column)) return()
     dv <- selected_dv_id()
     if (is.null(dv)) return()
@@ -1066,6 +1193,7 @@ smt_server <- function(input, output, session) {
   }, ignoreInit = TRUE, ignoreNULL = TRUE)
 
   shiny::observeEvent(input$dv_transform, {
+    if (!inspector_writes_allowed()) return()
     if (is.null(input$dv_transform)) return()
     dv <- selected_dv_id()
     if (is.null(dv)) return()
@@ -1096,6 +1224,7 @@ smt_server <- function(input, output, session) {
   })
 
   apply_factor_coding_from_inputs <- function() {
+    if (!inspector_writes_allowed()) return()
     nid <- selected_factor_node_id()
     if (is.null(nid)) return()
     # Inspector remount can briefly leave selects NULL — ignore those flushes
@@ -1175,6 +1304,7 @@ smt_server <- function(input, output, session) {
   }
 
   shiny::observeEvent(input$inspector_map_column, {
+    if (!inspector_writes_allowed()) return()
     # NULL = input not ready / inspector remounting — never treat as "clear mapping"
     col <- input$inspector_map_column
     if (is.null(col)) return()
@@ -1344,35 +1474,6 @@ smt_server <- function(input, output, session) {
               eq_html
             } else {
               shiny::helpText("Run the analysis to see this DV's fitted equation.")
-            },
-            shiny::h4("Residual diagnostics"),
-            if (!length(fits_dv)) {
-              shiny::helpText("Run the analysis to see residual diagnostics for this DV.")
-            } else {
-              keys <- names(fits_dv)
-              shiny::tagList(
-                if (length(keys) > 1L) {
-                  shiny::selectInput(
-                    "dv_diag_equation",
-                    "Equation",
-                    choices = stats::setNames(
-                      keys,
-                      vapply(keys, function(k) dv_fit_key_label(st, k), character(1))
-                    ),
-                    selected = keys[[1]],
-                    width = "100%"
-                  )
-                },
-                shiny::div(
-                  class = "smt-resid-plot-wrap",
-                  shiny::plotOutput("dv_resid_plot", height = "320px")
-                ),
-                shiny::helpText(
-                  "QQ checks residual normality; residuals vs fitted checks ",
-                  "non-linearity / heteroscedasticity. For glm/glmer, deviance ",
-                  "residuals are shown."
-                )
-              )
             }
           )
         ))
@@ -1443,25 +1544,111 @@ smt_server <- function(input, output, session) {
     )
   })
 
-  output$dv_resid_plot <- shiny::renderPlot({
+  output$dv_resid_has_plot <- shiny::reactive({
+    resid_plot_tick()
     dv <- selected_dv_id()
-    if (is.null(dv)) {
-      return(residual_diagnostics_plot(NULL, title = NULL))
+    fits_dv <- dv_result_fits(last_result(), dv)
+    if (!length(fits_dv)) return(FALSE)
+    keys <- names(fits_dv)
+    if (is.null(keys) || !length(keys)) return(FALSE)
+    key <- if (length(keys) > 1L) {
+      input$dv_diag_equation %||% keys[[1]]
+    } else {
+      keys[[1]]
     }
+    if (is.null(key) || !key %in% keys) key <- keys[[1]]
+    !is.null(path_fit_residual_info(fits_dv[[key]]))
+  })
+  shiny::outputOptions(output, "dv_resid_has_plot", suspendWhenHidden = FALSE)
+
+  output$dv_resid_controls <- shiny::renderUI({
+    resid_plot_tick()
+    dv <- selected_dv_id()
     res <- last_result()
+    if (is.null(dv)) return(NULL)
     fits_dv <- dv_result_fits(res, dv)
     if (!length(fits_dv)) {
+      return(shiny::tagList(
+        shiny::h4("Residual diagnostics"),
+        shiny::helpText("Run the analysis to see residual diagnostics for this DV.")
+      ))
+    }
+    keys <- names(fits_dv)
+    if (is.null(keys) || !length(keys)) return(NULL)
+    # Only show the section when at least one equation has extractable residuals
+    has_any <- any(vapply(
+      fits_dv,
+      function(f) !is.null(path_fit_residual_info(f)),
+      logical(1)
+    ))
+    if (!has_any) return(NULL)
+    shiny::tagList(
+      shiny::h4("Residual diagnostics"),
+      if (length(keys) > 1L) {
+        shiny::selectInput(
+          "dv_diag_equation",
+          "Equation",
+          choices = stats::setNames(
+            keys,
+            vapply(keys, function(k) dv_fit_key_label(state(), k), character(1))
+          ),
+          selected = keys[[1]],
+          width = "100%"
+        )
+      },
+      shiny::helpText(
+        "QQ checks residual normality; residuals vs fitted checks ",
+        "non-linearity / heteroscedasticity. For glm/glmer, deviance ",
+        "residuals are shown."
+      )
+    )
+  })
+
+  output$dv_resid_plot <- shiny::renderPlot({
+    tick <- resid_plot_tick()
+    # Also refresh after Run without a new click
+    res <- last_result()
+    dv <- selected_dv_id()
+    fits_dv <- dv_result_fits(res, dv)
+    smt_debug(
+      "R dv_resid_plot | tick=", tick,
+      " dv=", dv %||% "NULL",
+      " n_fits=", length(fits_dv),
+      " has_result=", !is.null(res)
+    )
+    if (is.null(dv) || !length(fits_dv)) {
+      smt_debug("R dv_resid_plot -> blank (nothing to show)")
       return(residual_diagnostics_plot(NULL, title = NULL))
     }
     keys <- names(fits_dv)
-    key <- input$dv_diag_equation %||% keys[[1]]
+    if (is.null(keys) || !length(keys)) {
+      smt_debug("R dv_resid_plot -> blank (unnamed fits)")
+      return(residual_diagnostics_plot(NULL, title = NULL))
+    }
+    # Avoid reading dv_diag_equation when the selectInput is absent — a frozen
+    # or missing input used to abort this renderPlot mid-flush (blank panel).
+    key <- if (length(keys) > 1L) {
+      input$dv_diag_equation %||% keys[[1]]
+    } else {
+      keys[[1]]
+    }
     if (is.null(key) || !key %in% keys) key <- keys[[1]]
-    residual_diagnostics_plot(
-      fits_dv[[key]],
-      title = dv_fit_key_label(state(), key)
+    fit_obj <- fits_dv[[key]]
+    smt_debug(
+      "R dv_resid_plot -> plotting key=", key,
+      " class=", paste(class(fit_obj), collapse = "/")
+    )
+    tryCatch(
+      residual_diagnostics_plot(
+        fit_obj,
+        title = dv_fit_key_label(state(), key)
+      ),
+      error = function(e) {
+        smt_debug("R dv_resid_plot ERROR: ", e$message)
+        residual_diagnostics_plot(NULL, title = NULL)
+      }
     )
   })
-  # plotOutput is created dynamically in the inspector; keep it ready when hidden
   shiny::outputOptions(output, "dv_resid_plot", suspendWhenHidden = FALSE)
 
   output$coef_table <- DT::renderDT({

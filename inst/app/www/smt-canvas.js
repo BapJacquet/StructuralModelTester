@@ -209,10 +209,13 @@
         var mx = (a.x + b.x) / 2;
         var my = (a.y + b.y) / 2 - 8;
         var lab = escapeXml(String(e.label));
-        // Dual text: fat white copy behind (reliable halo for × / →× labels)
-        html += '<text class="smt-edge-label-halo" x="' + mx + '" y="' + my +
+        // Dual text: fat white copy behind (reliable halo for × / →× labels).
+        // data-edge-id so clicks on the coefficient text select the link.
+        html += '<text class="smt-edge-label-halo" data-edge-id="' + e.id +
+          '" x="' + mx + '" y="' + my +
           '" text-anchor="middle">' + lab + "</text>";
-        html += '<text class="smt-edge-label" x="' + mx + '" y="' + my +
+        html += '<text class="smt-edge-label" data-edge-id="' + e.id +
+          '" x="' + mx + '" y="' + my +
           '" text-anchor="middle">' + lab + "</text>";
       }
     });
@@ -459,26 +462,53 @@
     };
   }
 
-  function emitSelection() {
-    Shiny.setInputValue("graph_selected", {
-      nodes: selected.nodes.slice(),
-      edges: selected.edges.slice()
-    }, { priority: "event" });
+  function emitDebug(kind, extra) {
+    if (!window.Shiny || !Shiny.setInputValue) return;
+    var payload = extra || {};
+    payload.kind = kind;
+    payload.t = Date.now();
+    payload.selectedNodes = selected.nodes.slice();
+    payload.selectedEdges = selected.edges.slice();
+    Shiny.setInputValue("smt_debug_event", payload, { priority: "event" });
   }
 
-  function clearSelection() {
+  function emitSelection() {
+    var payload = {
+      nodes: selected.nodes.slice(),
+      edges: selected.edges.slice()
+    };
+    emitDebug("emitSelection", { payload: payload });
+    Shiny.setInputValue("graph_selected", payload, { priority: "event" });
+  }
+
+  function clearSelection(opts) {
+    var silent = opts && opts.silent;
     Object.keys(nodes).forEach(function (id) {
       nodes[id].el.classList.remove("selected");
     });
     selected = { nodes: [], edges: [] };
     redrawEdges();
-    emitSelection();
+    // silent=true when about to select something else — avoid a blank
+    // intermediate graph_selected that races the real selection / plot.
+    if (!silent) emitSelection();
   }
 
   function bindCanvasEvents() {
     wrap.addEventListener("mousedown", function (ev) {
       if (ev.button !== 0) return;
       var target = ev.target;
+      var tag = (target && target.tagName) || "?";
+      var cls = (target && target.getAttribute && target.getAttribute("class")) || "";
+      emitDebug("mousedown", {
+        tag: tag,
+        className: String(cls).slice(0, 120),
+        edgeIdAttr: target && target.getAttribute
+          ? (target.getAttribute("data-edge-id") || "")
+          : "",
+        closestEdge: !!(target && target.closest && target.closest(
+          ".smt-edge-path, .smt-edge-hit, .smt-edge-label, .smt-edge-label-halo"
+        ))
+      });
 
       var port = target.closest(".port");
       if (port && port.classList.contains("output")) {
@@ -509,7 +539,7 @@
           y: localPoint(ev).y - n.y
         };
         if (!ev.shiftKey && selected.nodes.indexOf(id) < 0) {
-          clearSelection();
+          clearSelection({ silent: true });
           selected.nodes = [id];
           nodeEl.classList.add("selected");
           emitSelection();
@@ -524,17 +554,31 @@
         return;
       }
 
-      if (target.classList.contains("smt-edge-path") ||
-          target.classList.contains("smt-edge-hit")) {
-        var eid = target.getAttribute("data-edge-id");
-        clearSelection();
-        selected.edges = [eid];
-        redrawEdges();
-        emitSelection();
-        return;
+      // Paths, hit targets, and coefficient labels all select the edge.
+      // Labels sit on top of the stroke — without this, clicks look like a no-op.
+      var edgeEl = target.closest(
+        ".smt-edge-path, .smt-edge-hit, .smt-edge-label, .smt-edge-label-halo"
+      );
+      if (edgeEl) {
+        var eid = edgeEl.getAttribute("data-edge-id");
+        emitDebug("edgeClickCandidate", {
+          eid: eid || "",
+          edgeElClass: edgeEl.getAttribute("class") || ""
+        });
+        if (eid) {
+          clearSelection({ silent: true });
+          selected.edges = [eid];
+          redrawEdges();
+          emitSelection();
+          return;
+        }
       }
 
       if (target === wrap || target === svgLayer || target === nodesLayer) {
+        emitDebug("clearSelectionBackground", {
+          targetIs: target === wrap ? "wrap"
+            : (target === svgLayer ? "svg" : "nodesLayer")
+        });
         clearSelection();
       }
     });
@@ -644,7 +688,12 @@
     var tries = 0;
     (function attempt() {
       if (ensureDom()) {
-        renderGraph(data || { nodes: [], edges: [] });
+        var d = data || { nodes: [], edges: [] };
+        emitDebug("renderGraph", {
+          nNodes: (d.nodes && d.nodes.length) || 0,
+          nEdges: (d.edges && d.edges.length) || 0
+        });
+        renderGraph(d);
         return;
       }
       if (tries++ < 40) setTimeout(attempt, 50);

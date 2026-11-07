@@ -907,7 +907,9 @@ body.smt-resizing-v * {
   font-size: 11px;
   font-family: var(--smt-font);
   font-weight: 600;
-  pointer-events: none;
+  /* Must receive clicks — otherwise taps on coefficient text miss the edge path */
+  pointer-events: auto;
+  cursor: pointer;
 }
 
 .smt-edge-label {
@@ -915,7 +917,8 @@ body.smt-resizing-v * {
   font-size: 11px;
   font-family: var(--smt-font);
   font-weight: 600;
-  pointer-events: none;
+  pointer-events: auto;
+  cursor: pointer;
 }
 
 .smt-nodes-layer {

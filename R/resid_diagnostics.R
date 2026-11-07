@@ -69,19 +69,24 @@ path_fit_residual_info <- function(fit) {
 #' QQ + residuals-vs-fitted panel for one path equation
 #' @keywords internal
 residual_diagnostics_plot <- function(fit, title = NULL) {
-  empty <- function(msg) {
-    ggplot2::ggplot() +
-      ggplot2::annotate("text", x = 0, y = 0, label = msg, color = "#6e6e73") +
-      ggplot2::theme_void()
+  # Blank canvas — callers hide the host when there is nothing to show; never
+  # paint a "no residuals" message into the main results panel.
+  empty <- function(msg = NULL) {
+    p <- ggplot2::ggplot() + ggplot2::theme_void()
+    if (!is.null(msg) && nzchar(msg)) {
+      p <- p +
+        ggplot2::annotate("text", x = 0, y = 0, label = msg, color = "#6e6e73")
+    }
+    p
   }
 
   info <- path_fit_residual_info(fit)
-  if (is.null(info)) return(empty("No residuals for this fit."))
+  if (is.null(info)) return(empty())
 
   ok <- is.finite(info$resid) & is.finite(info$fitted)
   r <- info$resid[ok]
   f <- info$fitted[ok]
-  if (length(r) < 3L) return(empty("Not enough finite residuals."))
+  if (length(r) < 3L) return(empty())
 
   qq <- stats::qqnorm(r, plot.it = FALSE)
   qy <- stats::quantile(r, c(0.25, 0.75), names = FALSE, type = 7)
