@@ -24,9 +24,15 @@
 fit_aic_bic_search <- function(state, data, criterion = c("aic", "bic"), max_exploratory = 12L,
                                uncertainty = c("none", "bootstrap", "plausible"),
                                uncertainty_draws = NULL,
-                               uncertainty_progress = NULL) {
+                               uncertainty_progress = NULL,
+                               min_weight = 0,
+                               mark_low_weight = TRUE) {
   criterion <- match.arg(criterion)
   uncertainty <- match.arg(uncertainty)
+  min_weight <- as.numeric(min_weight)
+  if (!is.finite(min_weight) || min_weight < 0) min_weight <- 0
+  if (min_weight > 1) min_weight <- 1
+  mark_low_weight <- isTRUE(mark_low_weight)
 
   # Definitional wires into × are never searched or estimated.
   # Measurement links define factor scores (two-step) and are always kept — not searched.
@@ -218,8 +224,16 @@ fit_aic_bic_search <- function(state, data, criterion = c("aic", "bic"), max_exp
   state_best <- apply_estimates_to_edges(state, best$estimates, included_edge_ids = included_display)
   state_best <- apply_r_squared_to_nodes(state_best, best$r_squared)
   state_best <- apply_weight_labels_to_edges(state_best, wsums)
+  state_best <- mark_edges_below_weight(
+    state_best, wsums,
+    min_weight = min_weight,
+    mark = mark_low_weight
+  )
   averaged_r2 <- full_average_r_squared(comparison, coef_by_model)
-  state_avg <- apply_averaged_estimates_to_state(state, averaged_edges, wsums)
+  state_avg <- apply_averaged_estimates_to_state(
+    state, averaged_edges, wsums,
+    min_weight = if (mark_low_weight) min_weight else 0
+  )
   state_avg <- apply_r_squared_to_nodes(state_avg, averaged_r2)
 
   list(
@@ -245,6 +259,8 @@ fit_aic_bic_search <- function(state, data, criterion = c("aic", "bic"), max_exp
     always = always,
     free = free,
     edge_weights = wsums,
+    min_weight = min_weight,
+    mark_low_weight = mark_low_weight,
     engine = best$engine,
     model_averaged = FALSE,
     uncertainty = best$uncertainty %||% list(method = "none")
@@ -369,6 +385,41 @@ apply_weight_labels_to_edges <- function(state, weight_sums) {
       state$edges$label[i] <- sprintf("%s Σw=%.2f", short, ws)
     } else {
       state$edges$label[i] <- sprintf("%s (Σw=%.2f)", short, ws)
+    }
+  }
+  state
+}
+
+#' Mark confirmatory/exploratory edges with Σw below a threshold as excluded
+#'
+#' Fixed / measurement / definitional wires are never rejected by weight.
+#' @keywords internal
+mark_edges_below_weight <- function(state, weight_sums, min_weight = 0,
+                                    mark = TRUE) {
+  if (!isTRUE(mark) || is.null(state) || !nrow(state$edges)) return(state)
+  min_weight <- as.numeric(min_weight)
+  if (!is.finite(min_weight) || min_weight <= 0) return(state)
+  if (min_weight > 1) min_weight <- 1
+  if (is.null(weight_sums)) weight_sums <- list()
+
+  for (i in seq_len(nrow(state$edges))) {
+    etype <- state$edges$type[[i]]
+    if (!etype %in% c("confirmatory", "exploratory")) next
+    if (is_interaction_node(state, state$edges$to[[i]])) next
+    eid <- state$edges$id[[i]]
+    ws <- if (eid %in% names(weight_sums)) as.numeric(weight_sums[[eid]]) else 0
+    if (!is.finite(ws)) ws <- 0
+    if (ws >= min_weight) next
+
+    state$edges$status[i] <- "excluded"
+    est_val <- state$edges$estimate[i]
+    short <- type_short_label(etype)
+    lv <- if ("level" %in% names(state$edges)) state$edges$level[i] else NA_character_
+    if (!is.na(lv) && nzchar(lv)) short <- paste0(short, "·", lv)
+    state$edges$label[i] <- if (is.finite(est_val)) {
+      sprintf("%s %.2f Σw=%.2f ✕", short, est_val, ws)
+    } else {
+      sprintf("%s Σw=%.2f ✕", short, ws)
     }
   }
   state

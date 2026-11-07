@@ -17,11 +17,13 @@ graph_payload <- function(state, data = NULL) {
       nid <- nodes$id[i]
       col <- nodes$observed_column[i]
       is_ix <- identical(nodes$node_kind[i], "interaction")
-      latent <- !is_ix && (is.na(col) || !nzchar(col))
+      # Respect node_kind: observed nodes stay observed even when unmapped.
+      latent <- is_latent_node(state, nid)
+      mapped <- !is.na(col) && nzchar(as.character(col))
       label <- if (is_ix) {
         nodes$label[i]
-      } else if (!latent) {
-        col
+      } else if (mapped) {
+        as.character(col)
       } else {
         nodes$label[i]
       }
@@ -29,12 +31,32 @@ graph_payload <- function(state, data = NULL) {
       base <- ""
       levels <- character()
       var_kind <- ""
-      if (!latent && !is_ix && !is.null(data) && col %in% names(data)) {
+      if (!latent && !is_ix && mapped && !is.null(data) && col %in% names(data)) {
         coding <- variable_coding_for_node(state, nid, data)
         var_kind <- coding$kind
-        if (identical(coding$kind, "categorical")) {
+        if (coding$kind %in% c("categorical", "binary")) {
           base <- coding$base
+          # Non-base levels drive split ports (same as unmapped path)
           levels <- coding$levels
+        }
+      } else if (!latent && !is_ix && !mapped) {
+        # Unmapped observed: declared sim kind / factor coding owns the canvas ports
+        var_kind <- node_sim_var_kind(state, nid, data = NULL)
+        if (var_kind %in% c("categorical", "binary")) {
+          all_levs <- node_sim_factor_levels(state, nid, data = NULL)
+          meta <- node_factor_coding(state, nid)
+          base <- if (!is.na(meta$base) && nzchar(meta$base)) {
+            as.character(meta$base)
+          } else if (length(all_levs)) {
+            as.character(all_levs[[1]])
+          } else {
+            ""
+          }
+          levels <- if (nzchar(base)) {
+            setdiff(as.character(all_levs), base)
+          } else {
+            as.character(all_levs)
+          }
         }
       }
       r2 <- if ("r_squared" %in% names(nodes)) nodes$r_squared[i] else NA_real_
@@ -56,6 +78,8 @@ graph_payload <- function(state, data = NULL) {
         y = if (is.na(nodes$y[i])) 80 + ((i - 1) %/% 4) * 110 else nodes$y[i],
         latent = latent,
         interaction = is_ix,
+        # Observed (non-latent) with no data column — canvas shows a broken-link mark
+        unmapped = !latent && !is_ix && !mapped,
         model = if (is.null(eng) || is_ix) "" else dv_model_badge(eng),
         r2 = r2_label,
         varKind = var_kind,
@@ -91,6 +115,43 @@ graph_payload <- function(state, data = NULL) {
   }
 
   list(nodes = node_list, edges = edge_list)
+}
+
+#' Compact signature of graph structure (ignore positions / fit cosmetics)
+#'
+#' Used so layout-only `skip_graph_render` updates do not suppress redraws when
+#' edges, ports, or variable kinds actually changed in the same flush.
+#' @keywords internal
+graph_structure_signature <- function(payload) {
+  nodes <- if (is.null(payload)) list() else (payload$nodes %||% list())
+  edges <- if (is.null(payload)) list() else (payload$edges %||% list())
+  nsig <- vapply(nodes, function(n) {
+    levs <- paste(unlist(n$levels %||% list()), collapse = ",")
+    paste(
+      n$id %||% "",
+      isTRUE(n$latent),
+      isTRUE(n$interaction),
+      isTRUE(n$unmapped),
+      n$varKind %||% "",
+      n$base %||% "",
+      n$catMode %||% "",
+      levs,
+      sep = "\t"
+    )
+  }, character(1))
+  esig <- vapply(edges, function(e) {
+    paste(
+      e$id %||% "",
+      e$from %||% "",
+      e$to %||% "",
+      e$type %||% "",
+      e$level %||% "",
+      e$toPort %||% "",
+      e$toLevel %||% "",
+      sep = "\t"
+    )
+  }, character(1))
+  paste(c(sort(nsig), "||", sort(esig)), collapse = "\n")
 }
 
 edge_color <- function(edge) {

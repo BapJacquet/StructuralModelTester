@@ -23,6 +23,11 @@ empty_model_state <- function() {
       factor_base = character(),
       factor_ordered = logical(),
       factor_levels = character(),
+      sim_mean = numeric(),
+      sim_sd = numeric(),
+      sim_resid_sd = numeric(),
+      sim_var_kind = character(),
+      sim_level_props = character(),
       stringsAsFactors = FALSE
     ),
     edges = data.frame(
@@ -40,6 +45,9 @@ empty_model_state <- function() {
       pvalue = numeric(),
       estimate_std = numeric(),
       label = character(),
+      prior_family = character(),
+      prior_mean = numeric(),
+      prior_sd = numeric(),
       stringsAsFactors = FALSE
     ),
     next_node = 1L,
@@ -112,10 +120,16 @@ is_interaction_node <- function(state, node_id) {
   identical(state$nodes$node_kind[idx], "interaction")
 }
 
-#' True if node is a latent (unmapped, not an interaction)
+#' True if node is a latent (explicit kind, or legacy unmapped non-observed)
 #' @keywords internal
 is_latent_node <- function(state, node_id) {
-  !is_observed_node(state, node_id) && !is_interaction_node(state, node_id)
+  state <- ensure_node_kind_columns(state)
+  idx <- match(node_id, state$nodes$id)
+  if (is.na(idx)) return(FALSE)
+  if (identical(state$nodes$node_kind[idx], "interaction")) return(FALSE)
+  if (identical(state$nodes$node_kind[idx], "latent")) return(TRUE)
+  if (identical(state$nodes$node_kind[idx], "observed")) return(FALSE)
+  !is_observed_node(state, node_id)
 }
 
 #' Format one interaction factor for display (optionally with split level)
@@ -156,7 +170,86 @@ ensure_edge_to_port <- function(state) {
   # Drop legacy "none" (points-only) → linear
   none_idx <- which(state$edges$rel_kind == "none")
   if (length(none_idx)) state$edges$rel_kind[none_idx] <- "linear"
+  ensure_edge_priors(state)
+}
+
+#' Default / migrate Normal priors on edges (unstandardized coefficient `b`)
+#'
+#' Stored as Normal(mean, sd) for simulation / later Bayesian work.
+#' Continuous links use mean-centered X so `mean` is a raw slope; factor links
+#' use treatment contrasts. UI: Expected b + Uncertainty. Defaults 0 / 1.
+#' @keywords internal
+ensure_edge_priors <- function(state) {
+  n <- nrow(state$edges)
+  if (!"prior_family" %in% names(state$edges)) {
+    state$edges$prior_family <- rep("normal", n)
+  }
+  if (!"prior_mean" %in% names(state$edges)) {
+    state$edges$prior_mean <- rep(0, n)
+  }
+  if (!"prior_sd" %in% names(state$edges)) {
+    state$edges$prior_sd <- rep(1, n)
+  }
+  if (!n) return(state)
+  miss_f <- is.na(state$edges$prior_family) | !nzchar(as.character(state$edges$prior_family))
+  if (any(miss_f)) state$edges$prior_family[miss_f] <- "normal"
+  bad_f <- !state$edges$prior_family %in% "normal"
+  if (any(bad_f)) state$edges$prior_family[bad_f] <- "normal"
+  miss_m <- is.na(state$edges$prior_mean) | !is.finite(state$edges$prior_mean)
+  if (any(miss_m)) state$edges$prior_mean[miss_m] <- 0
+  miss_s <- is.na(state$edges$prior_sd) | !is.finite(state$edges$prior_sd) |
+    state$edges$prior_sd <= 0
+  if (any(miss_s)) state$edges$prior_sd[miss_s] <- 1
   state
+}
+
+#' Read prior for one edge
+#' @keywords internal
+edge_prior <- function(state, edge_id) {
+  state <- ensure_edge_priors(state)
+  idx <- match(edge_id, state$edges$id)
+  if (is.na(idx)) {
+    return(list(family = "normal", mean = 0, sd = 1))
+  }
+  list(
+    family = as.character(state$edges$prior_family[idx]),
+    mean = as.numeric(state$edges$prior_mean[idx]),
+    sd = as.numeric(state$edges$prior_sd[idx])
+  )
+}
+
+#' Set Normal prior parameters on one edge (does not clear fit estimates)
+#' @keywords internal
+set_edge_prior <- function(state, edge_id, mean = 0, sd = 1, family = "normal") {
+  state <- ensure_edge_priors(state)
+  idx <- match(edge_id, state$edges$id)
+  if (is.na(idx)) return(state)
+  if (!identical(family, "normal")) family <- "normal"
+  mean <- as.numeric(mean)
+  sd <- as.numeric(sd)
+  if (!is.finite(mean)) mean <- 0
+  if (!is.finite(sd) || sd <= 0) sd <- 1
+  state$edges$prior_family[idx] <- family
+  state$edges$prior_mean[idx] <- mean
+  state$edges$prior_sd[idx] <- sd
+  state
+}
+
+#' Structural edges that carry expected-effect priors (excl. measurement / × wires)
+#' @keywords internal
+structural_prior_edges <- function(state) {
+  state <- ensure_edge_to_port(state)
+  if (!nrow(state$edges)) return(state$edges[0, , drop = FALSE])
+  hit <- !state$edges$type %in% c("measurement", "definitional")
+  if (any(hit)) {
+    into_x <- vapply(
+      state$edges$to[hit],
+      function(id) is_interaction_node(state, id),
+      logical(1)
+    )
+    hit[which(hit)] <- hit[which(hit)] & !into_x
+  }
+  state$edges[hit, , drop = FALSE]
 }
 
 #' Set inspect-panel relationship kind for one edge
@@ -443,28 +536,41 @@ ensure_interaction_main_effects <- function(state, ix_id, dv_id = NULL) {
 }
 
 #' Add a node to the model
+#'
+#' @param kind `"observed"` (default when a column is mapped, or for Add node)
+#'   or `"latent"` (Add latent). Observed nodes may be unmapped (`observed_column`
+#'   empty) without becoming latents.
 #' @keywords internal
-add_node <- function(state, label, observed_column = NA_character_) {
+add_node <- function(state, label, observed_column = NA_character_,
+                     kind = NULL) {
   state <- ensure_node_r2_columns(state)
   state <- ensure_node_kind_columns(state)
   state <- ensure_node_rm_columns(state)
   state <- ensure_node_transform_columns(state)
   state <- ensure_node_factor_coding_columns(state)
+  state <- ensure_node_sim_columns(state)
   id <- unique_node_id(state, label)
-  is_obs <- !is.na(observed_column) && nzchar(observed_column)
-  shape <- if (is_obs) "box" else "ellipse"
+  is_obs_col <- !is.na(observed_column) && nzchar(observed_column)
+  if (is.null(kind) || !nzchar(as.character(kind))) {
+    kind <- if (is_obs_col) "observed" else "latent"
+  }
+  kind <- as.character(kind)
+  if (!kind %in% c("observed", "latent")) {
+    kind <- if (is_obs_col) "observed" else "latent"
+  }
+  shape <- if (identical(kind, "observed")) "box" else "ellipse"
   n <- nrow(state$nodes)
   # Stagger new nodes so they are not stacked
   new_row <- data.frame(
     id = id,
     label = label,
-    observed_column = if (is_obs) observed_column else NA_character_,
+    observed_column = if (is_obs_col) as.character(observed_column) else NA_character_,
     shape = shape,
     x = 80 + (n %% 4) * 160,
     y = 80 + (n %/% 4) * 100,
     r_squared = NA_real_,
     r_squared_kind = NA_character_,
-    node_kind = if (is_obs) "observed" else "latent",
+    node_kind = kind,
     factor_a = NA_character_,
     factor_b = NA_character_,
     cat_mode = "split",
@@ -474,6 +580,11 @@ add_node <- function(state, label, observed_column = NA_character_) {
     factor_base = NA_character_,
     factor_ordered = FALSE,
     factor_levels = NA_character_,
+    sim_mean = 0,
+    sim_sd = 1,
+    sim_resid_sd = 1,
+    sim_var_kind = "continuous",
+    sim_level_props = NA_character_,
     stringsAsFactors = FALSE
   )
   state$nodes <- rbind(state$nodes, new_row)
@@ -490,6 +601,7 @@ add_interaction_node <- function(state) {
   state <- ensure_node_rm_columns(state)
   state <- ensure_node_transform_columns(state)
   state <- ensure_node_factor_coding_columns(state)
+  state <- ensure_node_sim_columns(state)
   id <- unique_node_id(state, "ix")
   n <- nrow(state$nodes)
   new_row <- data.frame(
@@ -511,6 +623,11 @@ add_interaction_node <- function(state) {
     factor_base = NA_character_,
     factor_ordered = FALSE,
     factor_levels = NA_character_,
+    sim_mean = 0,
+    sim_sd = 1,
+    sim_resid_sd = 1,
+    sim_var_kind = "continuous",
+    sim_level_props = NA_character_,
     stringsAsFactors = FALSE
   )
   state$nodes <- rbind(state$nodes, new_row)
@@ -628,6 +745,9 @@ add_edge <- function(state, from, to,
       pvalue = NA_real_,
       estimate_std = NA_real_,
       label = lab,
+      prior_family = "normal",
+      prior_mean = 0,
+      prior_sd = 1,
       stringsAsFactors = FALSE
     )
     state$edges <- rbind(state$edges, new_row)
@@ -683,6 +803,9 @@ add_edge <- function(state, from, to,
     pvalue = NA_real_,
     estimate_std = NA_real_,
     label = lab,
+    prior_family = "normal",
+    prior_mean = 0,
+    prior_sd = 1,
     stringsAsFactors = FALSE
   )
   state$edges <- rbind(state$edges, new_row)
@@ -744,6 +867,266 @@ remove_edge <- function(state, edge_id) {
 ensure_node_r2_columns <- function(state) {
   if (!"r_squared" %in% names(state$nodes)) state$nodes$r_squared <- NA_real_
   if (!"r_squared_kind" %in% names(state$nodes)) state$nodes$r_squared_kind <- NA_character_
+  state
+}
+
+#' Ensure simulation generative columns on nodes
+#'
+#' - `sim_mean` / `sim_sd`: exogenous continuous draws (defaults 0 / 1).
+#' - `sim_resid_sd`: structural-DV residual SD on the outcome scale (default 1).
+#' - `sim_var_kind`: declared type for unmapped nodes
+#'   (`continuous` / `categorical` / `binary`).
+#' - `sim_level_props`: encoded level=proportion map for factor simulation.
+#' @keywords internal
+ensure_node_sim_columns <- function(state) {
+  n <- nrow(state$nodes)
+  if (!"sim_mean" %in% names(state$nodes)) {
+    state$nodes$sim_mean <- rep(0, n)
+  }
+  if (!"sim_sd" %in% names(state$nodes)) {
+    state$nodes$sim_sd <- rep(1, n)
+  }
+  if (!"sim_resid_sd" %in% names(state$nodes)) {
+    state$nodes$sim_resid_sd <- rep(1, n)
+  }
+  if (!"sim_var_kind" %in% names(state$nodes)) {
+    state$nodes$sim_var_kind <- rep("continuous", n)
+  }
+  if (!"sim_level_props" %in% names(state$nodes)) {
+    state$nodes$sim_level_props <- rep(NA_character_, n)
+  }
+  if (!n) return(state)
+  miss_m <- is.na(state$nodes$sim_mean) | !is.finite(state$nodes$sim_mean)
+  if (any(miss_m)) state$nodes$sim_mean[miss_m] <- 0
+  miss_s <- is.na(state$nodes$sim_sd) | !is.finite(state$nodes$sim_sd) |
+    state$nodes$sim_sd <= 0
+  if (any(miss_s)) state$nodes$sim_sd[miss_s] <- 1
+  miss_r <- is.na(state$nodes$sim_resid_sd) | !is.finite(state$nodes$sim_resid_sd) |
+    state$nodes$sim_resid_sd <= 0
+  if (any(miss_r)) state$nodes$sim_resid_sd[miss_r] <- 1
+  miss_k <- is.na(state$nodes$sim_var_kind) | !nzchar(state$nodes$sim_var_kind)
+  if (any(miss_k)) state$nodes$sim_var_kind[miss_k] <- "continuous"
+  bad_k <- !state$nodes$sim_var_kind %in% c("continuous", "categorical", "binary")
+  if (any(bad_k)) state$nodes$sim_var_kind[bad_k] <- "continuous"
+  state
+}
+
+#' TRUE if node has no incoming structural paths (exogenous for simulation)
+#' @keywords internal
+node_is_structural_exogenous <- function(state, node_id) {
+  state <- ensure_edge_to_port(state)
+  if (is.na(node_id) || !nzchar(as.character(node_id))) return(FALSE)
+  if (is_interaction_node(state, node_id)) return(FALSE)
+  if (!nrow(state$edges)) return(TRUE)
+  hit <- state$edges$to == node_id &
+    !state$edges$type %in% c("measurement", "definitional")
+  !any(hit)
+}
+
+#' Simulation knobs for one node
+#' @return list(mean, sd, resid_sd)
+#' @keywords internal
+node_sim_params <- function(state, node_id) {
+  state <- ensure_node_sim_columns(state)
+  idx <- match(node_id, state$nodes$id)
+  if (is.na(idx)) {
+    return(list(mean = 0, sd = 1, resid_sd = 1))
+  }
+  list(
+    mean = as.numeric(state$nodes$sim_mean[idx]),
+    sd = as.numeric(state$nodes$sim_sd[idx]),
+    resid_sd = as.numeric(state$nodes$sim_resid_sd[idx])
+  )
+}
+
+#' Set exogenous continuous simulation mean/SD (does not clear fits)
+#' @keywords internal
+set_node_sim_exogenous <- function(state, node_id, mean = 0, sd = 1) {
+  state <- ensure_node_sim_columns(state)
+  idx <- match(node_id, state$nodes$id)
+  if (is.na(idx)) return(state)
+  mean <- as.numeric(mean)
+  sd <- as.numeric(sd)
+  if (!is.finite(mean)) mean <- 0
+  if (!is.finite(sd) || sd <= 0) sd <- 1
+  state$nodes$sim_mean[idx] <- mean
+  state$nodes$sim_sd[idx] <- sd
+  state
+}
+
+#' Set structural-DV residual SD on the outcome scale (does not clear fits)
+#' @keywords internal
+set_node_sim_resid_sd <- function(state, node_id, resid_sd = 1) {
+  state <- ensure_node_sim_columns(state)
+  idx <- match(node_id, state$nodes$id)
+  if (is.na(idx)) return(state)
+  resid_sd <- as.numeric(resid_sd)
+  if (!is.finite(resid_sd) || resid_sd <= 0) resid_sd <- 1
+  state$nodes$sim_resid_sd[idx] <- resid_sd
+  state
+}
+
+#' Encode level → proportion map for simulation storage
+#' @keywords internal
+encode_sim_level_props <- function(props) {
+  if (is.null(props) || !length(props)) return(NA_character_)
+  nms <- names(props)
+  if (is.null(nms)) return(NA_character_)
+  nms <- as.character(nms)
+  vals <- as.numeric(props)
+  keep <- !is.na(nms) & nzchar(nms) & is.finite(vals)
+  if (!any(keep)) return(NA_character_)
+  paste(
+    sprintf("%s=%s", nms[keep], format(vals[keep], scientific = FALSE, trim = TRUE)),
+    collapse = "|"
+  )
+}
+
+#' Decode stored level=prop string to a named numeric vector
+#' @keywords internal
+decode_sim_level_props <- function(text) {
+  if (is.null(text) || length(text) != 1L || is.na(text) || !nzchar(text)) {
+    return(numeric())
+  }
+  parts <- strsplit(as.character(text), "|", fixed = TRUE)[[1]]
+  parts <- trimws(parts)
+  parts <- parts[nzchar(parts)]
+  if (!length(parts)) return(numeric())
+  out <- numeric(length(parts))
+  nms <- character(length(parts))
+  for (i in seq_along(parts)) {
+    kv <- strsplit(parts[[i]], "=", fixed = TRUE)[[1]]
+    if (length(kv) < 2L) {
+      nms[[i]] <- trimws(kv[[1]])
+      out[[i]] <- NA_real_
+    } else {
+      nms[[i]] <- trimws(kv[[1]])
+      out[[i]] <- suppressWarnings(as.numeric(trimws(kv[[2]])))
+    }
+  }
+  keep <- nzchar(nms)
+  stats::setNames(out[keep], nms[keep])
+}
+
+#' Clip and renormalize proportions (equal weights if empty / all zero)
+#' @keywords internal
+normalize_sim_props <- function(props, levels) {
+  levels <- unique(as.character(levels))
+  levels <- levels[!is.na(levels) & nzchar(levels)]
+  if (!length(levels)) return(numeric())
+  raw <- rep(NA_real_, length(levels))
+  names(raw) <- levels
+  if (!is.null(props) && length(props)) {
+    hit <- intersect(names(props), levels)
+    if (length(hit)) raw[hit] <- as.numeric(props[hit])
+  }
+  raw[!is.finite(raw) | raw < 0] <- 0
+  s <- sum(raw)
+  if (!is.finite(s) || s <= 0) {
+    return(stats::setNames(rep(1 / length(levels), length(levels)), levels))
+  }
+  raw / s
+}
+
+#' Declared or data-inferred variable kind for simulation
+#'
+#' Mapped columns win via `classify_variable`. Unmapped use `sim_var_kind`.
+#' @keywords internal
+node_sim_var_kind <- function(state, node_id, data = NULL) {
+  state <- ensure_node_sim_columns(state)
+  idx <- match(node_id, state$nodes$id)
+  if (is.na(idx)) return("continuous")
+  col <- state$nodes$observed_column[idx]
+  if (!is.na(col) && nzchar(col) && !is.null(data) && col %in% names(data)) {
+    kind <- classify_variable(data[[col]])
+    if (kind %in% c("continuous", "categorical", "binary")) return(kind)
+  }
+  kind <- as.character(state$nodes$sim_var_kind[idx])
+  if (!kind %in% c("continuous", "categorical", "binary")) kind <- "continuous"
+  kind
+}
+
+#' Set declared simulation variable kind (unmapped authority)
+#' @keywords internal
+set_node_sim_var_kind <- function(state, node_id,
+                                  kind = c("continuous", "categorical", "binary")) {
+  kind <- match.arg(kind)
+  state <- ensure_node_sim_columns(state)
+  state <- ensure_node_factor_coding_columns(state)
+  idx <- match(node_id, state$nodes$id)
+  if (is.na(idx)) return(state)
+  state$nodes$sim_var_kind[idx] <- kind
+  if (identical(kind, "binary")) {
+    meta <- node_factor_coding(state, node_id)
+    levs <- meta$levels
+    if (!length(levs)) {
+      base <- if (!is.na(meta$base) && nzchar(meta$base)) meta$base else "0"
+      other <- if (identical(base, "1")) "0" else "1"
+      levs <- c(base, other)
+      state <- set_node_factor_coding(
+        state, node_id,
+        base = base, levels = levs, data = NULL
+      )
+    }
+  }
+  if (identical(kind, "categorical")) {
+    meta <- node_factor_coding(state, node_id)
+    if (!length(meta$levels)) {
+      state <- set_node_factor_coding(
+        state, node_id,
+        base = "A", levels = c("A", "B", "C"), data = NULL
+      )
+    }
+  }
+  state
+}
+
+#' Level names used when simulating a factor node
+#' @keywords internal
+node_sim_factor_levels <- function(state, node_id, data = NULL) {
+  state <- ensure_node_factor_coding_columns(state)
+  meta <- node_factor_coding(state, node_id)
+  kind <- node_sim_var_kind(state, node_id, data = data)
+  col <- state$nodes$observed_column[match(node_id, state$nodes$id)]
+  data_levs <- character()
+  if (!is.na(col) && nzchar(col) && !is.null(data) && col %in% names(data)) {
+    coding <- variable_coding_for_node(state, node_id, data)
+    data_levs <- as.character(coding$all_levels %||% character())
+  }
+  levs <- meta$levels
+  if (!length(levs) && length(data_levs)) levs <- data_levs
+  if (!length(levs) && identical(kind, "binary")) levs <- c("0", "1")
+  if (!length(levs) && identical(kind, "categorical")) levs <- c("A", "B", "C")
+  base <- meta$base
+  if (is.na(base) || !nzchar(base)) {
+    base <- if (length(data_levs)) data_levs[[1]] else if (length(levs)) levs[[1]] else NA_character_
+  }
+  if (!is.na(base) && nzchar(base)) {
+    levs <- unique(c(base, setdiff(levs, base)))
+  }
+  levs[!is.na(levs) & nzchar(levs)]
+}
+
+#' Named proportions for simulating a factor node
+#' @keywords internal
+node_sim_level_props <- function(state, node_id, data = NULL) {
+  state <- ensure_node_sim_columns(state)
+  levs <- node_sim_factor_levels(state, node_id, data = data)
+  idx <- match(node_id, state$nodes$id)
+  raw <- if (is.na(idx)) numeric() else decode_sim_level_props(state$nodes$sim_level_props[idx])
+  normalize_sim_props(raw, levs)
+}
+
+#' Store level proportions for simulation (does not clear fits)
+#' @keywords internal
+set_node_sim_level_props <- function(state, node_id, props) {
+  state <- ensure_node_sim_columns(state)
+  idx <- match(node_id, state$nodes$id)
+  if (is.na(idx)) return(state)
+  levs <- names(props)
+  if (is.null(levs)) levs <- character()
+  norm <- normalize_sim_props(props, levs)
+  state$nodes$sim_level_props[idx] <- encode_sim_level_props(norm)
   state
 }
 
@@ -1195,9 +1578,11 @@ node_display_name <- function(state, node_id) {
 }
 
 is_observed_node <- function(state, node_id) {
+  state <- ensure_node_kind_columns(state)
   if (is_interaction_node(state, node_id)) return(FALSE)
   idx <- match(node_id, state$nodes$id)
   if (is.na(idx)) return(FALSE)
+  if (identical(state$nodes$node_kind[idx], "observed")) return(TRUE)
   col <- state$nodes$observed_column[idx]
   !is.na(col) && nzchar(col)
 }

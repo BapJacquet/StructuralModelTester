@@ -286,6 +286,7 @@
     }
 
     el.className = "smt-node" + (n.latent ? " latent" : " observed");
+    if (!n.latent && n.unmapped) el.classList.add("smt-unmapped");
 
     var levels = normalizeLevels(n.levels);
     var isCat = levels.length > 0;
@@ -297,10 +298,30 @@
 
     var title = document.createElement("div");
     title.className = "smt-node-title";
-    title.textContent = n.label || n.id;
+    var titleRow = document.createElement("div");
+    titleRow.className = "smt-node-title-row";
+    var titleText = document.createElement("span");
+    titleText.className = "smt-node-title-text";
+    titleText.textContent = n.label || n.id;
+    titleRow.appendChild(titleText);
+    if (!n.latent && n.unmapped) {
+      var unmapIcon = document.createElement("span");
+      unmapIcon.className = "smt-node-unmap-icon";
+      unmapIcon.title = "Not mapped to a data column";
+      unmapIcon.setAttribute("aria-label", "Not mapped to a data column");
+      unmapIcon.innerHTML =
+        '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">' +
+        '<path d="M3.2 8.8a2.4 2.4 0 0 1 0-3.4L4.5 4.1" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>' +
+        '<path d="M8.8 3.2a2.4 2.4 0 0 1 0 3.4L7.5 7.9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>' +
+        '<path d="M2 2l8 8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>' +
+        "</svg>";
+      titleRow.appendChild(unmapIcon);
+    }
+    title.appendChild(titleRow);
 
     var subs = [];
     if (n.latent) subs.push({ text: "latent", cls: "smt-node-sub-latent" });
+    // Unmapped mark is the title-row icon only (no redundant "unmapped" subtitle)
     if (isCat && n.base) {
       subs.push({ text: "base: " + n.base, cls: "smt-node-sub-base" });
     }
@@ -436,6 +457,7 @@
         x: n.x || 80,
         y: n.y || 80,
         latent: !!n.latent,
+        unmapped: !!n.unmapped,
         base: n.base || "",
         levels: normalizeLevels(n.levels),
         el: el
@@ -668,15 +690,26 @@
     });
 
     document.addEventListener("keydown", function (ev) {
-      if (ev.key !== "Delete" && ev.key !== "Backspace") return;
+      var isDelete = ev.key === "Delete" || ev.code === "Delete";
+      var isBackspace = ev.key === "Backspace" || ev.code === "Backspace";
+      if (!isDelete && !isBackspace) return;
+      if (!selected.nodes.length && !selected.edges.length) return;
+
       var t = ev.target;
       if (t) {
         var tag = (t.tagName || "").toUpperCase();
-        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-        if (t.isContentEditable) return;
+        var editing =
+          tag === "TEXTAREA" ||
+          t.isContentEditable ||
+          (tag === "INPUT" &&
+            /^(text|search|password|email|url|number)$/i.test(t.type || "text"));
+        // Backspace must never steal from text fields. Delete/Suppr should still
+        // remove the canvas selection when focus jumped into the inspector
+        // (selects / numerics) after clicking a node.
+        if (isBackspace && (editing || tag === "INPUT" || tag === "SELECT")) return;
+        if (isDelete && (tag === "TEXTAREA" || t.isContentEditable)) return;
       }
-      if (!selected.nodes.length && !selected.edges.length) return;
-      // Prevent browser Backspace navigation when deleting a selection
+
       ev.preventDefault();
       Shiny.setInputValue("smt_delete_selection", {
         nonce: Date.now()

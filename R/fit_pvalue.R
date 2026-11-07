@@ -6,18 +6,23 @@
 #'
 #' @param state Model state.
 #' @param data Data frame.
-#' @param alpha Significance level for marking exploratory edges.
+#' @param alpha Significance level for marking exploratory edges / confirmatory tests.
 #' @param mark_nonsig If TRUE, exploratory edges with p > alpha are marked excluded.
+#' @param conf_adjust Multiplicity adjustment applied to confirmatory edge p-values
+#'   (`none`, `bonferroni`, `holm`, `BH`). Adjusted p-values are written onto
+#'   confirmatory edges (and matching estimate rows) for display and detection.
 #' @param uncertainty Post-selection uncertainty: "none", "bootstrap", or "plausible".
 #' @param uncertainty_draws Number of bootstrap/PV draws (defaults by method).
 #' @param uncertainty_progress Optional function(progress_i, total) callback.
 #' @return A list with updated `state`, `fit`, `estimates`, `fit_measures`, and `syntax`.
 #' @export
 fit_pvalue_model <- function(state, data, alpha = 0.05, mark_nonsig = TRUE,
+                             conf_adjust = c("none", "bonferroni", "holm", "BH"),
                              uncertainty = c("none", "bootstrap", "plausible"),
                              uncertainty_draws = NULL,
                              uncertainty_progress = NULL) {
   uncertainty <- match.arg(uncertainty)
+  conf_adjust <- match.arg(conf_adjust)
   edge_ids <- analyzable_edge_ids(state)
   # Still mark definitional wires as included (no coefficients)
   all_display_ids <- unique(c(edge_ids, state$edges$id[
@@ -33,6 +38,9 @@ fit_pvalue_model <- function(state, data, alpha = 0.05, mark_nonsig = TRUE,
   )
   state2 <- apply_estimates_to_edges(state, fitted$estimates, included_edge_ids = all_display_ids)
   state2 <- apply_r_squared_to_nodes(state2, fitted$r_squared)
+  adj <- apply_confirmatory_p_adjust(state2, fitted$estimates, method = conf_adjust)
+  state2 <- adj$state
+  fitted$estimates <- adj$estimates
 
   if (mark_nonsig && nrow(state2$edges)) {
     for (i in seq_len(nrow(state2$edges))) {
@@ -61,8 +69,54 @@ fit_pvalue_model <- function(state, data, alpha = 0.05, mark_nonsig = TRUE,
     syntax = fitted$syntax,
     comparison = NULL,
     engine = fitted$engine,
-    uncertainty = fitted$uncertainty %||% list(method = "none")
+    uncertainty = fitted$uncertainty %||% list(method = "none"),
+    conf_adjust = conf_adjust
   )
+}
+
+#' Adjust confirmatory edge p-values for multiplicity
+#' @keywords internal
+apply_confirmatory_p_adjust <- function(state, estimates, method = "none") {
+  method <- as.character(method %||% "none")
+  if (!method %in% c("bonferroni", "holm", "BH")) {
+    return(list(state = state, estimates = estimates))
+  }
+  if (is.null(state) || !nrow(state$edges)) {
+    return(list(state = state, estimates = estimates))
+  }
+  conf_idx <- which(
+    state$edges$type == "confirmatory" &
+      state$edges$id %in% analyzable_edge_ids(state, state$edges$id)
+  )
+  if (!length(conf_idx)) return(list(state = state, estimates = estimates))
+  raw <- as.numeric(state$edges$pvalue[conf_idx])
+  adj <- stats::p.adjust(raw, method = method)
+  state$edges$pvalue[conf_idx] <- adj
+
+  # Mirror onto estimate rows matched by edge endpoints when possible
+  if (!is.null(estimates) && nrow(estimates) && "pvalue" %in% names(estimates)) {
+    for (j in seq_along(conf_idx)) {
+      i <- conf_idx[[j]]
+      eid <- state$edges$id[[i]]
+      from <- state$edges$from[[i]]
+      to <- state$edges$to[[i]]
+      from_nm <- tryCatch(lavaan_var_name(state, from), error = function(e) NA_character_)
+      to_nm <- tryCatch(lavaan_var_name(state, to), error = function(e) NA_character_)
+      if (is.na(from_nm) || is.na(to_nm)) next
+      hit <- which(
+        estimates$op == "~" &
+          estimates$rhs == from_nm &
+          estimates$lhs == to_nm
+      )
+      lv <- if ("level" %in% names(state$edges)) state$edges$level[[i]] else NA_character_
+      if (!is.na(lv) && nzchar(lv) && "level" %in% names(estimates)) {
+        hit2 <- hit[!is.na(estimates$level[hit]) & estimates$level[hit] == lv]
+        if (length(hit2)) hit <- hit2
+      }
+      if (length(hit)) estimates$pvalue[hit] <- adj[[j]]
+    }
+  }
+  list(state = state, estimates = estimates)
 }
 
 #' @keywords internal

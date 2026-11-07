@@ -34,7 +34,8 @@ model_from_json <- function(json) {
     "id", "label", "observed_column", "shape", "x", "y",
     "r_squared", "r_squared_kind", "node_kind", "factor_a", "factor_b", "cat_mode",
     "repeated_measures", "cluster_column", "dv_transform",
-    "factor_base", "factor_ordered", "factor_levels"
+    "factor_base", "factor_ordered", "factor_levels",
+    "sim_mean", "sim_sd", "sim_resid_sd", "sim_var_kind", "sim_level_props"
   )
   for (nm in need_n) {
     if (!nm %in% names(nodes)) {
@@ -42,8 +43,14 @@ model_from_json <- function(json) {
         "ellipse"
       } else if (nm %in% c("x", "y", "r_squared")) {
         NA_real_
+      } else if (nm == "sim_mean") {
+        0
+      } else if (nm %in% c("sim_sd", "sim_resid_sd")) {
+        1
       } else if (nm == "cat_mode") {
         "split"
+      } else if (nm == "sim_var_kind") {
+        "continuous"
       } else if (nm %in% c("repeated_measures", "factor_ordered")) {
         FALSE
       } else if (nm == "dv_transform") {
@@ -81,6 +88,15 @@ model_from_json <- function(json) {
     miss_fo <- is.na(nodes$factor_ordered)
     if (any(miss_fo)) nodes$factor_ordered[miss_fo] <- FALSE
     nodes$factor_levels <- as.character(nodes$factor_levels)
+    nodes$sim_mean <- as.numeric(nodes$sim_mean)
+    nodes$sim_sd <- as.numeric(nodes$sim_sd)
+    nodes$sim_resid_sd <- as.numeric(nodes$sim_resid_sd)
+    nodes$sim_var_kind <- as.character(nodes$sim_var_kind)
+    miss_sk <- is.na(nodes$sim_var_kind) | !nzchar(nodes$sim_var_kind)
+    if (any(miss_sk)) nodes$sim_var_kind[miss_sk] <- "continuous"
+    bad_sk <- !nodes$sim_var_kind %in% c("continuous", "categorical", "binary")
+    if (any(bad_sk)) nodes$sim_var_kind[bad_sk] <- "continuous"
+    nodes$sim_level_props <- as.character(nodes$sim_level_props)
     # Infer node_kind when missing from older projects
     miss_kind <- is.na(nodes$node_kind) | !nzchar(nodes$node_kind)
     if (any(miss_kind)) {
@@ -106,7 +122,8 @@ model_from_json <- function(json) {
 
   need_e <- c(
     "id", "from", "to", "type", "level", "to_port", "to_level", "rel_kind", "status",
-    "estimate", "se", "pvalue", "estimate_std", "label"
+    "estimate", "se", "pvalue", "estimate_std", "label",
+    "prior_family", "prior_mean", "prior_sd"
   )
   if (!nrow(edges) || is.null(payload$edges)) {
     edges <- state$edges
@@ -115,6 +132,12 @@ model_from_json <- function(json) {
       if (!nm %in% names(edges)) {
         edges[[nm]] <- if (nm %in% c("estimate", "se", "pvalue", "estimate_std")) {
           NA_real_
+        } else if (nm == "prior_mean") {
+          0
+        } else if (nm == "prior_sd") {
+          1
+        } else if (nm == "prior_family") {
+          "normal"
         } else if (nm == "status") {
           "pending"
         } else if (nm == "rel_kind") {
@@ -129,6 +152,9 @@ model_from_json <- function(json) {
     edges$se <- as.numeric(edges$se)
     edges$pvalue <- as.numeric(edges$pvalue)
     edges$estimate_std <- as.numeric(edges$estimate_std)
+    edges$prior_mean <- as.numeric(edges$prior_mean)
+    edges$prior_sd <- as.numeric(edges$prior_sd)
+    edges$prior_family <- as.character(edges$prior_family)
     edges$level <- as.character(edges$level)
     edges$to_port <- as.character(edges$to_port)
     edges$to_level <- as.character(edges$to_level)
@@ -142,6 +168,8 @@ model_from_json <- function(json) {
   state$next_node <- as.integer(payload$next_node %||% 1L)
   state$next_edge <- as.integer(payload$next_edge %||% 1L)
   state <- ensure_node_kind_columns(state)
+  state <- ensure_node_sim_columns(state)
+  state <- ensure_edge_priors(state)
   attr(state, "prepare") <- prepare_from_list(payload$prepare)
   state
 }

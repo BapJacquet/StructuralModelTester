@@ -669,6 +669,33 @@ body.smt-resizing * {
   border-color: #e2b6b6;
 }
 
+.smt-status-sim {
+  color: #9a3412;
+  background: #fff7ed;
+  border-color: #fdba74;
+}
+
+.smt-status-sim .smt-status-icon {
+  color: #c2410c;
+}
+
+.smt-sim-results-banner {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid #fdba74;
+  border-left: 4px solid #ea580c;
+  border-radius: 4px;
+  background: #fff7ed;
+  color: #9a3412;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.smt-sim-results-banner strong {
+  font-weight: 700;
+  color: #c2410c;
+}
+
 .smt-inspector {
   margin: 8px 0 14px;
   padding: 10px 10px 8px;
@@ -700,6 +727,16 @@ body.smt-resizing * {
   color: var(--smt-muted);
 }
 
+.smt-sim-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 12px;
+}
+
+.smt-sim-fields .shiny-input-container {
+  margin-bottom: 4px;
+}
+
 .smt-inspector .shiny-input-container {
   margin-bottom: 8px;
 }
@@ -714,6 +751,37 @@ body.smt-resizing * {
 
 .smt-resid-plot-wrap .shiny-plot-output {
   margin: 0;
+}
+
+.smt-power-plot-wrap {
+  margin: 6px 0 12px;
+  border: 1px solid var(--smt-border);
+  border-radius: 4px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.smt-power-plot-wrap .shiny-plot-output {
+  margin: 0;
+}
+
+.smt-power-recommend {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid #86efac;
+  border-left: 4px solid #16a34a;
+  border-radius: 4px;
+  background: #f0fdf4;
+  color: #14532d;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.smt-power-recommend-miss {
+  border-color: #fdba74;
+  border-left-color: #ea580c;
+  background: #fff7ed;
+  color: #9a3412;
 }
 
 .smt-results pre {
@@ -823,16 +891,18 @@ body.smt-resizing-v * {
 
 .smt-edge-plot-header {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: flex-start;
+  gap: 8px 14px;
   flex: 0 0 auto;
   margin-bottom: 4px;
 }
 
 .smt-edge-plot-title {
   margin: 0;
-  flex: 1 1 auto;
+  flex: 0 1 auto;
+  align-self: center;
 }
 
 .smt-edge-plot-header .form-group {
@@ -842,6 +912,31 @@ body.smt-resizing-v * {
 .smt-edge-plot-header .selectize-control,
 .smt-edge-plot-header select {
   margin: 0;
+  font-size: 12px;
+}
+
+.smt-edge-prior-inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px 12px;
+  margin-left: auto;
+}
+
+.smt-edge-prior-inline .shiny-input-container {
+  margin-bottom: 0;
+}
+
+.smt-edge-prior-inline label.control-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--smt-muted);
+  margin-bottom: 2px;
+}
+
+.smt-edge-prior-inline input {
+  height: 28px !important;
+  min-height: 28px !important;
   font-size: 12px;
 }
 
@@ -1048,6 +1143,38 @@ body.smt-resizing-v * {
   color: var(--smt-text);
   text-align: center;
   line-height: 1.25;
+}
+
+.smt-node-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.smt-node-title-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.smt-node-unmap-icon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #b45309;
+  line-height: 0;
+}
+
+.smt-node.smt-unmapped {
+  border-style: dashed;
+  border-color: #d4a373;
+}
+
+.smt-node-sub-unmapped {
+  color: #b45309;
 }
 
 .smt-node-sub {

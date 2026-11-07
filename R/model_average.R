@@ -169,9 +169,15 @@ full_average_r_squared <- function(comparison, coef_by_model) {
 
 #' Apply model-averaged edge estimates onto state for canvas / tables
 #' @keywords internal
-apply_averaged_estimates_to_state <- function(state, avg_edges, weight_sums) {
+apply_averaged_estimates_to_state <- function(state, avg_edges, weight_sums,
+                                             min_weight = 0.05) {
   state <- clear_fit_results(state)
   if (!nrow(state$edges) || is.null(avg_edges) || !nrow(avg_edges)) return(state)
+  min_weight <- as.numeric(min_weight)
+  if (!is.finite(min_weight) || min_weight < 0) min_weight <- 0
+  if (min_weight > 1) min_weight <- 1
+  # Tiny default floor so Σw≈0 links stay dashed when threshold is 0
+  keep_floor <- if (min_weight > 0) min_weight else 0.05
 
   for (i in seq_len(nrow(state$edges))) {
     eid <- state$edges$id[i]
@@ -222,12 +228,13 @@ apply_averaged_estimates_to_state <- function(state, avg_edges, weight_sums) {
       }
       next
     }
-    # Keep links with any support visible; mark tiny Σw as excluded for dashes
-    state$edges$status[i] <- if (is.finite(ws) && ws >= 0.05) "included" else "excluded"
-    state$edges$label[i] <- sprintf(
-      "%.2f (SE=%.2f, Σw=%.2f)",
-      est, se, ws
-    )
+    keep <- is.finite(ws) && ws >= keep_floor
+    state$edges$status[i] <- if (keep) "included" else "excluded"
+    state$edges$label[i] <- if (keep) {
+      sprintf("%.2f (SE=%.2f, Σw=%.2f)", est, se, ws)
+    } else {
+      sprintf("%.2f (SE=%.2f, Σw=%.2f) ✕", est, se, ws)
+    }
   }
   state
 }
@@ -254,7 +261,14 @@ apply_best_estimates_from_result <- function(result, state_template) {
     r2 <- r_squared_from_fitted(result, state_template)
   }
   st <- apply_r_squared_to_nodes(st, r2)
-  apply_weight_labels_to_edges(st, result$edge_weights %||% list())
+  st <- apply_weight_labels_to_edges(st, result$edge_weights %||% list())
+  mark_edges_below_weight(
+    st,
+    result$edge_weights %||% list(),
+    min_weight = result$min_weight %||% 0,
+    mark = isTRUE(result$mark_low_weight %||% FALSE) ||
+      (is.finite(result$min_weight %||% 0) && (result$min_weight %||% 0) > 0)
+  )
 }
 
 #' HTML equations using full model-averaged coefficients
