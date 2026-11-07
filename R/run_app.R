@@ -1,6 +1,6 @@
 #' Launch the Structural Model Tester app
 #'
-#' Opens a Jamovi-inspired Shiny interface in the browser.
+#' Opens the Structural Model Tester Shiny interface in the browser.
 #'
 #' @param launch.browser Logical; open in the system browser.
 #' @param ... Passed to [shiny::runApp()].

@@ -57,23 +57,98 @@ sim_center <- function(x) {
   out
 }
 
-#' Draw one exogenous simulation column for a node
+#' Draw one exogenous continuous simulation column
+#' @keywords internal
+sim_draw_continuous_column <- function(state, node_id, n) {
+  sp <- node_sim_params(state, node_id)
+  stats::rnorm(n, mean = sp$mean, sd = sp$sd)
+}
+
+#' Assign factor levels across `n` units (subjects or rows)
+#'
+#' Probability mode: multinomial draws. Exact mode: balanced tiling of
+#' per-level counts (shuffled), recycled to length `n`.
+#' @keywords internal
+sim_assign_factor_levels <- function(state, node_id, n) {
+  levs <- node_sim_factor_levels(state, node_id, data = NULL)
+  if (!length(levs)) {
+    return(sim_draw_continuous_column(state, node_id, n))
+  }
+  alloc <- node_sim_alloc_mode(state, node_id)
+  if (identical(alloc, "exact")) {
+    counts <- node_sim_level_counts(state, node_id, data = NULL)
+    w <- as.integer(counts[levs])
+    w[!is.finite(w) | is.na(w) | w < 0L] <- 0L
+    if (sum(w) <= 0L) w[] <- 1L
+    block <- rep(levs, times = w)
+    if (!length(block)) block <- levs
+    reps <- max(1L, as.integer(ceiling(n / length(block))))
+    pool <- sample(rep(block, times = reps))
+    return(factor(pool[seq_len(n)], levels = levs))
+  }
+  props <- node_sim_level_props(state, node_id, data = NULL)
+  props <- normalize_sim_props(props, levs)
+  drawn <- sample(levs, size = n, replace = TRUE, prob = as.numeric(props[levs]))
+  factor(drawn, levels = levs)
+}
+
+#' Draw one exogenous simulation column for a node (legacy row-wise helper)
 #' @keywords internal
 sim_draw_node_column <- function(state, node_id, n) {
   kind <- node_sim_var_kind(state, node_id, data = NULL)
   if (kind %in% c("categorical", "binary")) {
-    levs <- node_sim_factor_levels(state, node_id, data = NULL)
-    props <- node_sim_level_props(state, node_id, data = NULL)
-    if (!length(levs)) {
-      sp <- node_sim_params(state, node_id)
-      return(stats::rnorm(n, mean = sp$mean, sd = sp$sd))
-    }
-    props <- normalize_sim_props(props, levs)
-    drawn <- sample(levs, size = n, replace = TRUE, prob = as.numeric(props[levs]))
-    return(factor(drawn, levels = levs))
+    return(sim_assign_factor_levels(state, node_id, n))
   }
-  sp <- node_sim_params(state, node_id)
-  stats::rnorm(n, mean = sp$mean, sd = sp$sd)
+  sim_draw_continuous_column(state, node_id, n)
+}
+
+#' Within-subject cell grid from all intra categorical factors
+#'
+#' Cartesian product of levels; cell weight = product of exact counts
+#' (probability-mode intra factors contribute weight 1 per level).
+#' @return data.frame of factor columns (already expanded by weight), or
+#'   NULL when there are no intra factors.
+#' @keywords internal
+sim_build_intra_design <- function(state, intra_ids) {
+  if (!length(intra_ids)) return(NULL)
+  level_lists <- list()
+  weights_by_factor <- list()
+  col_names <- character(length(intra_ids))
+  for (i in seq_along(intra_ids)) {
+    id <- intra_ids[[i]]
+    nm <- node_sim_column(state, id)
+    levs <- node_sim_factor_levels(state, id, data = NULL)
+    if (!length(levs)) {
+      stop(
+        sprintf("Intra factor '%s' needs at least one level to simulate.", nm),
+        call. = FALSE
+      )
+    }
+    col_names[[i]] <- nm
+    level_lists[[nm]] <- levs
+    if (identical(node_sim_alloc_mode(state, id), "exact")) {
+      counts <- node_sim_level_counts(state, id, data = NULL)
+      w <- as.integer(counts[levs])
+      w[!is.finite(w) | is.na(w) | w < 0L] <- 0L
+      if (sum(w) <= 0L) w[] <- 1L
+      weights_by_factor[[nm]] <- stats::setNames(w, levs)
+    } else {
+      weights_by_factor[[nm]] <- stats::setNames(rep(1L, length(levs)), levs)
+    }
+  }
+  grid <- expand.grid(level_lists, KEEP.OUT.ATTRS = FALSE, stringsAsFactors = FALSE)
+  w <- rep(1L, nrow(grid))
+  for (nm in names(weights_by_factor)) {
+    w <- w * as.integer(weights_by_factor[[nm]][as.character(grid[[nm]])])
+  }
+  w[!is.finite(w) | is.na(w) | w < 0L] <- 0L
+  if (all(w == 0L)) w[] <- 1L
+  expanded <- grid[rep(seq_len(nrow(grid)), times = w), , drop = FALSE]
+  rownames(expanded) <- NULL
+  for (nm in names(level_lists)) {
+    expanded[[nm]] <- factor(as.character(expanded[[nm]]), levels = level_lists[[nm]])
+  }
+  expanded
 }
 
 #' Numeric predictor contribution for a simulated edge
@@ -187,13 +262,18 @@ sim_interaction_predictor <- function(state, dat, ix_id) {
 #' Simulate a path dataset from priors + node sim knobs
 #'
 #' Exogenous continuous nodes: Normal(sim_mean, sim_sd).
-#' Exogenous categorical/binary: multinomial draws with `sim_level_props`.
+#' Exogenous categorical/binary: probability (`sim_level_props`) or exact
+#' (`sim_level_counts`) allocation; `sim_design_mode` `"intra"` factors expand
+#' a within-subject Cartesian design (Samples = subjects), `"inter"` factors
+#' are assigned once per subject (or once per row when all factors are inter).
 #' Structural DVs (topo order): edge prior means × predictors — unstandardized
 #' continuous mains (`b` on mean-centered X), treatment-coded factor mains, and
 #' interaction products coded like the fit (binary 0/1, continuous centered) —
 #' plus N(0, sim_resid_sd) on the outcome scale.
 #'
-#' @return A data frame with `n` rows.
+#' When any factor is intra, the result includes a `subject` column.
+#'
+#' @return A data frame (`n` rows, or `n × within-cells` when intra factors exist).
 #' @keywords internal
 simulate_path_data <- function(state, n = 500L, seed = 1L) {
   n <- as.integer(n)
@@ -213,20 +293,73 @@ simulate_path_data <- function(state, n = 500L, seed = 1L) {
   state <- ensure_edge_priors(state)
 
   set.seed(seed)
-  dat <- list()
 
+  exog_ids <- character()
   for (id in state$nodes$id) {
-    if (!node_is_structural_exogenous(state, id)) next
     if (is_interaction_node(state, id)) next
+    if (!node_is_structural_exogenous(state, id)) next
+    exog_ids <- c(exog_ids, id)
+  }
+
+  cat_ids <- character()
+  cont_ids <- character()
+  for (id in exog_ids) {
+    kind <- node_sim_var_kind(state, id, data = NULL)
+    if (kind %in% c("categorical", "binary")) {
+      cat_ids <- c(cat_ids, id)
+    } else {
+      cont_ids <- c(cont_ids, id)
+    }
+  }
+  intra_ids <- cat_ids[
+    vapply(cat_ids, function(id) identical(node_sim_design_mode(state, id), "intra"), logical(1))
+  ]
+  inter_ids <- setdiff(cat_ids, intra_ids)
+  has_intra <- length(intra_ids) > 0L
+
+  n_subj <- n
+  within <- sim_build_intra_design(state, intra_ids)
+  n_within <- if (is.null(within)) 1L else nrow(within)
+  if (has_intra && n_within < 1L) {
+    stop("Intra design produced no within-subject cells.", call. = FALSE)
+  }
+  n_rows <- as.integer(n_subj * n_within)
+
+  dat <- list()
+  if (has_intra) {
+    dat[["subject"]] <- factor(
+      rep(sprintf("S%04d", seq_len(n_subj)), each = n_within),
+      levels = sprintf("S%04d", seq_len(n_subj))
+    )
+    within_all <- within[rep(seq_len(n_within), times = n_subj), , drop = FALSE]
+    rownames(within_all) <- NULL
+    for (nm in names(within_all)) {
+      dat[[nm]] <- within_all[[nm]]
+    }
+  }
+
+  for (id in inter_ids) {
     nm <- node_sim_column(state, id)
-    dat[[nm]] <- sim_draw_node_column(state, id, n)
+    vals_subj <- sim_assign_factor_levels(state, id, n_subj)
+    dat[[nm]] <- if (has_intra) {
+      factor(rep(as.character(vals_subj), each = n_within), levels = levels(vals_subj))
+    } else {
+      vals_subj
+    }
+  }
+
+  for (id in cont_ids) {
+    nm <- node_sim_column(state, id)
+    vals_subj <- sim_draw_continuous_column(state, id, n_subj)
+    dat[[nm]] <- if (has_intra) rep(vals_subj, each = n_within) else vals_subj
   }
 
   ensure_col <- function(id) {
     if (is_interaction_node(state, id)) return(invisible(NULL))
     nm <- node_sim_column(state, id)
     if (nm %in% names(dat)) return(invisible(NULL))
-    dat[[nm]] <<- sim_draw_node_column(state, id, n)
+    # Fallback for mediators referenced before generation — row-wise draw
+    dat[[nm]] <<- sim_draw_node_column(state, id, n_rows)
     invisible(NULL)
   }
 
@@ -240,7 +373,7 @@ simulate_path_data <- function(state, n = 500L, seed = 1L) {
   for (dv in dv_order) {
     dv_nm <- node_sim_column(state, dv)
     inc <- struct[struct$to == dv, , drop = FALSE]
-    eta <- rep(0, n)
+    eta <- rep(0, n_rows)
 
     if (nrow(inc)) {
       for (i in seq_len(nrow(inc))) {
@@ -277,7 +410,7 @@ simulate_path_data <- function(state, n = 500L, seed = 1L) {
     resid_sd <- node_sim_params(state, dv)$resid_sd
     if (!is.finite(resid_sd) || resid_sd <= 0) resid_sd <- 1
     # Factor DVs are not simulated yet — always continuous outcome scale
-    dat[[dv_nm]] <- eta + stats::rnorm(n, mean = 0, sd = resid_sd)
+    dat[[dv_nm]] <- eta + stats::rnorm(n_rows, mean = 0, sd = resid_sd)
   }
 
   if (!length(dat)) {
@@ -292,6 +425,8 @@ simulate_path_data <- function(state, n = 500L, seed = 1L) {
     if (is.factor(dat[[nm]])) out[[nm]] <- dat[[nm]]
   }
   attr(out, "sim_seed") <- as.integer(seed)
+  attr(out, "sim_n_subjects") <- as.integer(n_subj)
+  attr(out, "sim_has_intra") <- isTRUE(has_intra)
   out
 }
 

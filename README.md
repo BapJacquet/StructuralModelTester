@@ -1,6 +1,6 @@
 # Structural Model Tester
 
-Visual path / SEM workbench for R: draw the model, set expected effects, simulate or fit real data, and plan sample size — in one Jamovi-inspired Shiny app.
+Visual path / SEM workbench for R: draw the model, set expected effects, simulate or fit real data, and plan sample size — in one Shiny app.
 
 <p align="center">
   <img src="man/figures/readme-app-overview.png" alt="Structural Model Tester app overview" width="900"/>
@@ -10,7 +10,7 @@ Visual path / SEM workbench for R: draw the model, set expected effects, simulat
 
 - **Canvas model editor** — observed / latent / interaction (×) nodes; drag links that are *fixed*, *confirmatory*, *exploratory*, or *measurement*
 - **Two inference frameworks** — classical **p-values** (optional exploratory marking + confirmatory multiplicity correction) or **AIC/BIC search** with optional full model averaging and **Σw** link rejection
-- **Simulation from expected `b`** — unstandardized slopes on continuous predictors (mean-centered), treatment contrasts for factors, interactions coded like the fit
+- **Simulation from expected `b`** — unstandardized slopes on continuous predictors (mean-centered), treatment contrasts for factors, interactions coded like the fit; categorical factors can be **Inter** or **Intra** with probability or exact level counts (Intra + Exact builds within-subject factorials; Samples = subjects)
 - **Conditional / marginal effect plots** — inspect a link with prior band, fit overlay, and interaction correction (ghost line + arrow)
 - **Confirmatory power analysis** — Monte Carlo power and null false-detection curves, with a recommended **N\***
 

@@ -742,9 +742,149 @@ edge_plot_group <- function(df, to_lab, y_kind, x_label, subtitle,
 
 #' @keywords internal
 mean_se_fun <- function(x) {
+  x <- x[is.finite(x)]
   m <- mean(x)
+  if (!length(x)) return(data.frame(y = NA_real_, ymin = NA_real_, ymax = NA_real_))
   s <- stats::sd(x) / sqrt(length(x))
+  if (!is.finite(s)) s <- 0
   data.frame(y = m, ymin = m - s, ymax = m + s)
+}
+
+#' Mean ± 95% CI (Student-t) for `stat_summary`
+#' @keywords internal
+mean_ci95_fun <- function(x) {
+  x <- x[is.finite(x)]
+  n <- length(x)
+  if (!n) return(data.frame(y = NA_real_, ymin = NA_real_, ymax = NA_real_))
+  m <- mean(x)
+  if (n < 2L) return(data.frame(y = m, ymin = m, ymax = m))
+  se <- stats::sd(x) / sqrt(n)
+  if (!is.finite(se)) se <- 0
+  tcrit <- stats::qt(0.975, df = n - 1L)
+  data.frame(y = m, ymin = m - tcrit * se, ymax = m + tcrit * se)
+}
+
+#' Shared dodge width for categorical/binary-X interaction summaries
+#' @keywords internal
+interaction_cat_dodge_width <- function() 0.55
+
+#' Per-level x offsets matching ggplot2::position_dodge(width)
+#' @keywords internal
+interaction_group_dodge_offsets <- function(group_levels,
+                                            width = interaction_cat_dodge_width()) {
+  levs <- as.character(group_levels)
+  levs <- levs[!is.na(levs) & nzchar(levs)]
+  n <- length(levs)
+  if (!n) return(numeric())
+  if (n == 1L) return(stats::setNames(0, levs))
+  offs <- ((seq_len(n) - 0.5) / n - 0.5) * as.numeric(width)
+  stats::setNames(offs, levs)
+}
+
+#' Jittered raw points + mean + 95% CI for categorical/binary X interaction plots
+#' @keywords internal
+interaction_categorical_x_layers <- function(y_binary = FALSE,
+                                             dodge = interaction_cat_dodge_width()) {
+  list(
+    ggplot2::geom_point(
+      position = ggplot2::position_jitterdodge(
+        jitter.width = 0.16,
+        jitter.height = if (isTRUE(y_binary)) 0.035 else 0,
+        dodge.width = dodge
+      ),
+      alpha = 0.2,
+      size = 1.45
+    ),
+    ggplot2::stat_summary(
+      fun = mean,
+      geom = "point",
+      size = 3.8,
+      position = ggplot2::position_dodge(width = dodge)
+    ),
+    ggplot2::stat_summary(
+      fun.data = mean_ci95_fun,
+      geom = "errorbar",
+      width = 0.16,
+      linewidth = 0.75,
+      position = ggplot2::position_dodge(width = dodge)
+    )
+  )
+}
+
+#' Fitted simple-slope line endpoints at dodged binary-X positions
+#' @keywords internal
+interaction_binary_x_fit_line_df <- function(plot_df,
+                                             y_binary = FALSE,
+                                             rel_kind = "linear",
+                                             group_levels = NULL,
+                                             dodge_width = interaction_cat_dodge_width()) {
+  if (is.null(plot_df) || !nrow(plot_df)) return(NULL)
+  if (is.null(group_levels) || !length(group_levels)) {
+    group_levels <- if (is.factor(plot_df$z)) {
+      levels(plot_df$z)
+    } else {
+      unique(as.character(plot_df$z))
+    }
+  }
+  group_levels <- as.character(group_levels)
+  offs <- interaction_group_dodge_offsets(group_levels, dodge_width)
+  # Only two X levels — higher-order smooths are not identifiable
+  sm_rel <- as.character(rel_kind %||% "linear")
+  if (isTRUE(y_binary) || sm_rel %in% c("quadratic", "cubic", "loess")) {
+    sm_rel <- "linear"
+  }
+  xs <- c(0, 1)
+  out <- list()
+  for (g in group_levels) {
+    sub <- plot_df[as.character(plot_df$z) == g, , drop = FALSE]
+    sub <- sub[is.finite(sub$x) & is.finite(sub$y), , drop = FALSE]
+    if (nrow(sub) < 2L) next
+    fit <- if (isTRUE(y_binary)) {
+      tryCatch(
+        stats::glm(y ~ x, data = sub, family = stats::binomial()),
+        error = function(e) NULL
+      )
+    } else {
+      tryCatch(stats::lm(y ~ x, data = sub), error = function(e) NULL)
+    }
+    if (is.null(fit)) next
+    nd <- data.frame(x = xs)
+    pred <- tryCatch({
+      if (isTRUE(y_binary)) {
+        as.numeric(stats::predict(fit, newdata = nd, type = "response"))
+      } else {
+        as.numeric(stats::predict(fit, newdata = nd))
+      }
+    }, error = function(e) NULL)
+    if (is.null(pred) || length(pred) != 2L || any(!is.finite(pred))) next
+    off <- unname(offs[[g]])
+    if (length(off) != 1L || !is.finite(off)) off <- 0
+    out[[length(out) + 1L]] <- data.frame(
+      x = xs + off,
+      y = pred,
+      z = factor(g, levels = group_levels),
+      stringsAsFactors = FALSE
+    )
+  }
+  if (!length(out)) return(NULL)
+  do.call(rbind, out)
+}
+
+#' ggplot layers for dodged binary-X fitted simple slopes
+#' @keywords internal
+interaction_binary_x_fit_layers <- function(fit_df) {
+  if (is.null(fit_df) || !nrow(fit_df)) return(list())
+  list(
+    ggplot2::geom_line(
+      data = fit_df,
+      ggplot2::aes(
+        x = .data$x, y = .data$y,
+        color = .data$z, group = .data$z
+      ),
+      linewidth = 1,
+      inherit.aes = FALSE
+    )
+  )
 }
 
 #' @keywords internal
@@ -930,8 +1070,8 @@ interaction_correction_arrow_layers <- function(arrow_df,
     x_offset <- 0.045 * span
   }
   arrow_df$x_arr <- arrow_df$x + x_offset
-  # Label sits left of the arrow so it stays inside the panel at x = max
-  arrow_df$x_lab <- arrow_df$x_arr - 0.02 * span
+  # Label sits to the right of the correction arrow
+  arrow_df$x_lab <- arrow_df$x_arr + 0.02 * span
 
   ghost_df <- data.frame(
     x = arrow_df$x0,
@@ -980,7 +1120,7 @@ interaction_correction_arrow_layers <- function(arrow_df,
         color = .data$group
       ),
       size = 3.1,
-      hjust = 1.05,
+      hjust = -0.05,
       vjust = 0.5,
       inherit.aes = FALSE,
       show.legend = FALSE
@@ -1002,6 +1142,26 @@ interaction_correction_arrows_for_plot <- function(state, ix_id, to_id, to_level
                                                    show_fit = FALSE,
                                                    active_group = NULL,
                                                    group_levels = NULL) {
+  # Ghost + correction arrow only when the × → DV link is kept (not excluded)
+  if (!is.null(state) && nrow(state$edges)) {
+    state <- ensure_edge_to_port(state)
+    hits <- which(
+      state$edges$from == ix_id &
+        state$edges$to == to_id &
+        !state$edges$type %in% c("measurement", "definitional")
+    )
+    if (length(hits) && !is.na(to_level) && nzchar(as.character(to_level)) &&
+          "to_level" %in% names(state$edges)) {
+      tl <- as.character(state$edges$to_level[hits])
+      hits2 <- hits[is.na(tl) | !nzchar(tl) | tl == as.character(to_level)]
+      if (length(hits2)) hits <- hits2
+    }
+    if (length(hits)) {
+      st_edge <- as.character(state$edges$status[[hits[[1]]]])
+      if (identical(st_edge, "excluded")) return(list())
+    }
+  }
+
   use_fit <- isTRUE(show_fit) && is.finite(est)
   if (use_fit) {
     beta_ix <- as.numeric(est)
@@ -1028,6 +1188,19 @@ interaction_correction_arrows_for_plot <- function(state, ix_id, to_id, to_level
     active_group = active_group,
     group_levels = group_levels
   )
+  # Shift ghost/arrow onto the dodged active-group track (binary/categorical X)
+  if (!is.null(ad) && isTRUE(x_is_binary) &&
+        !is.null(group_levels) && length(group_levels) &&
+        !is.null(active_group) && nzchar(as.character(active_group))) {
+    offs <- interaction_group_dodge_offsets(
+      group_levels, interaction_cat_dodge_width()
+    )
+    off <- unname(offs[[as.character(active_group)]])
+    if (length(off) == 1L && is.finite(off) && abs(off) > 0) {
+      ad$x0 <- ad$x0 + off
+      ad$x <- ad$x + off
+    }
+  }
   interaction_correction_arrow_layers(
     ad, linetype = lt, linewidth = lw, ghost_alpha = 0.55
   )
@@ -1255,8 +1428,15 @@ edge_interaction_plot <- function(state, data, ix_id, to_id, est, est_std, etype
     p <- ggplot2::ggplot(
       plot_df,
       ggplot2::aes(x = .data$x, y = .data$y, color = .data$z, fill = .data$z, group = .data$z)
-    ) +
-      ggplot2::geom_point(alpha = 0.55, size = 1.8) +
+    )
+    if (isTRUE(x_is_binary)) {
+      for (ly in interaction_categorical_x_layers(y_binary = identical(y_kind, "binary"))) {
+        p <- p + ly
+      }
+    } else {
+      p <- p + ggplot2::geom_point(alpha = 0.55, size = 1.8)
+    }
+    p <- p +
       ggplot2::labs(
         title = ix_title,
         subtitle = subtitle,
@@ -1272,43 +1452,53 @@ edge_interaction_plot <- function(state, data, ix_id, to_id, est, est_std, etype
       x_labs <- binary_plot_level_labels(state, x_id, df[[if (identical(x_id, fa)) "a" else "b"]])
       p <- p + ggplot2::scale_x_continuous(breaks = c(0, 1), labels = x_labs)
     }
+    z_levs <- levels(z_fac)
     if (isTRUE(show_fit)) {
-      sm_rel <- if (identical(rel_kind, "loess") && identical(y_kind, "binary")) {
-        "linear"
+      if (isTRUE(x_is_binary)) {
+        fit_df <- interaction_binary_x_fit_line_df(
+          plot_df,
+          y_binary = identical(y_kind, "binary"),
+          rel_kind = rel_kind,
+          group_levels = z_levs
+        )
+        for (ly in interaction_binary_x_fit_layers(fit_df)) p <- p + ly
       } else {
-        rel_kind
+        sm_rel <- if (identical(rel_kind, "loess") && identical(y_kind, "binary")) {
+          "linear"
+        } else {
+          rel_kind
+        }
+        formula <- switch(
+          sm_rel,
+          quadratic = y ~ poly(x, 2),
+          cubic = y ~ poly(x, 3),
+          y ~ x
+        )
+        method <- if (identical(y_kind, "binary")) {
+          "glm"
+        } else if (identical(sm_rel, "loess")) {
+          "loess"
+        } else {
+          "lm"
+        }
+        method_args <- if (identical(y_kind, "binary")) {
+          list(family = stats::binomial())
+        } else {
+          list()
+        }
+        # Do not hard-code color — inherit group aesthetics so each level gets a line
+        p <- p + ggplot2::geom_smooth(
+          method = method,
+          formula = formula,
+          method.args = method_args,
+          se = TRUE,
+          linewidth = 1,
+          alpha = 0.15
+        )
       }
-      formula <- switch(
-        sm_rel,
-        quadratic = y ~ poly(x, 2),
-        cubic = y ~ poly(x, 3),
-        y ~ x
-      )
-      method <- if (identical(y_kind, "binary")) {
-        "glm"
-      } else if (identical(sm_rel, "loess")) {
-        "loess"
-      } else {
-        "lm"
-      }
-      method_args <- if (identical(y_kind, "binary")) {
-        list(family = stats::binomial())
-      } else {
-        list()
-      }
-      # Do not hard-code color — inherit group aesthetics so each level gets a line
-      p <- p + ggplot2::geom_smooth(
-        method = method,
-        formula = formula,
-        method.args = method_args,
-        se = TRUE,
-        linewidth = 1,
-        alpha = 0.15
-      )
     }
     # Interaction correction vs main effects (categorical moderator → 0/1 vs base)
     z01_cat <- as.numeric(z_fac != levels(z_fac)[[1]])
-    z_levs <- levels(z_fac)
     active_z <- if (length(z_levs) >= 2L) z_levs[[2]] else z_levs[[1]]
     for (ly in interaction_correction_arrows_for_plot(
       state, ix_id, to_id, to_level,
@@ -1365,8 +1555,15 @@ edge_interaction_plot <- function(state, data, ix_id, to_id, est, est_std, etype
     y_lab
   }
 
-  p <- ggplot2::ggplot(plot_df, ggplot2::aes(x = .data$x, y = .data$y, color = .data$z)) +
-    ggplot2::geom_point(alpha = 0.3, size = 1.6) +
+  p <- ggplot2::ggplot(plot_df, ggplot2::aes(x = .data$x, y = .data$y, color = .data$z, group = .data$z))
+  if (isTRUE(x_is_binary)) {
+    for (ly in interaction_categorical_x_layers(y_binary = identical(y_kind, "binary"))) {
+      p <- p + ly
+    }
+  } else {
+    p <- p + ggplot2::geom_point(alpha = 0.3, size = 1.6)
+  }
+  p <- p +
     ggplot2::labs(
       title = edge_plot_effect_title(
         x_lab, y_lab, effect = "interaction",
@@ -1387,23 +1584,48 @@ edge_interaction_plot <- function(state, data, ix_id, to_id, est, est_std, etype
     p <- p + ggplot2::scale_x_continuous(breaks = c(0, 1), labels = x_labs)
   }
 
+  z_levs <- levels(z_fac)
   if (isTRUE(show_fit)) {
-    sm_rel <- if (identical(rel_kind, "loess") && identical(y_kind, "binary")) "linear" else rel_kind
-    formula <- switch(
-      sm_rel,
-      quadratic = y ~ poly(x, 2),
-      cubic = y ~ poly(x, 3),
-      y ~ x
-    )
-    method <- if (identical(y_kind, "binary")) "glm" else if (identical(sm_rel, "loess")) "loess" else "lm"
-    method_args <- if (identical(y_kind, "binary")) list(family = stats::binomial()) else list()
-    p <- p + ggplot2::geom_smooth(
-      method = method,
-      formula = formula,
-      method.args = method_args,
-      se = TRUE,
-      linewidth = 1
-    )
+    if (isTRUE(x_is_binary)) {
+      fit_df <- interaction_binary_x_fit_line_df(
+        plot_df,
+        y_binary = identical(y_kind, "binary"),
+        rel_kind = rel_kind,
+        group_levels = z_levs
+      )
+      for (ly in interaction_binary_x_fit_layers(fit_df)) p <- p + ly
+    } else {
+      sm_rel <- if (identical(rel_kind, "loess") && identical(y_kind, "binary")) {
+        "linear"
+      } else {
+        rel_kind
+      }
+      formula <- switch(
+        sm_rel,
+        quadratic = y ~ poly(x, 2),
+        cubic = y ~ poly(x, 3),
+        y ~ x
+      )
+      method <- if (identical(y_kind, "binary")) {
+        "glm"
+      } else if (identical(sm_rel, "loess")) {
+        "loess"
+      } else {
+        "lm"
+      }
+      method_args <- if (identical(y_kind, "binary")) {
+        list(family = stats::binomial())
+      } else {
+        list()
+      }
+      p <- p + ggplot2::geom_smooth(
+        method = method,
+        formula = formula,
+        method.args = method_args,
+        se = TRUE,
+        linewidth = 1
+      )
+    }
   }
 
   z01_plot <- if (!is.null(z01_bin)) {
@@ -1412,7 +1634,6 @@ edge_interaction_plot <- function(state, data, ix_id, to_id, est, est_std, etype
     # Continuous moderator split into low/high: treat high (+1 SD) as 1
     as.numeric(grepl("\\+|high", as.character(z_fac), ignore.case = TRUE))
   }
-  z_levs <- levels(z_fac)
   active_z <- if (!is.null(z01_bin) && length(z_levs) >= 2L) {
     z_levs[[2]]
   } else if (length(z_levs) >= 2L) {

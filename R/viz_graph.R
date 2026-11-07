@@ -71,6 +71,11 @@ graph_payload <- function(state, data = NULL) {
       }
       cm <- if ("cat_mode" %in% names(nodes)) nodes$cat_mode[i] else "split"
       if (is.na(cm) || !nzchar(cm)) cm <- "split"
+      design_mode <- ""
+      if (!latent && !is_ix && var_kind %in% c("categorical", "binary")) {
+        design_mode <- node_sim_design_mode(state, nid)
+        if (!design_mode %in% c("inter", "intra")) design_mode <- "inter"
+      }
       node_list[[i]] <- list(
         id = nid,
         label = label,
@@ -85,7 +90,8 @@ graph_payload <- function(state, data = NULL) {
         varKind = var_kind,
         base = base,
         levels = as.list(levels),
-        catMode = if (identical(var_kind, "categorical")) cm else "split"
+        catMode = if (identical(var_kind, "categorical")) cm else "split",
+        designMode = design_mode
       )
     }
   }
@@ -135,6 +141,7 @@ graph_structure_signature <- function(payload) {
       n$varKind %||% "",
       n$base %||% "",
       n$catMode %||% "",
+      n$designMode %||% "",
       levs,
       sep = "\t"
     )

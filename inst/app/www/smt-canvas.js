@@ -325,6 +325,12 @@
     if (isCat && n.base) {
       subs.push({ text: "base: " + n.base, cls: "smt-node-sub-base" });
     }
+    if (isCat && (n.designMode === "intra" || n.designMode === "inter")) {
+      subs.push({
+        text: n.designMode === "intra" ? "intra" : "inter",
+        cls: "smt-node-sub-design"
+      });
+    }
     if (n.model) {
       el.classList.add("smt-dv");
       if (String(n.model).indexOf("glm") === 0) el.classList.add("smt-dv-glm");

@@ -28,6 +28,9 @@ empty_model_state <- function() {
       sim_resid_sd = numeric(),
       sim_var_kind = character(),
       sim_level_props = character(),
+      sim_level_counts = character(),
+      sim_design_mode = character(),
+      sim_alloc_mode = character(),
       stringsAsFactors = FALSE
     ),
     edges = data.frame(
@@ -585,6 +588,9 @@ add_node <- function(state, label, observed_column = NA_character_,
     sim_resid_sd = 1,
     sim_var_kind = "continuous",
     sim_level_props = NA_character_,
+    sim_level_counts = NA_character_,
+    sim_design_mode = "inter",
+    sim_alloc_mode = "probability",
     stringsAsFactors = FALSE
   )
   state$nodes <- rbind(state$nodes, new_row)
@@ -628,6 +634,9 @@ add_interaction_node <- function(state) {
     sim_resid_sd = 1,
     sim_var_kind = "continuous",
     sim_level_props = NA_character_,
+    sim_level_counts = NA_character_,
+    sim_design_mode = "inter",
+    sim_alloc_mode = "probability",
     stringsAsFactors = FALSE
   )
   state$nodes <- rbind(state$nodes, new_row)
@@ -877,6 +886,9 @@ ensure_node_r2_columns <- function(state) {
 #' - `sim_var_kind`: declared type for unmapped nodes
 #'   (`continuous` / `categorical` / `binary`).
 #' - `sim_level_props`: encoded level=proportion map for factor simulation.
+#' - `sim_level_counts`: encoded level=count map for exact allocation.
+#' - `sim_design_mode`: `"inter"` (between) or `"intra"` (within / repeated).
+#' - `sim_alloc_mode`: `"probability"` or `"exact"` level allocation.
 #' @keywords internal
 ensure_node_sim_columns <- function(state) {
   n <- nrow(state$nodes)
@@ -895,6 +907,15 @@ ensure_node_sim_columns <- function(state) {
   if (!"sim_level_props" %in% names(state$nodes)) {
     state$nodes$sim_level_props <- rep(NA_character_, n)
   }
+  if (!"sim_level_counts" %in% names(state$nodes)) {
+    state$nodes$sim_level_counts <- rep(NA_character_, n)
+  }
+  if (!"sim_design_mode" %in% names(state$nodes)) {
+    state$nodes$sim_design_mode <- rep("inter", n)
+  }
+  if (!"sim_alloc_mode" %in% names(state$nodes)) {
+    state$nodes$sim_alloc_mode <- rep("probability", n)
+  }
   if (!n) return(state)
   miss_m <- is.na(state$nodes$sim_mean) | !is.finite(state$nodes$sim_mean)
   if (any(miss_m)) state$nodes$sim_mean[miss_m] <- 0
@@ -908,6 +929,14 @@ ensure_node_sim_columns <- function(state) {
   if (any(miss_k)) state$nodes$sim_var_kind[miss_k] <- "continuous"
   bad_k <- !state$nodes$sim_var_kind %in% c("continuous", "categorical", "binary")
   if (any(bad_k)) state$nodes$sim_var_kind[bad_k] <- "continuous"
+  miss_dm <- is.na(state$nodes$sim_design_mode) | !nzchar(state$nodes$sim_design_mode)
+  if (any(miss_dm)) state$nodes$sim_design_mode[miss_dm] <- "inter"
+  bad_dm <- !state$nodes$sim_design_mode %in% c("inter", "intra")
+  if (any(bad_dm)) state$nodes$sim_design_mode[bad_dm] <- "inter"
+  miss_am <- is.na(state$nodes$sim_alloc_mode) | !nzchar(state$nodes$sim_alloc_mode)
+  if (any(miss_am)) state$nodes$sim_alloc_mode[miss_am] <- "probability"
+  bad_am <- !state$nodes$sim_alloc_mode %in% c("probability", "exact")
+  if (any(bad_am)) state$nodes$sim_alloc_mode[bad_am] <- "probability"
   state
 }
 
@@ -1128,6 +1157,143 @@ set_node_sim_level_props <- function(state, node_id, props) {
   norm <- normalize_sim_props(props, levs)
   state$nodes$sim_level_props[idx] <- encode_sim_level_props(norm)
   state
+}
+
+#' Normalize exact per-level counts (default 1; clip negatives / non-finite to 0)
+#' @keywords internal
+normalize_sim_counts <- function(counts, levels) {
+  levels <- unique(as.character(levels))
+  levels <- levels[!is.na(levels) & nzchar(levels)]
+  if (!length(levels)) return(integer())
+  raw <- rep(1L, length(levels))
+  names(raw) <- levels
+  if (!is.null(counts) && length(counts)) {
+    hit <- intersect(names(counts), levels)
+    if (length(hit)) {
+      vals <- suppressWarnings(as.integer(round(as.numeric(counts[hit]))))
+      vals[!is.finite(vals) | is.na(vals) | vals < 0L] <- 0L
+      raw[hit] <- vals
+    }
+  }
+  raw
+}
+
+#' Encode level → count map for simulation storage
+#' @keywords internal
+encode_sim_level_counts <- function(counts) {
+  if (is.null(counts) || !length(counts)) return(NA_character_)
+  nms <- names(counts)
+  if (is.null(nms)) return(NA_character_)
+  nms <- as.character(nms)
+  vals <- suppressWarnings(as.integer(round(as.numeric(counts))))
+  keep <- !is.na(nms) & nzchar(nms) & is.finite(vals)
+  if (!any(keep)) return(NA_character_)
+  paste(sprintf("%s=%d", nms[keep], vals[keep]), collapse = "|")
+}
+
+#' Decode stored level=count string to a named integer vector
+#' @keywords internal
+decode_sim_level_counts <- function(text) {
+  raw <- decode_sim_level_props(text)
+  if (!length(raw)) return(integer())
+  vals <- suppressWarnings(as.integer(round(as.numeric(raw))))
+  vals[!is.finite(vals) | is.na(vals) | vals < 0L] <- 0L
+  stats::setNames(vals, names(raw))
+}
+
+#' Named exact counts for simulating a factor node
+#' @keywords internal
+node_sim_level_counts <- function(state, node_id, data = NULL) {
+  state <- ensure_node_sim_columns(state)
+  levs <- node_sim_factor_levels(state, node_id, data = data)
+  idx <- match(node_id, state$nodes$id)
+  raw <- if (is.na(idx)) integer() else decode_sim_level_counts(state$nodes$sim_level_counts[idx])
+  normalize_sim_counts(raw, levs)
+}
+
+#' Store exact level counts for simulation (does not clear fits)
+#' @keywords internal
+set_node_sim_level_counts <- function(state, node_id, counts) {
+  state <- ensure_node_sim_columns(state)
+  idx <- match(node_id, state$nodes$id)
+  if (is.na(idx)) return(state)
+  levs <- names(counts)
+  if (is.null(levs)) levs <- character()
+  norm <- normalize_sim_counts(counts, levs)
+  state$nodes$sim_level_counts[idx] <- encode_sim_level_counts(norm)
+  state
+}
+
+#' Simulation design mode for a factor node: inter (between) or intra (within)
+#' @keywords internal
+node_sim_design_mode <- function(state, node_id) {
+  state <- ensure_node_sim_columns(state)
+  idx <- match(node_id, state$nodes$id)
+  if (is.na(idx)) return("inter")
+  dm <- as.character(state$nodes$sim_design_mode[idx])
+  if (!dm %in% c("inter", "intra")) dm <- "inter"
+  dm
+}
+
+#' Set inter/intra simulation design mode (does not clear fits)
+#' @keywords internal
+set_node_sim_design_mode <- function(state, node_id,
+                                     mode = c("inter", "intra")) {
+  mode <- match.arg(mode)
+  state <- ensure_node_sim_columns(state)
+  idx <- match(node_id, state$nodes$id)
+  if (is.na(idx)) return(state)
+  state$nodes$sim_design_mode[idx] <- mode
+  state
+}
+
+#' Simulation allocation mode: probability or exact counts
+#' @keywords internal
+node_sim_alloc_mode <- function(state, node_id) {
+  state <- ensure_node_sim_columns(state)
+  idx <- match(node_id, state$nodes$id)
+  if (is.na(idx)) return("probability")
+  am <- as.character(state$nodes$sim_alloc_mode[idx])
+  if (!am %in% c("probability", "exact")) am <- "probability"
+  am
+}
+
+#' Set probability/exact simulation allocation mode (does not clear fits)
+#' @keywords internal
+set_node_sim_alloc_mode <- function(state, node_id,
+                                    mode = c("probability", "exact")) {
+  mode <- match.arg(mode)
+  state <- ensure_node_sim_columns(state)
+  idx <- match(node_id, state$nodes$id)
+  if (is.na(idx)) return(state)
+  # When switching to exact with empty counts, seed 1 per known level
+  if (identical(mode, "exact")) {
+    levs <- node_sim_factor_levels(state, node_id, data = NULL)
+    raw <- decode_sim_level_counts(state$nodes$sim_level_counts[idx])
+    if (!length(raw) && length(levs)) {
+      state <- set_node_sim_level_counts(
+        state, node_id,
+        stats::setNames(rep(1L, length(levs)), levs)
+      )
+    }
+  }
+  state$nodes$sim_alloc_mode[idx] <- mode
+  state
+}
+
+#' TRUE if any exogenous categorical/binary node is marked intra
+#' @keywords internal
+state_has_intra_sim_factor <- function(state) {
+  state <- ensure_node_sim_columns(state)
+  if (!nrow(state$nodes)) return(FALSE)
+  for (id in state$nodes$id) {
+    if (is_interaction_node(state, id)) next
+    if (!node_is_structural_exogenous(state, id)) next
+    kind <- node_sim_var_kind(state, id, data = NULL)
+    if (!kind %in% c("categorical", "binary")) next
+    if (identical(node_sim_design_mode(state, id), "intra")) return(TRUE)
+  }
+  FALSE
 }
 
 #' Ensure repeated-measures columns exist on nodes

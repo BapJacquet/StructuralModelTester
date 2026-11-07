@@ -35,7 +35,8 @@ model_from_json <- function(json) {
     "r_squared", "r_squared_kind", "node_kind", "factor_a", "factor_b", "cat_mode",
     "repeated_measures", "cluster_column", "dv_transform",
     "factor_base", "factor_ordered", "factor_levels",
-    "sim_mean", "sim_sd", "sim_resid_sd", "sim_var_kind", "sim_level_props"
+    "sim_mean", "sim_sd", "sim_resid_sd", "sim_var_kind", "sim_level_props",
+    "sim_level_counts", "sim_design_mode", "sim_alloc_mode"
   )
   for (nm in need_n) {
     if (!nm %in% names(nodes)) {
@@ -51,6 +52,10 @@ model_from_json <- function(json) {
         "split"
       } else if (nm == "sim_var_kind") {
         "continuous"
+      } else if (nm == "sim_design_mode") {
+        "inter"
+      } else if (nm == "sim_alloc_mode") {
+        "probability"
       } else if (nm %in% c("repeated_measures", "factor_ordered")) {
         FALSE
       } else if (nm == "dv_transform") {
@@ -97,6 +102,17 @@ model_from_json <- function(json) {
     bad_sk <- !nodes$sim_var_kind %in% c("continuous", "categorical", "binary")
     if (any(bad_sk)) nodes$sim_var_kind[bad_sk] <- "continuous"
     nodes$sim_level_props <- as.character(nodes$sim_level_props)
+    nodes$sim_level_counts <- as.character(nodes$sim_level_counts)
+    nodes$sim_design_mode <- as.character(nodes$sim_design_mode)
+    miss_dm <- is.na(nodes$sim_design_mode) | !nzchar(nodes$sim_design_mode)
+    if (any(miss_dm)) nodes$sim_design_mode[miss_dm] <- "inter"
+    bad_dm <- !nodes$sim_design_mode %in% c("inter", "intra")
+    if (any(bad_dm)) nodes$sim_design_mode[bad_dm] <- "inter"
+    nodes$sim_alloc_mode <- as.character(nodes$sim_alloc_mode)
+    miss_am <- is.na(nodes$sim_alloc_mode) | !nzchar(nodes$sim_alloc_mode)
+    if (any(miss_am)) nodes$sim_alloc_mode[miss_am] <- "probability"
+    bad_am <- !nodes$sim_alloc_mode %in% c("probability", "exact")
+    if (any(bad_am)) nodes$sim_alloc_mode[bad_am] <- "probability"
     # Infer node_kind when missing from older projects
     miss_kind <- is.na(nodes$node_kind) | !nzchar(nodes$node_kind)
     if (any(miss_kind)) {

@@ -21,7 +21,7 @@ smt_ui <- function() {
   shiny::fluidPage(
     title = "Structural Model Tester",
     shiny::tags$head(
-      shiny::tags$link(rel = "stylesheet", type = "text/css", href = "jamovi-theme.css"),
+      shiny::tags$link(rel = "stylesheet", type = "text/css", href = "smt-theme.css"),
       shiny::tags$script(src = "smt-panels.js"),
       shiny::tags$script(src = "smt-canvas.js"),
       shiny::tags$link(
@@ -189,6 +189,10 @@ smt_ui <- function() {
               max = 100000,
               step = 10,
               width = "100%"
+            ),
+            shiny::helpText(
+              "Rows when all factors are Inter. Subjects when any factor is Intra ",
+              "(rows = subjects \u00d7 within-subject cells)."
             ),
             shiny::div(
               class = "smt-btn-row",
@@ -590,6 +594,10 @@ smt_server <- function(input, output, session) {
     f <- input$project_file
     shiny::req(f)
     tryCatch({
+      smt_debug("project_file load start", list(
+        name = f$name %||% NA_character_,
+        size = f$size %||% NA_real_
+      ))
       txt <- paste(readLines(f$datapath, warn = FALSE), collapse = "\n")
       st <- model_from_json(txt)
       prep <- attr(st, "prepare")
@@ -621,7 +629,13 @@ smt_server <- function(input, output, session) {
         status("Project loaded.")
       }
       shiny::updateRadioButtons(session, "center_view", selected = "model")
-    }, error = function(e) status(paste("Project error:", e$message)))
+      smt_debug("project_file load OK", list(
+        n_nodes = nrow(st$nodes), n_edges = nrow(st$edges)
+      ))
+    }, error = function(e) {
+      smt_debug("project_file load ERROR", list(message = e$message))
+      status(paste("Project error:", e$message))
+    })
   })
 
   flush_sim_params_from_inputs <- function(st) {
@@ -648,14 +662,39 @@ smt_server <- function(input, output, session) {
             )
           }
         }
-        levs <- node_sim_factor_levels(st, nid, data = analysis_rv())
-        props <- numeric(length(levs))
-        names(props) <- levs
-        for (i in seq_along(levs)) {
-          v <- input[[paste0("sim_prop_", i)]]
-          if (!is.null(v) && length(v) == 1L && is.finite(v)) props[[i]] <- as.numeric(v)
+        dm <- input$sim_design_mode
+        if (!is.null(dm) && nzchar(as.character(dm)) &&
+              as.character(dm) %in% c("inter", "intra")) {
+          st <- set_node_sim_design_mode(st, nid, as.character(dm))
         }
-        if (length(props)) st <- set_node_sim_level_props(st, nid, props)
+        am <- input$sim_alloc_mode
+        if (!is.null(am) && nzchar(as.character(am)) &&
+              as.character(am) %in% c("probability", "exact")) {
+          st <- set_node_sim_alloc_mode(st, nid, as.character(am))
+        }
+        levs <- node_sim_factor_levels(st, nid, data = analysis_rv())
+        alloc <- node_sim_alloc_mode(st, nid)
+        if (identical(alloc, "exact")) {
+          counts <- integer(length(levs))
+          names(counts) <- levs
+          for (i in seq_along(levs)) {
+            v <- input[[paste0("sim_count_", i)]]
+            if (!is.null(v) && length(v) == 1L && is.finite(v)) {
+              counts[[i]] <- as.integer(max(0L, round(as.numeric(v))))
+            } else {
+              counts[[i]] <- 1L
+            }
+          }
+          if (length(counts)) st <- set_node_sim_level_counts(st, nid, counts)
+        } else {
+          props <- numeric(length(levs))
+          names(props) <- levs
+          for (i in seq_along(levs)) {
+            v <- input[[paste0("sim_prop_", i)]]
+            if (!is.null(v) && length(v) == 1L && is.finite(v)) props[[i]] <- as.numeric(v)
+          }
+          if (length(props)) st <- set_node_sim_level_props(st, nid, props)
+        }
       } else {
         m <- input$sim_exog_mean
         s <- input$sim_exog_sd
@@ -967,7 +1006,10 @@ smt_server <- function(input, output, session) {
       "sim_resid_sd",
       "sim_var_kind",
       "sim_factor_levels",
-      paste0("sim_prop_", seq_len(12L))
+      "sim_design_mode",
+      "sim_alloc_mode",
+      paste0("sim_prop_", seq_len(12L)),
+      paste0("sim_count_", seq_len(12L))
       # Do NOT freeze edge_rel_kind or dv_diag_equation — residual / edge
       # renderPlot reads them; freezing silently aborts the plot flush and
       # leaves a blank panel after a node or edge click.
@@ -1518,6 +1560,14 @@ smt_server <- function(input, output, session) {
       sim <- simulate_path_data(st, n = as.integer(n), seed = as.integer(seed))
       sim_data_rv(sim)
       used_seed <- attr(sim, "sim_seed")
+      if (isTRUE(attr(sim, "sim_has_intra")) && "subject" %in% names(sim)) {
+        for (dv in structural_dv_ids(st)) {
+          st <- set_node_repeated_measures(
+            st, dv, enabled = TRUE, cluster_column = "subject"
+          )
+        }
+        state(st)
+      }
       run_fit_pipeline(
         st, sim,
         simulated = TRUE,
@@ -2038,18 +2088,50 @@ smt_server <- function(input, output, session) {
 
     if (kind %in% c("categorical", "binary")) {
       levs <- node_sim_factor_levels(st, nid, data = dat)
-      props <- node_sim_level_props(st, nid, data = dat)
-      prop_inputs <- lapply(seq_along(levs), function(i) {
-        shiny::numericInput(
-          paste0("sim_prop_", i),
-          sprintf("P(%s)", levs[[i]]),
-          value = as.numeric(props[[levs[[i]]]] %||% (1 / length(levs))),
-          min = 0,
-          max = 1,
-          step = 0.05,
-          width = "100%"
-        )
-      })
+      design_mode <- node_sim_design_mode(st, nid)
+      alloc_mode <- node_sim_alloc_mode(st, nid)
+      design_ui <- shiny::radioButtons(
+        "sim_design_mode",
+        "Design",
+        choiceNames = list("Inter (between)", "Intra (within)"),
+        choiceValues = list("inter", "intra"),
+        selected = design_mode,
+        inline = TRUE
+      )
+      alloc_ui <- shiny::radioButtons(
+        "sim_alloc_mode",
+        "Level allocation",
+        choiceNames = list("Probability", "Exact counts"),
+        choiceValues = list("probability", "exact"),
+        selected = alloc_mode,
+        inline = TRUE
+      )
+      level_inputs <- if (identical(alloc_mode, "exact")) {
+        counts <- node_sim_level_counts(st, nid, data = dat)
+        lapply(seq_along(levs), function(i) {
+          shiny::numericInput(
+            paste0("sim_count_", i),
+            sprintf("n(%s)", levs[[i]]),
+            value = as.integer(counts[[levs[[i]]]] %||% 1L),
+            min = 0,
+            step = 1,
+            width = "100%"
+          )
+        })
+      } else {
+        props <- node_sim_level_props(st, nid, data = dat)
+        lapply(seq_along(levs), function(i) {
+          shiny::numericInput(
+            paste0("sim_prop_", i),
+            sprintf("P(%s)", levs[[i]]),
+            value = as.numeric(props[[levs[[i]]]] %||% (1 / length(levs))),
+            min = 0,
+            max = 1,
+            step = 0.05,
+            width = "100%"
+          )
+        })
+      }
       levels_ui <- if (unmapped) {
         shiny::textAreaInput(
           "sim_factor_levels",
@@ -2061,15 +2143,25 @@ smt_server <- function(input, output, session) {
       } else {
         NULL
       }
+      help_txt <- if (identical(alloc_mode, "exact")) {
+        if (identical(design_mode, "intra")) {
+          "Exact counts per level within each subject. Several Intra factors expand their Cartesian product (cell weight = product of counts). Prefer 1 of each for a balanced repeated-measures factorial."
+        } else {
+          "Exact counts tile a balanced between-subject assignment (recycled to Samples)."
+        }
+      } else if (identical(design_mode, "intra")) {
+        "Probability mode on Intra still expands every level combination once per subject (balanced cells). Use Exact counts for unequal within-subject repetitions."
+      } else {
+        "Expected proportions when simulating this factor (renormalized to sum 1)."
+      }
       return(shiny::tagList(
         shiny::h4("Simulation (exogenous)"),
         type_ui,
         levels_ui,
-        shiny::div(class = "smt-sim-fields", prop_inputs),
-        shiny::helpText(
-          "Expected proportions when simulating this factor (renormalized to sum 1). ",
-          "Ignored by frequentist Run."
-        )
+        design_ui,
+        alloc_ui,
+        shiny::div(class = "smt-sim-fields", level_inputs),
+        shiny::helpText(help_txt, " Ignored by frequentist Run.")
       ))
     }
 
@@ -2132,11 +2224,14 @@ smt_server <- function(input, output, session) {
     if (!node_is_structural_exogenous(st0, nid)) return()
     kind0 <- node_sim_var_kind(st0, nid, data = analysis_rv())
     lev0 <- node_sim_factor_levels(st0, nid, data = analysis_rv())
+    dm0 <- node_sim_design_mode(st0, nid)
     st1 <- flush_sim_params_from_inputs(st0)
     kind1 <- node_sim_var_kind(st1, nid, data = analysis_rv())
     lev1 <- node_sim_factor_levels(st1, nid, data = analysis_rv())
-    # Kind/level changes alter canvas ports — never skip that redraw.
-    visual_changed <- !identical(kind0, kind1) || !identical(lev0, lev1)
+    dm1 <- node_sim_design_mode(st1, nid)
+    # Kind/level/design changes alter canvas ports/badges — never skip that redraw.
+    visual_changed <- !identical(kind0, kind1) || !identical(lev0, lev1) ||
+      !identical(dm0, dm1)
     if (!visual_changed) skip_graph_render(TRUE)
     state(st1)
   }
@@ -2166,10 +2261,19 @@ smt_server <- function(input, output, session) {
   shiny::observeEvent(input$sim_factor_levels, {
     apply_sim_exogenous_from_inputs()
   }, ignoreInit = TRUE, ignoreNULL = TRUE)
+  shiny::observeEvent(input$sim_design_mode, {
+    apply_sim_exogenous_from_inputs()
+  }, ignoreInit = TRUE, ignoreNULL = TRUE)
+  shiny::observeEvent(input$sim_alloc_mode, {
+    apply_sim_exogenous_from_inputs()
+  }, ignoreInit = TRUE, ignoreNULL = TRUE)
   lapply(seq_len(12L), function(i) {
     local({
       ii <- i
       shiny::observeEvent(input[[paste0("sim_prop_", ii)]], {
+        apply_sim_exogenous_from_inputs()
+      }, ignoreInit = TRUE, ignoreNULL = TRUE)
+      shiny::observeEvent(input[[paste0("sim_count_", ii)]], {
         apply_sim_exogenous_from_inputs()
       }, ignoreInit = TRUE, ignoreNULL = TRUE)
     })

@@ -27,16 +27,26 @@ ensure_prepare_state <- function(prepare = NULL) {
   if (is.null(steps)) {
     steps <- base$steps
   } else {
-    steps <- as.data.frame(steps, stringsAsFactors = FALSE)
+    # jsonlite turns "steps": [] into list()/0-col frame; scalar [[<- then fails
+    # with "replacement has 1 row, data has 0".
+    steps <- tryCatch(
+      as.data.frame(steps, stringsAsFactors = FALSE),
+      error = function(e) base$steps
+    )
     need <- c("id", "type", "expr", "enabled")
-    for (nm in need) {
-      if (!nm %in% names(steps)) {
-        steps[[nm]] <- if (nm == "enabled") TRUE else NA_character_
-      }
-    }
-    if (!nrow(steps)) {
+    if (!is.data.frame(steps) || !nrow(steps) || !ncol(steps)) {
       steps <- base$steps
     } else {
+      n <- nrow(steps)
+      for (nm in need) {
+        if (!nm %in% names(steps)) {
+          steps[[nm]] <- if (identical(nm, "enabled")) {
+            rep(TRUE, n)
+          } else {
+            rep(NA_character_, n)
+          }
+        }
+      }
       steps$id <- as.character(steps$id)
       steps$type <- as.character(steps$type)
       steps$expr <- as.character(steps$expr)

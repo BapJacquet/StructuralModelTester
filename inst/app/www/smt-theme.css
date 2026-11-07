@@ -1336,6 +1336,13 @@ body.smt-resizing-v * {
   font-weight: 600;
 }
 
+.smt-node-sub-design {
+  text-transform: none;
+  letter-spacing: 0.02em;
+  color: #6b4ce6;
+  font-weight: 600;
+}
+
 .smt-node-sub-r2 {
   text-transform: none;
   letter-spacing: 0.01em;
