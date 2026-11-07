@@ -30,7 +30,7 @@ graph_payload <- function(state, data = NULL) {
       levels <- character()
       var_kind <- ""
       if (!latent && !is_ix && !is.null(data) && col %in% names(data)) {
-        coding <- variable_coding(data[[col]])
+        coding <- variable_coding_for_node(state, nid, data)
         var_kind <- coding$kind
         if (identical(coding$kind, "categorical")) {
           base <- coding$base
@@ -71,12 +71,14 @@ graph_payload <- function(state, data = NULL) {
     for (i in seq_len(nrow(edges))) {
       lv <- edges$level[i]
       tp <- if ("to_port" %in% names(edges)) edges$to_port[i] else NA_character_
+      tl <- if ("to_level" %in% names(edges)) edges$to_level[i] else NA_character_
       edge_list[[i]] <- list(
         id = edges$id[i],
         from = edges$from[i],
         to = edges$to[i],
         level = if (is.na(lv) || !nzchar(lv)) "" else lv,
         toPort = if (is.na(tp) || !nzchar(tp)) "" else tp,
+        toLevel = if (is.na(tl) || !nzchar(tl)) "" else tl,
         label = edges$label[i],
         color = edge_color(edges[i, ]),
         width = edge_width(edges[i, ]),

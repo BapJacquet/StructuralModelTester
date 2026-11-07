@@ -16,25 +16,90 @@ classify_variable <- function(x) {
   "continuous"
 }
 
+#' Unique levels present in data (character)
+#' @keywords internal
+data_levels_chr <- function(x) {
+  if (is.factor(x)) {
+    return(levels(droplevels(x[!is.na(x)])))
+  }
+  sort(unique(as.character(stats::na.omit(x))))
+}
+
+#' Merge a preferred level order with levels observed in data
+#' @keywords internal
+merge_level_order <- function(preferred, observed) {
+  preferred <- as.character(preferred %||% character())
+  preferred <- preferred[nzchar(preferred)]
+  observed <- as.character(observed %||% character())
+  observed <- observed[nzchar(observed)]
+  keep <- preferred[preferred %in% observed]
+  c(keep, setdiff(observed, keep))
+}
+
 #' Reference coding for a variable (base + non-reference levels)
 #'
-#' Categorical (3+ levels): base = first factor level / sorted unique.
-#' Binary/continuous: no per-level ports (`levels` empty).
+#' Categorical (3+ levels): base = first level after applying optional overrides.
+#' Binary/continuous: no per-level ports (`levels` empty) unless
+#' `force_factor = TRUE` (binary factor with chosen base).
+#'
+#' @param base Preferred reference level (must appear in data).
+#' @param levels_order Preferred full level order.
 #' @keywords internal
-variable_coding <- function(x) {
+variable_coding <- function(x, base = NULL, levels_order = NULL, force_factor = FALSE) {
   kind <- classify_variable(x)
-  if (!identical(kind, "categorical")) {
-    return(list(kind = kind, base = NA_character_, levels = character()))
+  if (!identical(kind, "categorical") && !(isTRUE(force_factor) && identical(kind, "binary"))) {
+    return(list(
+      kind = kind, base = NA_character_, levels = character(),
+      all_levels = character(), ordered = FALSE
+    ))
   }
-  if (is.factor(x)) {
-    levs <- levels(droplevels(x[!is.na(x)]))
-  } else {
-    levs <- sort(unique(as.character(stats::na.omit(x))))
+  observed <- data_levels_chr(x)
+  if (length(observed) < 2L) {
+    return(list(
+      kind = "continuous", base = NA_character_, levels = character(),
+      all_levels = character(), ordered = FALSE
+    ))
   }
-  if (length(levs) < 2L) {
-    return(list(kind = "continuous", base = NA_character_, levels = character()))
+  levs <- merge_level_order(levels_order, observed)
+  base <- as.character(base %||% NA_character_)
+  if (length(base) != 1L || is.na(base) || !nzchar(base) || !base %in% levs) {
+    base <- levs[[1]]
   }
-  list(kind = "categorical", base = levs[[1]], levels = levs[-1])
+  levs <- c(base, setdiff(levs, base))
+  # Ports / dummies: categorical only (3+). Binary keeps empty `levels`.
+  if (identical(kind, "binary") && !isTRUE(force_factor)) {
+    return(list(
+      kind = kind, base = levs[[1]], levels = character(),
+      all_levels = levs, ordered = FALSE
+    ))
+  }
+  if (identical(kind, "binary")) {
+    return(list(
+      kind = "binary", base = levs[[1]], levels = character(),
+      all_levels = levs, ordered = FALSE
+    ))
+  }
+  list(
+    kind = "categorical",
+    base = levs[[1]],
+    levels = levs[-1],
+    all_levels = levs,
+    ordered = FALSE
+  )
+}
+
+#' Coerce a vector to a factor using coding overrides
+#' @keywords internal
+coerce_with_factor_coding <- function(x, base = NULL, levels_order = NULL, ordered = FALSE) {
+  observed <- data_levels_chr(x)
+  if (length(observed) < 2L) return(x)
+  levs <- merge_level_order(levels_order, observed)
+  base <- as.character(base %||% NA_character_)
+  if (length(base) != 1L || is.na(base) || !nzchar(base) || !base %in% levs) {
+    base <- levs[[1]]
+  }
+  levs <- c(base, setdiff(levs, base))
+  factor(as.character(x), levels = levs, ordered = isTRUE(ordered))
 }
 
 #' Safe dummy column name for a contrast level
@@ -109,14 +174,54 @@ estimate_row <- function(lhs, op, rhs, est, se, pvalue,
   )
 }
 
+#' Fixed-effect coefficients (works for lm/glm and merMod)
+#' @keywords internal
+path_fixed_coefs <- function(fit) {
+  if (inherits(fit, "merMod")) {
+    return(lme4::fixef(fit))
+  }
+  stats::coef(fit)
+}
+
+#' Coefficient table for path engines (Estimate / SE / p)
+#' @return matrix/data.frame with rownames = term names
+#' @keywords internal
+path_coef_table <- function(fit) {
+  ct <- tryCatch(stats::coef(summary(fit)), error = function(e) NULL)
+  if (is.null(ct)) return(NULL)
+  as.data.frame(ct)
+}
+
+#' P-value column from a coef summary table
+#' @keywords internal
+path_coef_pvalue <- function(ct, term) {
+  if (is.null(ct) || !term %in% rownames(ct)) return(NA_real_)
+  pcols <- intersect(
+    c("Pr(>|t|)", "Pr(>|z|)", "Pr(>|Chisq|)"),
+    colnames(ct)
+  )
+  if (length(pcols)) return(as.numeric(ct[term, pcols[[1]]]))
+  # Fallback: normal approx from |Estimate|/SE
+  if (ncol(ct) >= 2) {
+    est <- as.numeric(ct[term, 1L])
+    se <- as.numeric(ct[term, 2L])
+    if (is.finite(est) && is.finite(se) && se > 0) {
+      return(2 * stats::pnorm(-abs(est / se)))
+    }
+  }
+  NA_real_
+}
+
 #' Standardized coefficients for lm / glm terms (excl. intercept)
 #'
 #' lm: b * sd(x) / sd(y).
 #' glm: b * sd(x) / sqrt(var(η) + π²/3) (latent-y style, logit/probit-friendly).
+#' Mixed models: left NA for now.
 #' @keywords internal
 standardized_term_coefs <- function(fit) {
-  cf <- stats::coef(fit)
+  cf <- path_fixed_coefs(fit)
   out <- setNames(rep(NA_real_, length(cf)), names(cf))
+  if (inherits(fit, "merMod")) return(out)
   mm <- tryCatch(stats::model.matrix(fit), error = function(e) NULL)
   if (is.null(mm)) return(out)
 
@@ -162,8 +267,8 @@ term_omnibus <- function(fit, xn, engine) {
 joint_wald_test <- function(fit, term_names) {
   empty <- list(df = NA_real_, pvalue = NA_real_, statistic = NA_real_)
   if (!length(term_names)) return(empty)
-  cf <- stats::coef(fit)
-  V <- tryCatch(stats::vcov(fit), error = function(e) NULL)
+  cf <- path_fixed_coefs(fit)
+  V <- tryCatch(as.matrix(stats::vcov(fit)), error = function(e) NULL)
   if (is.null(V)) return(empty)
   idx <- match(term_names, names(cf))
   keep <- !is.na(idx) & is.finite(cf[idx])
@@ -198,7 +303,7 @@ interaction_factor_series <- function(state, dat, node_id, level = NA_character_
   cm <- node_cat_mode(state, node_id)
 
   if (identical(kind, "categorical")) {
-    coding <- variable_coding(x)
+    coding <- variable_coding_for_node(state, node_id, dat)
     if (!length(coding$levels)) {
       stop("Categorical predictor '", col, "' has no non-base levels.", call. = FALSE)
     }
@@ -330,20 +435,39 @@ contrast_coef_rows <- function(ct, xn) {
 
 #' Engine label for a DV node given current model + data
 #'
-#' @return NULL if not a DV; otherwise "lm", "glm", "lavaan", or "unsupported"
+#' @return NULL if not a DV; otherwise "lm", "glm", "lmer", "glmer",
+#'   "lavaan", or "unsupported"
 #' @keywords internal
 dv_model_engine <- function(state, data, node_id, edges = state$edges) {
   dvs <- structural_dv_ids(state, edges)
   if (!node_id %in% dvs) return(NULL)
-  if (model_uses_latents(state, edges)) return("lavaan")
+
+  rm <- node_repeated_measures(state, node_id)
+  use_rm <- isTRUE(rm$enabled) && !is.na(rm$cluster) && nzchar(rm$cluster)
+
+  # Latents are scored then treated as continuous in the path stage
+  if (is_latent_node(state, node_id)) {
+    return(if (use_rm) "lmer" else "lm")
+  }
 
   col <- state$nodes$observed_column[match(node_id, state$nodes$id)]
-  if (is.na(col) || !nzchar(col)) return("lavaan")
-  if (is.null(data) || !col %in% names(data)) return("lm")
+  if (is.na(col) || !nzchar(col)) {
+    return(if (use_rm) "lmer" else "lm")
+  }
+  if (is.null(data) || !col %in% names(data)) {
+    return(if (use_rm) "lmer" else "lm")
+  }
   kind <- classify_variable(data[[col]])
-  if (identical(kind, "binary")) return("glm")
-  if (identical(kind, "categorical")) return("unsupported")
-  "lm"
+  if (identical(kind, "categorical")) {
+    cm <- node_cat_mode(state, node_id)
+    if (!identical(cm, "split")) return("unsupported")
+    # Split categorical DV → one-vs-rest glm/glmer
+    return(if (use_rm) "glmer" else "glm")
+  }
+  if (identical(kind, "binary")) {
+    return(if (use_rm) "glmer" else "glm")
+  }
+  if (use_rm) "lmer" else "lm"
 }
 
 #' Display label for canvas badge
@@ -352,8 +476,10 @@ dv_model_badge <- function(engine) {
   switch(engine,
     lm = "lm",
     glm = "glm · binomial",
+    lmer = "lmer · (1|id)",
+    glmer = "glmer · binomial · (1|id)",
     lavaan = "lavaan",
-    unsupported = "categorical DV (unsupported)",
+    unsupported = "categorical DV: use split",
     engine
   )
 }
@@ -368,11 +494,140 @@ dv_engines_map <- function(state, data, edges = state$edges) {
   out
 }
 
+#' Map latent nodes onto score columns for the path stage
+#' @keywords internal
+state_with_latent_as_scores <- function(state, latent_ids) {
+  state <- ensure_node_kind_columns(state)
+  for (lat in latent_ids) {
+    idx <- match(lat, state$nodes$id)
+    if (is.na(idx)) next
+    nm <- lavaan_var_name(state, lat)
+    state$nodes$observed_column[idx] <- nm
+    state$nodes$node_kind[idx] <- "observed"
+  }
+  state
+}
+
+#' Stage 1: build factor scores from measurement links (graph unchanged)
+#'
+#' Returns analysis data with score columns, a path-ready state (latents mapped
+#' to those columns), CFA fit/estimates/syntax, and latent ids.
+#' @keywords internal
+attach_latent_factor_scores <- function(state, dat) {
+  validate_model_state(state, state$edges)
+  meas <- state$edges[state$edges$type == "measurement", , drop = FALSE]
+  if (!nrow(meas)) {
+    stop(
+      "Latent nodes need measurement links to observed indicators before fitting.",
+      call. = FALSE
+    )
+  }
+  latent_ids <- unique(as.character(meas$from))
+  syntax <- build_measurement_syntax(state, meas)
+
+  # Ensure indicator columns exist
+  for (i in seq_len(nrow(meas))) {
+    ind <- lavaan_var_name(state, meas$to[i])
+    if (!ind %in% names(dat)) {
+      stop(
+        "Indicator '", ind, "' for latent '",
+        node_display_name(state, meas$from[i]),
+        "' is missing from the analysis data.",
+        call. = FALSE
+      )
+    }
+  }
+
+  fit <- tryCatch(
+    lavaan::cfa(syntax, data = dat, meanstructure = FALSE, warn = FALSE),
+    error = function(e) stop("Factor-score CFA error: ", e$message, call. = FALSE)
+  )
+  if (!isTRUE(lavaan::lavInspect(fit, "converged"))) {
+    stop("Factor-score CFA did not converge.", call. = FALSE)
+  }
+
+  sc <- tryCatch(
+    lavaan::lavPredict(fit, type = "lv", method = "regression"),
+    error = function(e) stop("Could not compute factor scores: ", e$message, call. = FALSE)
+  )
+  sc <- as.data.frame(sc, stringsAsFactors = FALSE)
+  if (!nrow(sc) || !ncol(sc)) {
+    stop("Factor-score prediction returned no scores.", call. = FALSE)
+  }
+  # Align to cases used by lavaan
+  used <- tryCatch(
+    lavaan::lavInspect(fit, "case.idx"),
+    error = function(e) NULL
+  )
+  if (is.list(used)) used <- used[[1]]
+  if (!is.null(used) && length(used) == nrow(sc)) {
+    for (nm in names(sc)) {
+      dat[[nm]] <- NA_real_
+      dat[[nm]][used] <- as.numeric(sc[[nm]])
+    }
+  } else if (nrow(sc) == nrow(dat)) {
+    for (nm in names(sc)) dat[[nm]] <- as.numeric(sc[[nm]])
+  } else {
+    stop(
+      "Factor-score rows (", nrow(sc), ") do not match analysis data (", nrow(dat), ").",
+      call. = FALSE
+    )
+  }
+  # Drop rows without scores (should be rare after listwise prepare)
+  score_cols <- names(sc)
+  dat <- dat[stats::complete.cases(dat[, score_cols, drop = FALSE]), , drop = FALSE]
+  if (!nrow(dat)) {
+    stop("No complete cases after attaching factor scores.", call. = FALSE)
+  }
+
+  pe <- as.data.frame(lavaan::parameterEstimates(fit, standardized = TRUE))
+  meas_est <- empty_estimates()
+  if (nrow(pe)) {
+    pe <- pe[pe$op == "=~", , drop = FALSE]
+    if (nrow(pe)) {
+      std_col <- if ("std.all" %in% names(pe)) {
+        "std.all"
+      } else if ("std.lv" %in% names(pe)) {
+        "std.lv"
+      } else {
+        NA_character_
+      }
+      meas_est <- data.frame(
+        lhs = as.character(pe$lhs),
+        op = as.character(pe$op),
+        rhs = as.character(pe$rhs),
+        est = as.numeric(pe$est),
+        se = as.numeric(pe$se),
+        pvalue = as.numeric(pe$pvalue),
+        est_std = if (is.na(std_col)) NA_real_ else as.numeric(pe[[std_col]]),
+        df = NA_real_,
+        level = NA_character_,
+        kind = "effect",
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+
+  state_path <- state_with_latent_as_scores(state, latent_ids)
+  list(
+    data = dat,
+    state = state_path,
+    latent_ids = latent_ids,
+    measurement_fit = fit,
+    measurement_estimates = meas_est,
+    measurement_syntax = syntax
+  )
+}
+
 #' Fit the structural model with a context-aware engine
 #'
 #' Observed-only path models use equation-wise lm / glm (binomial) based on
 #' each dependent variable's type. Multi-level categorical predictors are kept
-#' as factors (k−1 contrasts + omnibus test). Models with latents use lavaan.
+#' as factors (k−1 contrasts + omnibus test).
+#'
+#' When the graph includes latents, a **two-step** procedure runs: (1) CFA /
+#' factor scores from measurement links, (2) the usual path engine on structural
+#' links with latents replaced by those scores (AIC/BIC, split logistic, etc.).
 #'
 #' @keywords internal
 fit_structural_model <- function(state, data, include_edge_ids = NULL) {
@@ -382,26 +637,43 @@ fit_structural_model <- function(state, data, include_edge_ids = NULL) {
   dv_ids <- structural_dv_ids(state, state$edges)
   dat <- prepare_analysis_data(state, data)
 
-  if (!nrow(edges)) {
-    if (model_uses_latents(state, state$edges)) {
-      stop(
-        "Cannot fit a null model while the graph has latent/measurement structure. ",
-        "Keep measurement links fixed or include them in the candidate.",
-        call. = FALSE
-      )
+  # Two-step whenever the *full* graph has latents (scores from all measurement links)
+  if (model_uses_latents(state, state$edges)) {
+    attached <- attach_latent_factor_scores(state, dat)
+    # Rematerialize interactions / polys with latents treated as observed scores
+    dat_path <- prepare_analysis_data(attached$state, attached$data)
+    struct_edges <- edges[edges$type != "measurement", , drop = FALSE]
+    if (!length(dv_ids) && !nrow(struct_edges)) {
+      stop("No structural dependent variables to fit.", call. = FALSE)
     }
+    path_res <- fit_path_equations(
+      attached$state, dat_path, struct_edges, dv_ids = dv_ids
+    )
+    # Keep measurement loadings on the canvas; structural coeffs from path stage
+    est <- path_res$estimates
+    if (nrow(attached$measurement_estimates)) {
+      est <- rbind(attached$measurement_estimates, est)
+    }
+    path_res$estimates <- est
+    path_res$syntax <- paste0(
+      "# two-step: factor scores (CFA) then path (lm/glm)\n",
+      "# measurement\n",
+      attached$measurement_syntax,
+      "\n# path\n",
+      path_res$syntax
+    )
+    path_res$two_step <- TRUE
+    path_res$measurement_fit <- attached$measurement_fit
+    path_res$engine <- "path"
+    return(path_res)
+  }
+
+  if (!nrow(edges)) {
     if (!length(dv_ids)) stop("No dependent variables to fit.", call. = FALSE)
     return(fit_path_equations(state, dat, edges, dv_ids = dv_ids))
   }
 
-  if (model_uses_latents(state, edges)) {
-    validate_model_state(state, edges)
-    fit_lavaan_model(state, dat, edges)
-  } else {
-    # Reduced path candidates may omit predictors; skip full latent validation
-    if (any(edges$type == "measurement")) validate_model_state(state, edges)
-    fit_path_equations(state, dat, edges, dv_ids = dv_ids)
-  }
+  fit_path_equations(state, dat, edges, dv_ids = dv_ids)
 }
 
 #' @keywords internal
@@ -521,8 +793,10 @@ r_squared_from_fitted <- function(fitted, state) {
 
   if (identical(fitted$engine, "path") && is.list(fitted$fit) &&
         !inherits(fitted$fit, "lavaan")) {
-    for (dv in names(fitted$fit)) {
-      slot <- r_squared_one_fit(fitted$fit[[dv]])
+    for (key in names(fitted$fit)) {
+      # Keys may be "nodeId" or "nodeId::responseLevel"
+      dv <- sub("::.*$", "", key)
+      slot <- r_squared_one_fit(fitted$fit[[key]])
       if (!is.null(slot)) out[[dv]] <- slot
     }
     return(out)
@@ -622,9 +896,100 @@ expand_continuous_predictor <- function(local_dat, xn, x_num, max_degree = 1L) {
   list(data = local_dat, term_names = term_names, term_meta = term_meta)
 }
 
-#' Build design columns for one DV equation from structural edges
+#' Outcome display / estimate lhs for a DV equation
 #' @keywords internal
-build_path_terms <- function(state, dat, preds) {
+dv_outcome_lhs <- function(yname, response_level = NA_character_) {
+  if (is.null(response_level) || is.na(response_level) || !nzchar(response_level)) {
+    return(as.character(yname))
+  }
+  paste0(yname, "[", response_level, "]")
+}
+
+#' Allowed DV outcome transforms (continuous only)
+#' @keywords internal
+dv_transform_choices <- function() {
+  c(
+    "None" = "none",
+    "log (natural)" = "log",
+    "log10" = "log10",
+    "log(1 + x)" = "log1p",
+    "sqrt" = "sqrt"
+  )
+}
+
+#' Display label for a transformed outcome, e.g. log(Y)
+#' @keywords internal
+dv_transform_lhs <- function(yname, transform = "none") {
+  yname <- as.character(yname)
+  if (is.null(transform) || is.na(transform) || !nzchar(transform) ||
+        identical(transform, "none")) {
+    return(yname)
+  }
+  switch(
+    as.character(transform),
+    log = paste0("log(", yname, ")"),
+    log10 = paste0("log10(", yname, ")"),
+    log1p = paste0("log1p(", yname, ")"),
+    sqrt = paste0("sqrt(", yname, ")"),
+    yname
+  )
+}
+
+#' Apply a numeric outcome transform; errors on invalid domain
+#' @keywords internal
+apply_dv_transform <- function(x, transform = "none", yname = "y") {
+  if (is.null(transform) || is.na(transform) || !nzchar(transform) ||
+        identical(transform, "none")) {
+    return(x)
+  }
+  x <- as.numeric(x)
+  switch(
+    as.character(transform),
+    log = {
+      if (any(is.finite(x) & x <= 0)) {
+        stop(
+          "Cannot take log of '", yname, "': values must be > 0.",
+          call. = FALSE
+        )
+      }
+      log(x)
+    },
+    log10 = {
+      if (any(is.finite(x) & x <= 0)) {
+        stop(
+          "Cannot take log10 of '", yname, "': values must be > 0.",
+          call. = FALSE
+        )
+      }
+      log10(x)
+    },
+    log1p = {
+      if (any(is.finite(x) & x < -1)) {
+        stop(
+          "Cannot take log1p of '", yname, "': values must be >= -1.",
+          call. = FALSE
+        )
+      }
+      log1p(x)
+    },
+    sqrt = {
+      if (any(is.finite(x) & x < 0)) {
+        stop(
+          "Cannot take sqrt of '", yname, "': values must be >= 0.",
+          call. = FALSE
+        )
+      }
+      sqrt(x)
+    },
+    x
+  )
+}
+
+#' Build design columns for one DV equation from structural edges
+#'
+#' @param response_level For categorical DV split: category coded 1 vs rest.
+#' @keywords internal
+build_path_terms <- function(state, dat, preds, response_level = NA_character_) {
   state <- ensure_edge_to_port(state)
   y_id <- preds$to[1]
   yname <- lavaan_var_name(state, y_id)
@@ -632,17 +997,32 @@ build_path_terms <- function(state, dat, preds) {
     stop("Dependent variable '", yname, "' not found in analysis data.", call. = FALSE)
   }
   y_kind <- classify_variable(dat[[yname]])
-  if (identical(y_kind, "categorical")) {
-    stop(
-      "Dependent variable '", yname, "' is multi-level categorical. ",
-      "Only binary (glm) or continuous (lm) outcomes are supported in path mode.",
-      call. = FALSE
-    )
-  }
-
   local_dat <- dat
-  if (identical(y_kind, "binary")) {
+  lhs_name <- yname
+  y_transform <- node_dv_transform(state, y_id)
+
+  if (identical(y_kind, "categorical")) {
+    if (is.null(response_level) || is.na(response_level) || !nzchar(response_level)) {
+      stop(
+        "Dependent variable '", yname, "' is multi-level categorical. ",
+        "In split mode, wire predictors into a specific response level ",
+        "(one-vs-rest). Omnibus categorical DVs are not supported yet.",
+        call. = FALSE
+      )
+    }
+    # One-vs-rest binary outcome (transforms do not apply)
+    local_dat[[yname]] <- as.integer(
+      as.character(dat[[yname]]) == as.character(response_level)
+    )
+    y_kind <- "binary"
+    lhs_name <- dv_outcome_lhs(yname, response_level)
+  } else if (identical(y_kind, "binary")) {
     local_dat[[yname]] <- as_binary01(local_dat[[yname]])
+  } else if (!identical(y_transform, "none")) {
+    local_dat[[yname]] <- apply_dv_transform(
+      local_dat[[yname]], y_transform, yname = yname
+    )
+    lhs_name <- dv_transform_lhs(yname, y_transform)
   }
 
   term_names <- character()
@@ -690,7 +1070,7 @@ build_path_terms <- function(state, dat, preds) {
       dat_xn <- dat[[xn]]
     }
     lvl <- if ("level" %in% names(preds)) preds$level[i] else NA_character_
-    coding <- variable_coding(dat_xn)
+    coding <- variable_coding_for_node(state, from_id, local_dat)
     kind <- classify_variable(dat_xn)
     rel_kind <- if ("rel_kind" %in% names(preds)) preds$rel_kind[i] else "linear"
     if (is.na(rel_kind) || !nzchar(rel_kind)) rel_kind <- "linear"
@@ -776,7 +1156,13 @@ build_path_terms <- function(state, dat, preds) {
 
   list(
     yname = yname,
+    lhs_name = lhs_name,
     y_kind = y_kind,
+    response_level = if (is.na(response_level) || !nzchar(as.character(response_level))) {
+      NA_character_
+    } else {
+      as.character(response_level)
+    },
     data = local_dat,
     term_names = unique(term_names),
     term_meta = term_meta,
@@ -784,12 +1170,76 @@ build_path_terms <- function(state, dat, preds) {
   )
 }
 
-#' Equation-wise lm / glm path models (observed variables only)
+#' Resolve cluster column for a DV (or NULL if RM not active)
+#' @keywords internal
+dv_cluster_column <- function(state, dv_id, dat) {
+  rm <- node_repeated_measures(state, dv_id)
+  if (!isTRUE(rm$enabled)) return(NULL)
+  cl <- rm$cluster
+  if (is.na(cl) || !nzchar(cl)) {
+    stop(
+      "Node '", node_display_name(state, dv_id),
+      "' has repeated measures enabled but no clustering variable.",
+      call. = FALSE
+    )
+  }
+  if (is.null(dat) || !cl %in% names(dat)) {
+    stop(
+      "Clustering variable '", cl, "' for DV '",
+      node_display_name(state, dv_id), "' not found in the dataset.",
+      call. = FALSE
+    )
+  }
+  cl
+}
+
+#' Fit one path equation (lm/glm or lmer/glmer random intercept)
+#' @keywords internal
+fit_one_path_equation <- function(yname, y_kind, rhs_terms, local_dat,
+                                  cluster = NULL) {
+  rhs <- if (!length(rhs_terms)) "1" else paste(rhs_terms, collapse = " + ")
+  binary <- identical(y_kind, "binary")
+  if (!is.null(cluster)) {
+    # Ensure grouping factor
+    local_dat[[cluster]] <- as.factor(local_dat[[cluster]])
+    re <- paste0("(1|", cluster, ")")
+    fml <- stats::as.formula(paste(yname, "~", rhs, "+", re))
+    if (binary) {
+      fit <- lme4::glmer(fml, data = local_dat, family = stats::binomial())
+      # Promote to lmerTest-compatible summary when possible
+      syntax <- paste0("glmer(binomial): ", yname, " ~ ", rhs, " + ", re)
+      eng <- "glmer"
+    } else {
+      fit <- lmerTest::lmer(fml, data = local_dat)
+      syntax <- paste0("lmer: ", yname, " ~ ", rhs, " + ", re)
+      eng <- "lmer"
+    }
+  } else if (binary) {
+    fit <- stats::glm(
+      stats::as.formula(paste(yname, "~", rhs)),
+      data = local_dat,
+      family = stats::binomial()
+    )
+    syntax <- paste0("glm(binomial): ", yname, " ~ ", rhs)
+    eng <- "glm"
+  } else {
+    fit <- stats::lm(
+      stats::as.formula(paste(yname, "~", rhs)),
+      data = local_dat
+    )
+    syntax <- paste0("lm: ", yname, " ~ ", rhs)
+    eng <- "lm"
+  }
+  list(fit = fit, syntax = syntax, engine = eng)
+}
+
+#' Equation-wise lm / glm / lmer / glmer path models (observed variables only)
 #'
 #' @param dv_ids Optional DV node ids (from the full graph). Ensures intercept-only
 #'   equations when a candidate omits all predictors for a DV.
 #' @keywords internal
 fit_path_equations <- function(state, dat, edges, dv_ids = NULL) {
+  state <- ensure_node_rm_columns(state)
   struct <- edges[edges$type != "measurement", , drop = FALSE]
   if (!"level" %in% names(struct)) {
     struct$level <- NA_character_
@@ -807,114 +1257,155 @@ fit_path_equations <- function(state, dat, edges, dv_ids = NULL) {
   npar_sum <- 0L
   row_i <- 0L
 
+  if (!"to_level" %in% names(struct)) struct$to_level <- NA_character_
+
   for (dv in dv_ids) {
-    preds <- if (nrow(struct)) {
+    preds_all <- if (nrow(struct)) {
       struct[struct$to == dv, , drop = FALSE]
     } else {
-      struct
+      struct[0, , drop = FALSE]
     }
+    cluster <- dv_cluster_column(state, dv, dat)
+    yname <- lavaan_var_name(state, dv)
+    if (!yname %in% names(dat)) {
+      stop("Dependent variable '", yname, "' not found in analysis data.", call. = FALSE)
+    }
+    y_kind0 <- classify_variable(dat[[yname]])
 
-    if (!nrow(preds)) {
-      # Intercept-only (null / reduced) equation for this DV
-      yname <- lavaan_var_name(state, dv)
-      if (!yname %in% names(dat)) {
-        stop("Dependent variable '", yname, "' not found in analysis data.", call. = FALSE)
-      }
-      y_kind <- classify_variable(dat[[yname]])
-      if (identical(y_kind, "categorical")) {
+    # Response slices: categorical split → one equation per to_level
+    if (identical(y_kind0, "categorical")) {
+      if (!identical(node_cat_mode(state, dv), "split")) {
         stop(
-          "Dependent variable '", yname, "' is multi-level categorical. ",
-          "Only binary (glm) or continuous (lm) outcomes are supported in path mode.",
+          "Dependent variable '", yname, "' is categorical in omnibus mode. ",
+          "Switch the node to split and wire predictors into a response level ",
+          "(one-vs-rest).",
           call. = FALSE
         )
       }
-      local_dat <- dat
-      if (identical(y_kind, "binary")) {
-        local_dat[[yname]] <- as_binary01(local_dat[[yname]])
-        fit <- stats::glm(
-          stats::as.formula(paste(yname, "~ 1")),
-          data = local_dat,
-          family = stats::binomial()
+      if (!nrow(preds_all)) {
+        stop(
+          "Categorical DV '", yname, "' needs predictors wired into a response level.",
+          call. = FALSE
         )
-        syntax_lines <- c(syntax_lines, paste0("glm(binomial): ", yname, " ~ 1"))
-      } else {
-        fit <- stats::lm(stats::as.formula(paste(yname, "~ 1")), data = local_dat)
-        syntax_lines <- c(syntax_lines, paste0("lm: ", yname, " ~ 1"))
       }
-      fits[[dv]] <- fit
+      resp_levels <- unique(as.character(preds_all$to_level))
+      resp_levels <- resp_levels[!is.na(resp_levels) & nzchar(resp_levels)]
+      if (!length(resp_levels)) {
+        stop(
+          "Categorical DV '", yname, "': drop links on a specific left-hand ",
+          "response port (split), not the node body.",
+          call. = FALSE
+        )
+      }
+    } else {
+      resp_levels <- NA_character_
+    }
+
+    for (tl in resp_levels) {
+      preds <- if (is.na(tl) || !nzchar(tl)) {
+        preds_all
+      } else {
+        preds_all[!is.na(preds_all$to_level) & preds_all$to_level == tl, , drop = FALSE]
+      }
+      fit_key <- if (is.na(tl) || !nzchar(tl)) dv else paste0(dv, "::", tl)
+
+      if (!nrow(preds)) {
+        # Intercept-only (null / reduced) — not used for categorical slices
+        if (identical(y_kind0, "categorical")) next
+        local_dat <- dat
+        y_kind <- y_kind0
+        lhs_disp <- yname
+        if (identical(y_kind, "binary")) {
+          local_dat[[yname]] <- as_binary01(local_dat[[yname]])
+        } else {
+          y_tr <- node_dv_transform(state, dv)
+          if (!identical(y_tr, "none")) {
+            local_dat[[yname]] <- apply_dv_transform(
+              local_dat[[yname]], y_tr, yname = yname
+            )
+            lhs_disp <- dv_transform_lhs(yname, y_tr)
+          }
+        }
+        fitted_one <- fit_one_path_equation(yname, y_kind, character(), local_dat, cluster)
+        syn <- fitted_one$syntax
+        if (!identical(lhs_disp, yname)) {
+          syn <- sub(
+            paste0("^((?:glm|glmer|lm|lmer)[^:]*): ", yname),
+            paste0("\\1: ", lhs_disp),
+            syn
+          )
+        }
+        fits[[fit_key]] <- fitted_one$fit
+        syntax_lines <- c(syntax_lines, syn)
+        aic_sum <- aic_sum + stats::AIC(fitted_one$fit)
+        bic_sum <- bic_sum + stats::BIC(fitted_one$fit)
+        npar_sum <- npar_sum + length(path_fixed_coefs(fitted_one$fit))
+        next
+      }
+
+      built <- build_path_terms(state, dat, preds, response_level = tl)
+      if (!length(built$term_names)) {
+        stop("No predictors for dependent variable '", built$lhs_name, "'.", call. = FALSE)
+      }
+
+      fitted_one <- fit_one_path_equation(
+        built$yname, built$y_kind, built$term_names, built$data, cluster
+      )
+      # Tag syntax with response level / transform when display lhs differs
+      syn <- fitted_one$syntax
+      if (!identical(built$lhs_name, built$yname)) {
+        syn <- sub(
+          paste0("^((?:glm|glmer|lm|lmer)[^:]*): ", built$yname),
+          paste0("\\1: ", built$lhs_name),
+          syn
+        )
+      }
+      fit <- fitted_one$fit
+      fits[[fit_key]] <- fit
+      syntax_lines <- c(syntax_lines, syn)
       aic_sum <- aic_sum + stats::AIC(fit)
       bic_sum <- bic_sum + stats::BIC(fit)
-      npar_sum <- npar_sum + length(stats::coef(fit))
-      next
-    }
+      npar_sum <- npar_sum + length(path_fixed_coefs(fit))
 
-    built <- build_path_terms(state, dat, preds)
-    if (!length(built$term_names)) {
-      stop("No predictors for dependent variable '", built$yname, "'.", call. = FALSE)
-    }
+      ct <- path_coef_table(fit)
+      bstd <- standardized_term_coefs(fit)
+      lhs <- built$lhs_name
 
-    eng <- if (identical(built$y_kind, "binary")) "glm" else "lm"
-    fml <- stats::as.formula(
-      paste(built$yname, "~", paste(built$term_names, collapse = " + "))
-    )
+      omni <- built$omnibus_groups %||% list()
+      for (xn in names(omni)) {
+        wt <- joint_wald_test(fit, omni[[xn]])
+        row_i <- row_i + 1L
+        est_rows[[row_i]] <- estimate_row(
+          lhs = lhs,
+          op = "~",
+          rhs = xn,
+          est = NA_real_,
+          se = NA_real_,
+          pvalue = wt$pvalue,
+          est_std = NA_real_,
+          df = wt$df,
+          level = NA_character_,
+          kind = "omnibus"
+        )
+      }
 
-    if (identical(eng, "glm")) {
-      fit <- stats::glm(fml, data = built$data, family = stats::binomial())
-      syntax_lines <- c(
-        syntax_lines,
-        paste0("glm(binomial): ", built$yname, " ~ ", paste(built$term_names, collapse = " + "))
-      )
-    } else {
-      fit <- stats::lm(fml, data = built$data)
-      syntax_lines <- c(
-        syntax_lines,
-        paste0("lm: ", built$yname, " ~ ", paste(built$term_names, collapse = " + "))
-      )
-    }
-
-    fits[[dv]] <- fit
-    aic_sum <- aic_sum + stats::AIC(fit)
-    bic_sum <- bic_sum + stats::BIC(fit)
-    npar_sum <- npar_sum + length(stats::coef(fit))
-
-    ct <- stats::coef(summary(fit))
-    bstd <- standardized_term_coefs(fit)
-
-    # Omnibus joint tests for categorical blocks
-    omni <- built$omnibus_groups %||% list()
-    for (xn in names(omni)) {
-      wt <- joint_wald_test(fit, omni[[xn]])
-      row_i <- row_i + 1L
-      est_rows[[row_i]] <- estimate_row(
-        lhs = built$yname,
-        op = "~",
-        rhs = xn,
-        est = NA_real_,
-        se = NA_real_,
-        pvalue = wt$pvalue,
-        est_std = NA_real_,
-        df = wt$df,
-        level = NA_character_,
-        kind = "omnibus"
-      )
-    }
-
-    for (tn in built$term_names) {
-      if (!tn %in% rownames(ct)) next
-      meta <- built$term_meta[[tn]]
-      row_i <- row_i + 1L
-      est_rows[[row_i]] <- estimate_row(
-        lhs = built$yname,
-        op = "~",
-        rhs = meta$rhs,
-        est = as.numeric(ct[tn, 1L]),
-        se = as.numeric(ct[tn, 2L]),
-        pvalue = as.numeric(ct[tn, ncol(ct)]),
-        est_std = if (tn %in% names(bstd)) as.numeric(bstd[[tn]]) else NA_real_,
-        df = 1,
-        level = meta$level,
-        kind = "effect"
-      )
+      for (tn in built$term_names) {
+        if (is.null(ct) || !tn %in% rownames(ct)) next
+        meta <- built$term_meta[[tn]]
+        row_i <- row_i + 1L
+        est_rows[[row_i]] <- estimate_row(
+          lhs = lhs,
+          op = "~",
+          rhs = meta$rhs,
+          est = as.numeric(ct[tn, 1L]),
+          se = as.numeric(ct[tn, 2L]),
+          pvalue = path_coef_pvalue(ct, tn),
+          est_std = if (tn %in% names(bstd)) as.numeric(bstd[[tn]]) else NA_real_,
+          df = 1,
+          level = meta$level,
+          kind = "effect"
+        )
+      }
     }
   }
 

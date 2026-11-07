@@ -9,6 +9,47 @@ edge_rel_kind_choices <- function() {
   )
 }
 
+#' Column name used for plotting a node (observed column or latent score name)
+#' @keywords internal
+node_plot_column <- function(state, node_id) {
+  state <- ensure_node_kind_columns(state)
+  if (is.na(node_id) || !nzchar(as.character(node_id))) return(NA_character_)
+  if (is_interaction_node(state, node_id)) return(NA_character_)
+  col <- state$nodes$observed_column[match(node_id, state$nodes$id)]
+  if (!is.na(col) && nzchar(col)) return(as.character(col))
+  if (is_latent_node(state, node_id)) return(lavaan_var_name(state, node_id))
+  NA_character_
+}
+
+#' Ensure analysis data includes regression factor scores for latents (plots)
+#' @keywords internal
+enrich_data_with_factor_scores <- function(state, data) {
+  if (is.null(data) || !nrow(data)) return(data)
+  state <- ensure_node_kind_columns(state)
+  if (!model_uses_latents(state, state$edges)) return(data)
+  meas <- state$edges[state$edges$type == "measurement", , drop = FALSE]
+  if (!nrow(meas)) return(data)
+  latent_ids <- unique(as.character(meas$from))
+  score_nms <- vapply(latent_ids, function(id) lavaan_var_name(state, id), character(1))
+  if (all(score_nms %in% names(data))) {
+    ok <- vapply(score_nms, function(nm) {
+      any(is.finite(suppressWarnings(as.numeric(data[[nm]]))))
+    }, logical(1))
+    if (all(ok)) return(data)
+  }
+  tryCatch(
+    attach_latent_factor_scores(state, data)$data,
+    error = function(e) data
+  )
+}
+
+#' Axis label for a plotted node (marks latent scores)
+#' @keywords internal
+node_plot_label <- function(state, node_id) {
+  lab <- node_display_name(state, node_id)
+  if (is_latent_node(state, node_id)) paste0(lab, " (score)") else lab
+}
+
 #' Build a ggplot for one edge's observed relationship
 #'
 #' @param state Model state (estimates used in subtitle when present).
@@ -38,9 +79,7 @@ edge_relationship_plot <- function(state, data, edge_id,
   }
   if (is.na(rel_kind) || !nzchar(rel_kind)) rel_kind <- "linear"
 
-  to_col <- state$nodes$observed_column[match(to_id, state$nodes$id)]
-  from_lab <- node_display_name(state, from_id)
-  to_lab <- node_display_name(state, to_id)
+  to_level <- if ("to_level" %in% names(state$edges)) state$edges$to_level[idx] else NA_character_
 
   if (is_interaction_node(state, to_id)) {
     return(edge_plot_message(
@@ -49,23 +88,33 @@ edge_relationship_plot <- function(state, data, edge_id,
     ))
   }
 
+  # Latents → regression factor scores (same as two-step path stage)
+  data <- enrich_data_with_factor_scores(state, data)
+
   if (is_interaction_node(state, from_id)) {
     return(edge_interaction_plot(
       state, data, from_id, to_id, est, est_std, etype,
-      show_fit = show_fit, rel_kind = rel_kind
+      show_fit = show_fit, rel_kind = rel_kind,
+      to_level = to_level
     ))
   }
 
-  from_col <- state$nodes$observed_column[match(from_id, state$nodes$id)]
+  from_col <- node_plot_column(state, from_id)
+  to_col <- node_plot_column(state, to_id)
+  from_lab <- node_plot_label(state, from_id)
+  to_lab <- node_plot_label(state, to_id)
 
   if (is.na(from_col) || !nzchar(from_col) || is.na(to_col) || !nzchar(to_col)) {
     return(edge_plot_message(
-      "Observed variables only",
-      "This link involves a latent — no raw bivariate plot."
+      "Cannot plot",
+      "This link needs observed variables or a latent with measurement indicators."
     ))
   }
   if (!from_col %in% names(data) || !to_col %in% names(data)) {
-    return(edge_plot_message("Missing data", "Mapped columns not found in the loaded data."))
+    return(edge_plot_message(
+      "Missing scores / data",
+      "Could not build factor scores for this latent (check measurement links and data)."
+    ))
   }
 
   df <- data.frame(
@@ -80,25 +129,46 @@ edge_relationship_plot <- function(state, data, edge_id,
 
   x_kind <- classify_variable(df$x_raw)
   y_kind <- classify_variable(df$y_raw)
+  # Split categorical DV: plot one-vs-rest for the wired response level
+  if (identical(y_kind, "categorical")) {
+    if (is.na(to_level) || !nzchar(to_level)) {
+      return(edge_plot_message(
+        "Pick a response level",
+        "Wire this link into a left-hand category port on the DV (split one-vs-rest)."
+      ))
+    }
+    df$y_raw <- as.integer(as.character(df$y_raw) == as.character(to_level))
+    y_kind <- "binary"
+    to_lab <- dv_outcome_lhs(to_lab, to_level)
+  } else if (identical(y_kind, "continuous")) {
+    y_tr <- node_dv_transform(state, to_id)
+    if (!identical(y_tr, "none")) {
+      df$y_raw <- apply_dv_transform(df$y_raw, y_tr, yname = to_lab)
+      to_lab <- dv_transform_lhs(to_lab, y_tr)
+    }
+  }
   subtitle <- edge_plot_subtitle(est, est_std, etype, level, show_fit, rel_kind)
 
-  if (identical(y_kind, "categorical")) {
-    return(edge_plot_message(
-      "Unsupported DV",
-      "Multi-level categorical outcomes are not plotted."
-    ))
-  }
-
   if (!is.na(level) && nzchar(level) && identical(x_kind, "categorical")) {
-    coding <- variable_coding(df$x_raw)
-    base <- coding$base
-    df$x_plot <- factor(
-      ifelse(
-        as.character(df$x_raw) == level, level,
-        ifelse(as.character(df$x_raw) == base, base, "other")
-      ),
-      levels = unique(c(base, level, "other"))
+    meta <- node_factor_coding(state, from_id)
+    df$x_raw <- coerce_with_factor_coding(
+      df$x_raw, base = meta$base, levels_order = meta$levels, ordered = meta$ordered
     )
+    coding <- variable_coding(
+      df$x_raw, base = meta$base, levels_order = meta$levels
+    )
+    base <- coding$base
+    # Only contrast level vs reference — drop remaining levels (no residual "other" bin)
+    xr <- as.character(df$x_raw)
+    keep <- xr %in% c(base, level)
+    df <- df[keep, , drop = FALSE]
+    if (!nrow(df)) {
+      return(edge_plot_message(
+        "No data",
+        sprintf("No cases in levels '%s' or '%s'.", level, base)
+      ))
+    }
+    df$x_plot <- factor(as.character(df$x_raw), levels = unique(c(base, level)))
     x_label <- sprintf("%s (%s vs %s)", from_lab, level, base)
     return(edge_plot_group(
       df, to_lab, y_kind, x_label, subtitle,
@@ -307,8 +377,10 @@ edge_plot_theme <- function() {
 #' Simple-slopes plot for an interaction product → DV edge
 #' @keywords internal
 edge_interaction_plot <- function(state, data, ix_id, to_id, est, est_std, etype,
-                                  show_fit = FALSE, rel_kind = "linear") {
+                                  show_fit = FALSE, rel_kind = "linear",
+                                  to_level = NA_character_) {
   state <- ensure_node_kind_columns(state)
+  data <- enrich_data_with_factor_scores(state, data)
   fac <- interaction_factors(state, ix_id)
   fa <- fac$a
   fb <- fac$b
@@ -318,12 +390,15 @@ edge_interaction_plot <- function(state, data, ix_id, to_id, est, est_std, etype
       "Wire two predictors into the × input ports first."
     ))
   }
-  col_a <- state$nodes$observed_column[match(fa, state$nodes$id)]
-  col_b <- state$nodes$observed_column[match(fb, state$nodes$id)]
-  col_y <- state$nodes$observed_column[match(to_id, state$nodes$id)]
+  col_a <- node_plot_column(state, fa)
+  col_b <- node_plot_column(state, fb)
+  col_y <- node_plot_column(state, to_id)
   if (any(is.na(c(col_a, col_b, col_y))) ||
         !all(c(col_a, col_b, col_y) %in% names(data))) {
-    return(edge_plot_message("Missing data", "Interaction factors or DV not in data."))
+    return(edge_plot_message(
+      "Missing scores / data",
+      "Interaction factors or DV unavailable (latents need measurement indicators)."
+    ))
   }
 
   df <- data.frame(
@@ -338,10 +413,24 @@ edge_interaction_plot <- function(state, data, ix_id, to_id, est, est_std, etype
   }
 
   y_kind <- classify_variable(df$y)
+  y_lab <- node_plot_label(state, to_id)
   if (identical(y_kind, "categorical")) {
-    return(edge_plot_message("Unsupported DV", "Multi-level categorical outcomes are not plotted."))
+    if (is.na(to_level) || !nzchar(to_level)) {
+      return(edge_plot_message(
+        "Pick a response level",
+        "Wire × into a left-hand category port on the DV (split one-vs-rest)."
+      ))
+    }
+    df$y <- as.integer(as.character(df$y) == as.character(to_level))
+    y_kind <- "binary"
+    y_lab <- dv_outcome_lhs(y_lab, to_level)
+  } else if (identical(y_kind, "binary")) {
+    df$y <- as_binary01(df$y)
+  } else {
+    y_tr <- node_dv_transform(state, to_id)
+    df$y <- apply_dv_transform(as.numeric(df$y), y_tr, yname = y_lab)
+    y_lab <- dv_transform_lhs(y_lab, y_tr)
   }
-  if (identical(y_kind, "binary")) df$y <- as_binary01(df$y) else df$y <- as.numeric(df$y)
 
   a_kind <- classify_variable(df$a)
   b_kind <- classify_variable(df$b)
@@ -359,29 +448,29 @@ edge_interaction_plot <- function(state, data, ix_id, to_id, est, est_std, etype
       # already set x from b in the else branch? re-resolve:
       x <- factor_numeric_for_product(df$b, center = FALSE)
       z_raw <- df$a
-      x_lab <- node_display_name(state, fb)
-      z_lab <- node_display_name(state, fa)
+      x_lab <- node_plot_label(state, fb)
+      z_lab <- node_plot_label(state, fa)
       if (!is.na(fac_w$level_a) && nzchar(fac_w$level_a)) {
         keep_lv <- as.character(df$a) == fac_w$level_a |
           as.character(df$a) == variable_coding(df$a)$base
         df <- df[keep_lv, , drop = FALSE]
         x <- factor_numeric_for_product(df$b, center = FALSE)
         z_raw <- df$a
-        z_lab <- paste0(node_display_name(state, fa), "[", fac_w$level_a, "]")
+        z_lab <- paste0(node_plot_label(state, fa), "[", fac_w$level_a, "]")
       }
     } else if (identical(b_kind, "categorical") &&
                  (identical(a_kind, "continuous") || identical(a_kind, "binary"))) {
       x <- factor_numeric_for_product(df$a, center = FALSE)
       z_raw <- df$b
-      x_lab <- node_display_name(state, fa)
-      z_lab <- node_display_name(state, fb)
+      x_lab <- node_plot_label(state, fa)
+      z_lab <- node_plot_label(state, fb)
       if (!is.na(fac_w$level_b) && nzchar(fac_w$level_b)) {
         keep_lv <- as.character(df$b) == fac_w$level_b |
           as.character(df$b) == variable_coding(df$b)$base
         df <- df[keep_lv, , drop = FALSE]
         x <- factor_numeric_for_product(df$a, center = FALSE)
         z_raw <- df$b
-        z_lab <- paste0(node_display_name(state, fb), "[", fac_w$level_b, "]")
+        z_lab <- paste0(node_plot_label(state, fb), "[", fac_w$level_b, "]")
       }
     } else {
       return(edge_plot_message(
@@ -396,13 +485,13 @@ edge_interaction_plot <- function(state, data, ix_id, to_id, est, est_std, etype
                (identical(a_kind, "binary") && !identical(b_kind, "continuous"))) {
     x <- factor_numeric_for_product(df$a, center = FALSE)
     z_raw <- df$b
-    x_lab <- node_display_name(state, fa)
-    z_lab <- node_display_name(state, fb)
+    x_lab <- node_plot_label(state, fa)
+    z_lab <- node_plot_label(state, fb)
   } else {
     x <- factor_numeric_for_product(df$b, center = FALSE)
     z_raw <- df$a
-    x_lab <- node_display_name(state, fb)
-    z_lab <- node_display_name(state, fa)
+    x_lab <- node_plot_label(state, fb)
+    z_lab <- node_plot_label(state, fa)
   }
   z_kind <- classify_variable(z_raw)
   if (identical(z_kind, "categorical")) {
@@ -413,9 +502,9 @@ edge_interaction_plot <- function(state, data, ix_id, to_id, est, est_std, etype
     plot_df <- plot_df[stats::complete.cases(plot_df), , drop = FALSE]
     subtitle <- edge_plot_subtitle(est, est_std, etype, NA_character_, show_fit, rel_kind)
     ylab <- if (identical(y_kind, "binary")) {
-      sprintf("P(%s = 1)", node_display_name(state, to_id))
+      sprintf("P(%s = 1)", y_lab)
     } else {
-      node_display_name(state, to_id)
+      y_lab
     }
     p <- ggplot2::ggplot(
       plot_df,
@@ -423,7 +512,7 @@ edge_interaction_plot <- function(state, data, ix_id, to_id, est, est_std, etype
     ) +
       ggplot2::geom_point(alpha = 0.55, size = 1.8) +
       ggplot2::labs(
-        title = paste(x_lab, "\u00D7", z_lab, "\u2192", node_display_name(state, to_id)),
+        title = paste(x_lab, "\u00D7", z_lab, "\u2192", y_lab),
         subtitle = subtitle,
         x = x_lab,
         y = ylab,
@@ -499,15 +588,15 @@ edge_interaction_plot <- function(state, data, ix_id, to_id, est, est_std, etype
   plot_df <- data.frame(x = x, y = df$y, z = z_fac)
   subtitle <- edge_plot_subtitle(est, est_std, etype, NA_character_, show_fit, rel_kind)
   ylab <- if (identical(y_kind, "binary")) {
-    sprintf("P(%s = 1)", node_display_name(state, to_id))
+    sprintf("P(%s = 1)", y_lab)
   } else {
-    node_display_name(state, to_id)
+    y_lab
   }
 
   p <- ggplot2::ggplot(plot_df, ggplot2::aes(x = .data$x, y = .data$y, color = .data$z)) +
     ggplot2::geom_point(alpha = 0.3, size = 1.6) +
     ggplot2::labs(
-      title = sprintf("%s → %s", node_display_name(state, ix_id), node_display_name(state, to_id)),
+      title = sprintf("%s → %s", node_display_name(state, ix_id), y_lab),
       subtitle = subtitle,
       x = x_lab,
       y = ylab,

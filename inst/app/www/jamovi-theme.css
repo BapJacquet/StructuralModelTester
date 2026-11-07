@@ -8,7 +8,8 @@
   --smt-accent-hover: #5a3dd4;
   --smt-accent-soft: #efeaff;
   --smt-danger: #b33b3b;
-  --smt-topbar-h: 52px;
+  --smt-topbar-h: 48px;
+  --smt-ctrl-h: 30px;
   --smt-font: "Source Sans 3", "Segoe UI", Helvetica, Arial, sans-serif;
 }
 
@@ -43,11 +44,19 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 12px;
   padding: 0 14px;
   background: var(--smt-surface);
   border-bottom: 1px solid var(--smt-border);
   z-index: 20;
+}
+
+.smt-topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .smt-brand {
@@ -74,6 +83,7 @@ html, body {
 .smt-brand-name {
   font-weight: 600;
   font-size: 14px;
+  line-height: 1;
 }
 
 .smt-top-actions {
@@ -82,17 +92,22 @@ html, body {
   gap: 8px;
   flex-wrap: nowrap;
   overflow-x: auto;
+  min-width: 0;
 }
 
+.smt-topbar-left .form-group,
+.smt-topbar-left .shiny-input-container,
 .smt-top-actions .form-group,
 .smt-top-actions .shiny-input-container {
   margin: 0 !important;
+  padding: 0 !important;
   width: auto !important;
 }
 
 .smt-top-actions .progress,
 .smt-top-actions .help-block,
-.smt-top-actions label.control-label {
+.smt-top-actions label.control-label,
+.smt-topbar-left label.control-label {
   display: none !important;
 }
 
@@ -100,18 +115,85 @@ html, body {
   font-size: 12px;
 }
 
+/* Shared control chrome — keep every topbar control the same height */
 .smt-top-actions .btn,
+.smt-top-actions .smt-btn,
+.smt-top-actions .input-group-btn .btn-file,
+.smt-top-actions .form-control,
 .smt-btn {
   font-family: var(--smt-font);
   font-size: 12.5px;
   font-weight: 600;
   border-radius: 3px !important;
   border: 1px solid var(--smt-border) !important;
-  padding: 5px 12px !important;
+  padding: 0 12px !important;
   background: var(--smt-surface) !important;
   color: var(--smt-text) !important;
   box-shadow: none !important;
   line-height: 1.3 !important;
+  height: var(--smt-ctrl-h) !important;
+  min-height: var(--smt-ctrl-h) !important;
+  box-sizing: border-box !important;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  margin: 0 !important;
+}
+
+.smt-top-actions .input-group {
+  display: inline-flex !important;
+  align-items: stretch;
+  height: var(--smt-ctrl-h);
+  margin: 0 !important;
+  width: auto !important;
+}
+
+.smt-top-actions .input-group-btn,
+.smt-top-actions .input-group-prepend {
+  display: flex !important;
+  width: auto !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+.smt-top-actions .input-group-btn .btn-file {
+  border-top-right-radius: 0 !important;
+  border-bottom-right-radius: 0 !important;
+  border-right: none !important;
+}
+
+.smt-top-actions .input-group .form-control {
+  width: 118px !important;
+  max-width: 118px !important;
+  border-top-left-radius: 0 !important;
+  border-bottom-left-radius: 0 !important;
+  font-weight: 400 !important;
+  color: var(--smt-muted) !important;
+  background: #f7f7f8 !important;
+  justify-content: flex-start;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.smt-topbar-left .smt-view-toggle .shiny-options-group {
+  height: var(--smt-ctrl-h);
+  align-items: stretch;
+}
+
+.smt-topbar-left .smt-view-toggle .radio-inline {
+  display: flex !important;
+  align-items: stretch;
+  height: 100%;
+}
+
+.smt-topbar-left .smt-view-toggle .radio-inline span {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  padding: 0 12px;
+  line-height: 1;
+  box-sizing: border-box;
 }
 
 .smt-btn-primary,
@@ -148,6 +230,20 @@ html, body {
   display: block;
   width: 100%;
   margin-bottom: 6px;
+}
+
+.smt-btn-row {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.smt-btn-row > .smt-btn,
+.smt-btn-row > .btn {
+  flex: 1 1 0;
+  margin: 0 !important;
+  min-width: 0;
 }
 
 .smt-view-toggle .shiny-options-group {
@@ -224,6 +320,20 @@ html, body {
   flex-direction: column;
 }
 
+/* Shiny wraps conditionalPanel in a non-flex div — make it fill the center
+   or the graph host (flex: 1 1 0) collapses to 0 and the canvas disappears. */
+.smt-center > .shiny-panel-conditional {
+  flex: 1 1 0;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.smt-center > .shiny-panel-conditional:not([style*="display: none"]) {
+  display: flex !important;
+  flex-direction: column;
+}
+
 .smt-splitter {
   flex: 0 0 5px;
   width: 5px;
@@ -267,6 +377,65 @@ body.smt-resizing * {
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+.smt-canvas-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  margin: 0 0 8px 0;
+}
+
+.smt-canvas-toolbar-title {
+  margin: 0 !important;
+}
+
+.smt-canvas-toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+}
+
+.smt-canvas-toolbar-actions .form-group,
+.smt-canvas-toolbar-actions .shiny-input-radiogroup {
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+/* Match Interaction button height to the link-type segmented control */
+.smt-canvas-ix-btn {
+  margin: 0 !important;
+  padding: 5px 12px !important;
+  font-size: 12.5px !important;
+  font-weight: 600 !important;
+  line-height: 1.3 !important;
+  box-sizing: border-box !important;
+  border-radius: 3px !important;
+  height: auto !important;
+  min-height: 0 !important;
+}
+
+.smt-link-type-toggle .shiny-options-group {
+  flex-wrap: wrap;
+  margin: 0 !important;
+  align-items: stretch;
+}
+
+.smt-link-type-toggle .radio-inline {
+  display: flex !important;
+  align-items: center;
+}
+
+.smt-link-type-toggle .radio-inline span {
+  padding: 5px 10px;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.3;
+  box-sizing: border-box;
 }
 
 .smt-center-title {
@@ -463,6 +632,90 @@ body.smt-resizing * {
   word-break: break-word;
 }
 
+.smt-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--smt-border);
+  border-radius: 4px;
+  background: #fafafa;
+  color: var(--smt-text);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.smt-status-icon {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  font-size: 12px;
+}
+
+.smt-status-ok {
+  color: #1f7a4d;
+  background: #eef8f2;
+  border-color: #b7dfc6;
+}
+
+.smt-status-ok .smt-status-icon {
+  color: #1f7a4d;
+}
+
+.smt-status-error {
+  color: var(--smt-danger);
+  background: #fdf2f2;
+  border-color: #e2b6b6;
+}
+
+.smt-inspector {
+  margin: 8px 0 14px;
+  padding: 10px 10px 8px;
+  background: #fafafa;
+  border: 1px solid var(--smt-border);
+  border-radius: 4px;
+}
+
+.smt-inspector-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.smt-inspector-badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  color: #4b2fc0;
+  background: var(--smt-accent-soft);
+  border-radius: 3px;
+  padding: 2px 8px;
+}
+
+.smt-inspector-r2 {
+  font-size: 12px;
+  color: var(--smt-muted);
+}
+
+.smt-inspector .shiny-input-container {
+  margin-bottom: 8px;
+}
+
+.smt-resid-plot-wrap {
+  margin: 6px 0 4px;
+  border: 1px solid var(--smt-border);
+  border-radius: 4px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.smt-resid-plot-wrap .shiny-plot-output {
+  margin: 0;
+}
+
 .smt-results pre {
   background: #fafafa;
   border: 1px solid var(--smt-border);
@@ -501,7 +754,7 @@ body.smt-resizing * {
 /* Graph host fills leftover space above the plot splitter */
 .smt-graph-host {
   flex: 1 1 0;
-  min-height: 0;
+  min-height: 140px; /* never let the canvas disappear when the plot grows */
   display: flex;
   flex-direction: column;
   position: relative;
@@ -511,7 +764,7 @@ body.smt-resizing * {
 #smt_graph {
   position: relative;
   flex: 1 1 0;
-  min-height: 0;
+  min-height: 120px;
   width: 100%;
   background:
     linear-gradient(var(--smt-border) 1px, transparent 1px) 0 0 / 24px 24px,
@@ -560,8 +813,8 @@ body.smt-resizing-v * {
   padding: 4px 0 0;
   background: var(--smt-bg);
   min-height: 80px;
-  /* Height is owned by JS splitter — do not cap with % (fights drag) */
-  max-height: none;
+  /* Leave room for the canvas; JS splitter clamps further */
+  max-height: calc(100% - 160px);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -646,26 +899,36 @@ body.smt-resizing-v * {
   filter: drop-shadow(0 0 2px rgba(107, 76, 230, 0.7));
 }
 
+.smt-edge-label-halo {
+  fill: #ffffff;
+  stroke: #ffffff;
+  stroke-width: 5px;
+  stroke-linejoin: round;
+  font-size: 11px;
+  font-family: var(--smt-font);
+  font-weight: 600;
+  pointer-events: none;
+}
+
 .smt-edge-label {
   fill: var(--smt-text);
   font-size: 11px;
   font-family: var(--smt-font);
+  font-weight: 600;
   pointer-events: none;
-  stroke: #ffffff;
-  stroke-width: 4px;
-  stroke-linejoin: round;
-  paint-order: stroke fill;
-  stroke-opacity: 1;
 }
 
 .smt-nodes-layer {
   position: absolute;
   left: 0;
   top: 0;
-  right: 0;
-  bottom: 0;
   z-index: 2;
   pointer-events: none;
+  /* Sized by JS so the scrollable area can grow past the viewport
+     in every direction as nodes move (incl. top-left expansion). */
+  min-width: 100%;
+  min-height: 100%;
+  box-sizing: border-box;
 }
 
 /* Node cards — ports are children, so they move with the node */
@@ -730,8 +993,19 @@ body.smt-resizing-v * {
   white-space: nowrap;
   font-size: 11px;
   font-weight: 600;
-  color: #6b6b73;
+  color: #2b2b2e;
   pointer-events: none;
+  /* White halo (HTML), matching SVG .smt-edge-label stroke */
+  text-shadow:
+    -2px -2px 0 #fff,
+     2px -2px 0 #fff,
+    -2px  2px 0 #fff,
+     2px  2px 0 #fff,
+    -2px  0 0 #fff,
+     2px  0 0 #fff,
+     0 -2px 0 #fff,
+     0  2px 0 #fff,
+     0 0 3px #fff;
 }
 
 .smt-node.smt-interaction .port.output {
@@ -930,20 +1204,29 @@ body.smt-resizing-v * {
   position: relative;
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: center;
   min-height: 18px;
-  padding-right: 10px;
+  padding: 0 10px;
 }
 
 .smt-level-label {
   font-size: 10px;
   font-weight: 600;
   color: var(--smt-muted);
-  margin-right: 4px;
-  max-width: 110px;
+  margin: 0 4px;
+  max-width: 90px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1 1 auto;
+  text-align: center;
+}
+
+.smt-level-row .port.input.level {
+  position: absolute;
+  left: -7px;
+  top: 50%;
+  margin-top: -6px;
 }
 
 .smt-level-row .port.output.level {
@@ -963,5 +1246,78 @@ body.smt-resizing-v * {
 
 /* Hide shiny's default fileInput filename clutter a bit */
 .shiny-file-input-progress { display: none !important; }
+
+/* Prepare stage ----------------------------------------------------------- */
+.smt-prepare-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.smt-prepare-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.smt-prepare-toolbar .shiny-input-radiogroup {
+  margin: 0 !important;
+}
+
+.smt-prepare-status {
+  color: var(--smt-muted);
+  font-size: 12.5px;
+}
+
+.smt-prepare-steps-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.smt-prepare-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 8px;
+  border: 1px solid var(--smt-border);
+  border-radius: 4px;
+  background: var(--smt-surface);
+}
+
+.smt-prepare-step .shiny-input-container {
+  margin: 0 !important;
+}
+
+.smt-prepare-step .checkbox {
+  margin: 6px 0 0 0 !important;
+  min-width: 24px;
+}
+
+.smt-prepare-step > .form-group:nth-child(3) {
+  flex: 1 1 auto;
+  min-width: 140px;
+}
+
+.smt-prepare-step-btns {
+  display: flex;
+  gap: 2px;
+  margin-top: 2px;
+}
+
+.smt-prepare-icon-btn {
+  min-width: 28px !important;
+  padding: 4px 8px !important;
+  line-height: 1.2 !important;
+}
+
+.smt-prepare-script-panel textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+}
 
 /* Default side widths are set in JS; keep a sensible fallback only */

@@ -11,9 +11,15 @@ estimates_by_edge_id <- function(state, estimates, included_ids) {
       next
     }
     from_nm <- lavaan_var_name(state, state$edges$from[idx])
-    to_nm <- lavaan_var_name(state, state$edges$to[idx])
+    to_id <- state$edges$to[idx]
+    to_nm <- lavaan_var_name(state, to_id)
     etype <- state$edges$type[idx]
     lv <- if ("level" %in% names(state$edges)) state$edges$level[idx] else NA_character_
+    tl <- if ("to_level" %in% names(state$edges)) state$edges$to_level[idx] else NA_character_
+    to_lhs <- dv_outcome_lhs(to_nm, tl)
+    if (identical(to_lhs, to_nm)) {
+      to_lhs <- dv_transform_lhs(to_nm, node_dv_transform(state, to_id))
+    }
     from_id <- state$edges$from[idx]
     cm <- node_cat_mode(state, from_id)
     if (is_interaction_node(state, from_id)) {
@@ -27,7 +33,7 @@ estimates_by_edge_id <- function(state, estimates, included_ids) {
     if (identical(etype, "measurement")) {
       hit <- estimates$lhs == from_nm & estimates$op == "=~" & estimates$rhs == to_nm
     } else {
-      hit <- estimates$lhs == to_nm & estimates$op == "~" & estimates$rhs == from_nm
+      hit <- estimates$lhs == to_lhs & estimates$op == "~" & estimates$rhs == from_nm
       if ("kind" %in% names(estimates) && identical(cm, "omnibus")) {
         om <- hit & estimates$kind == "omnibus"
         if (any(om)) hit <- om
@@ -180,20 +186,41 @@ apply_averaged_estimates_to_state <- function(state, avg_edges, weight_sums) {
     short <- type_short_label(state$edges$type[i])
     lv <- if ("level" %in% names(state$edges)) state$edges$level[i] else NA_character_
     if (!is.na(lv) && nzchar(lv)) short <- paste0(short, "·", lv)
+    is_meas <- identical(state$edges$type[i], "measurement")
 
     if (is.na(hit)) {
-      state$edges$status[i] <- if (ws > 0) "included" else "excluded"
-      state$edges$label[i] <- sprintf("%s Σw=%.2f", short, ws)
+      state$edges$status[i] <- if (ws > 0 || is_meas) "included" else "excluded"
+      if (is_meas) {
+        state$edges$label[i] <- short
+      } else {
+        state$edges$label[i] <- sprintf("%s Σw=%.2f", short, ws)
+      }
       next
     }
 
     est <- avg_edges$estimate[hit]
     se <- avg_edges$se[hit]
+    est_std <- if ("estimate_std" %in% names(avg_edges)) {
+      as.numeric(avg_edges$estimate_std[hit])
+    } else {
+      NA_real_
+    }
     state$edges$estimate[i] <- est
     state$edges$se[i] <- se
     state$edges$pvalue[i] <- NA_real_
-    if ("estimate_std" %in% names(avg_edges)) {
-      state$edges$estimate_std[i] <- avg_edges$estimate_std[hit]
+    if ("estimate_std" %in% names(state$edges)) {
+      state$edges$estimate_std[i] <- est_std
+    }
+    if (is_meas) {
+      # Always-kept measurement: show standardized loading only (no Σw)
+      state$edges$status[i] <- "included"
+      show <- if (is.finite(est_std)) est_std else est
+      state$edges$label[i] <- if (is.finite(show)) {
+        sprintf("%s %.2f", short, show)
+      } else {
+        short
+      }
+      next
     }
     # Keep links with any support visible; mark tiny Σw as excluded for dashes
     state$edges$status[i] <- if (is.finite(ws) && ws >= 0.05) "included" else "excluded"
@@ -246,7 +273,10 @@ format_averaged_equations_html <- function(result, state) {
   blocks <- lapply(dvs, function(dv) {
     eidx <- which(edges$to == dv & edges$type != "measurement")
     if (!length(eidx)) return(NULL)
-    yname <- node_display_name(state, dv)
+    yname <- dv_transform_lhs(
+      node_display_name(state, dv),
+      node_dv_transform(state, dv)
+    )
     # Infer link from engine badge / last fit if available
     wrap_tag <- "model-averaged (full)"
     lhs <- sprintf("E(%s)", htmltools::htmlEscape(yname))
@@ -289,7 +319,8 @@ format_averaged_equations_html <- function(result, state) {
       if (!is.null(est_src) && nrow(est_src) && "level" %in% names(est_src)) {
         from_nm <- lavaan_var_name(state, edges$from[i])
         to_nm <- lavaan_var_name(state, dv)
-        poly_hit <- est_src$lhs == to_nm & est_src$op == "~" &
+        to_lhs <- dv_transform_lhs(to_nm, node_dv_transform(state, dv))
+        poly_hit <- est_src$lhs == to_lhs & est_src$op == "~" &
           est_src$rhs == from_nm &
           vapply(est_src$level, is_poly_level, logical(1))
         if (any(poly_hit)) {

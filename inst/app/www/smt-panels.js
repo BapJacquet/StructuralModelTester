@@ -152,7 +152,8 @@
     panel.style.flexShrink = "0";
     panel.style.flexBasis = h + "px";
     panel.style.height = h + "px";
-    panel.style.maxHeight = "none";
+    // Keep CSS max-height (calc) so the canvas cannot be crushed
+    panel.style.maxHeight = "";
     panel.style.minHeight = MIN_PLOT + "px";
   }
 

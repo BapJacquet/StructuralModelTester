@@ -17,6 +17,8 @@ Imports:
     ggplot2 (>= 3.4.0),
     readr,
     jsonlite,
-    DT
+    DT,
+    lme4,
+    lmerTest
 Suggests:
     shinytest2

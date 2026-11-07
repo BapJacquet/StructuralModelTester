@@ -1,25 +1,48 @@
 #' AIC/BIC search over non-fixed edges
 #'
-#' Only **fixed** edges are always included. Confirmatory, exploratory, and
-#' measurement edges are searched over (all subsets, including the empty /
+#' Only **fixed** (+ measurement) edges are always included. Confirmatory and
+#' exploratory edges are searched over (all subsets, including the empty /
 #' null set). The best model by AIC or BIC is kept.
+#'
+#' After search, the result always summarizes **best**, **confirmatory**
+#' (best ∪ all confirmatory paths), **confirmatory only** (all confirmatory,
+#' no exploratory), **null** (no free paths), and **full** (all free paths).
+#' These are tagged in `comparison` and listed in `best_vs_confirmatory`.
+#'
 #' Observed-only path models sum equation-wise lm/glm AIC or BIC.
-#' Latent models use lavaan IC when available.
+#' Latents use two-step factor scores then path IC (measurement links always kept).
 #'
 #' @param state Model state.
 #' @param data Data frame.
 #' @param criterion Either "aic" or "bic".
 #' @param max_exploratory Maximum free (non-fixed) edges for exhaustive search (default 12).
+#' @param uncertainty Post-selection uncertainty on the **best** model only.
+#' @param uncertainty_draws Bootstrap/PV draws (defaults by method).
+#' @param uncertainty_progress Optional function(i, total) callback.
 #' @return A list with updated `state`, `fit`, `estimates`, `fit_measures`, `syntax`, `comparison`.
 #' @export
-fit_aic_bic_search <- function(state, data, criterion = c("aic", "bic"), max_exploratory = 12L) {
+fit_aic_bic_search <- function(state, data, criterion = c("aic", "bic"), max_exploratory = 12L,
+                               uncertainty = c("none", "bootstrap", "plausible"),
+                               uncertainty_draws = NULL,
+                               uncertainty_progress = NULL) {
   criterion <- match.arg(criterion)
+  uncertainty <- match.arg(uncertainty)
 
-  # Definitional wires into × are never searched or estimated
+  # Definitional wires into × are never searched or estimated.
+  # Measurement links define factor scores (two-step) and are always kept — not searched.
   always <- analyzable_edge_ids(state, state$edges$id[state$edges$type == "fixed"])
+  meas_ids <- analyzable_edge_ids(
+    state,
+    state$edges$id[state$edges$type == "measurement"]
+  )
+  always <- unique(c(always, meas_ids))
+  conf_free <- analyzable_edge_ids(
+    state,
+    state$edges$id[state$edges$type == "confirmatory"]
+  )
   free <- analyzable_edge_ids(
     state,
-    state$edges$id[state$edges$type %in% c("confirmatory", "exploratory", "measurement")]
+    state$edges$id[state$edges$type %in% c("confirmatory", "exploratory")]
   )
 
   if (!length(always) && !length(free)) {
@@ -120,7 +143,36 @@ fit_aic_bic_search <- function(state, data, criterion = c("aic", "bic"), max_exp
   }
 
   comparison <- do.call(rbind, rows)
+  if (is.null(best)) {
+    stop("All candidate models failed to fit. Check the model and data.", call. = FALSE)
+  }
+
+  # Preserve `free` order so edges keys match combn output
+  conf_subset <- free[free %in% unique(c(best_subset, conf_free))]
+  conf_only_subset <- free[free %in% conf_free]
+  null_subset <- character()
+  full_subset <- free
+  best_key <- paste(best_subset, collapse = ",")
+  conf_key <- paste(conf_subset, collapse = ",")
+  conf_only_key <- paste(conf_only_subset, collapse = ",")
+  null_key <- paste(null_subset, collapse = ",")
+  full_key <- paste(full_subset, collapse = ",")
+
   if (!is.null(comparison) && nrow(comparison)) {
+    edge_keys <- ifelse(is.na(comparison$edges), "", comparison$edges)
+    comparison$role <- ""
+    ok_rows <- which(comparison$status == "ok")
+    for (i in ok_rows) {
+      comparison$role[i] <- search_model_role(
+        edge_keys[i],
+        best_key = best_key,
+        conf_key = conf_key,
+        conf_only_key = conf_only_key,
+        null_key = null_key,
+        full_key = full_key
+      )
+    }
+
     comparison <- comparison[order(comparison[[criterion]], na.last = TRUE), , drop = FALSE]
     best_ic <- min(comparison[[criterion]], na.rm = TRUE)
     comparison$delta <- comparison[[criterion]] - best_ic
@@ -134,16 +186,30 @@ fit_aic_bic_search <- function(state, data, criterion = c("aic", "bic"), max_exp
     rownames(comparison) <- NULL
   }
 
-  if (is.null(best)) {
-    stop("All candidate models failed to fit. Check the model and data.", call. = FALSE)
-  }
+  best_vs_confirmatory <- build_best_vs_confirmatory(
+    comparison,
+    criterion = criterion,
+    best_key = best_key,
+    conf_key = conf_key,
+    conf_only_key = conf_only_key,
+    null_key = null_key,
+    full_key = full_key
+  )
+
+  included <- c(always, best_subset)
+  # Uncertainty only on the selected (best) model — not on every candidate
+  best <- apply_postselection_uncertainty(
+    state, data, included, best,
+    method = uncertainty,
+    draws = uncertainty_draws,
+    progress = uncertainty_progress
+  )
 
   all_edge_ids <- unique(c(always, free))
   wsums <- edge_weight_sums(comparison, always_ids = always, free_ids = free)
   averaged_edges <- full_average_edge_coefs(comparison, coef_by_model, all_edge_ids)
   averaged_intercepts <- full_average_intercepts(comparison, coef_by_model)
 
-  included <- c(always, best_subset)
   def_ids <- state$edges$id[
     state$edges$type == "definitional" |
       vapply(state$edges$to, function(id) is_interaction_node(state, id), logical(1))
@@ -170,14 +236,83 @@ fit_aic_bic_search <- function(state, data, criterion = c("aic", "bic"), max_exp
     fit_measures = best$fit_measures,
     syntax = best$syntax,
     comparison = comparison,
+    best_vs_confirmatory = best_vs_confirmatory,
     criterion = criterion,
     best_exploratory = best_subset,
+    confirmatory_subset = conf_subset,
+    confirmatory_only_subset = conf_only_subset,
+    confirmatory_edges = conf_free,
     always = always,
     free = free,
     edge_weights = wsums,
     engine = best$engine,
-    model_averaged = FALSE
+    model_averaged = FALSE,
+    uncertainty = best$uncertainty %||% list(method = "none")
   )
+}
+
+#' Role label(s) for a free-edge set key in AIC/BIC search
+#' @keywords internal
+search_model_role <- function(edge_key, best_key, conf_key, conf_only_key,
+                              null_key = "", full_key = "") {
+  labs <- character()
+  if (identical(edge_key, best_key)) labs <- c(labs, "best")
+  if (identical(edge_key, conf_key)) labs <- c(labs, "confirmatory")
+  if (identical(edge_key, conf_only_key)) labs <- c(labs, "confirmatory only")
+  if (identical(edge_key, null_key)) labs <- c(labs, "null")
+  if (identical(edge_key, full_key)) labs <- c(labs, "full")
+  if (!length(labs)) return("")
+  paste(labs, collapse = " = ")
+}
+
+#' Focal model summary from a search comparison table
+#'
+#' Always includes best, confirmatory, confirmatory only, null, and full
+#' (collapsing identical edge sets into a combined role label).
+#' @keywords internal
+build_best_vs_confirmatory <- function(comparison, criterion = "bic",
+                                       best_key = "", conf_key = "",
+                                       conf_only_key = "",
+                                       null_key = "", full_key = "") {
+  empty <- data.frame(
+    role = character(),
+    edges = character(),
+    aic = numeric(),
+    bic = numeric(),
+    df = numeric(),
+    delta = numeric(),
+    weight = numeric(),
+    status = character(),
+    stringsAsFactors = FALSE
+  )
+  if (is.null(comparison) || !nrow(comparison)) return(empty)
+
+  # Stable focal order; unique() drops duplicates when models coincide
+  wanted <- unique(c(best_key, conf_key, conf_only_key, null_key, full_key))
+  edge_keys <- ifelse(is.na(comparison$edges), "", comparison$edges)
+  rows <- list()
+  for (k in wanted) {
+    hit <- comparison[comparison$status == "ok" & edge_keys == k, , drop = FALSE]
+    if (!nrow(hit)) next
+    row <- hit[1, , drop = FALSE]
+    row$role <- search_model_role(
+      k, best_key, conf_key, conf_only_key, null_key, full_key
+    )
+    rows[[length(rows) + 1L]] <- row
+  }
+  if (!length(rows)) return(empty)
+  hit <- do.call(rbind, rows)
+
+  # Delta relative to the best model in this summary
+  best_row <- hit[vapply(hit$role, function(r) grepl("\\bbest\\b", r), logical(1)), , drop = FALSE]
+  ref <- if (nrow(best_row)) {
+    best_row[[criterion]][1]
+  } else {
+    min(hit[[criterion]], na.rm = TRUE)
+  }
+  hit$delta <- hit[[criterion]] - ref
+  rownames(hit) <- NULL
+  hit
 }
 
 #' Sum of Akaike/BIC weights over models that include each edge
@@ -212,8 +347,9 @@ apply_weight_labels_to_edges <- function(state, weight_sums) {
   if (!nrow(state$edges)) return(state)
   for (i in seq_len(nrow(state$edges))) {
     eid <- state$edges$id[i]
-    # Keep definitional × wiring labels unchanged
+    # Keep definitional × wiring and measurement (std loadings) labels unchanged
     if (identical(state$edges$type[i], "definitional") ||
+          identical(state$edges$type[i], "measurement") ||
           is_interaction_node(state, state$edges$to[i])) {
       next
     }

@@ -15,6 +15,7 @@
   var draggingNode = null;
   var dragOffset = { x: 0, y: 0 };
   var linking = null; // { fromId, level, start, cursor }
+  var CANVAS_MARGIN = 48;
 
   function ensureDom() {
     wrap = document.getElementById("smt_graph");
@@ -41,9 +42,14 @@
     if (!n || !n.el) return null;
     var port = null;
     if (which === "in") {
-      if (toPort) {
+      // level = response category port on a split categorical DV
+      if (level) {
+        port = n.el.querySelector('.port.input[data-level="' + cssEscape(level) + '"]');
+      }
+      if (!port && toPort) {
         port = n.el.querySelector('.port.input[data-to-port="' + cssEscape(toPort) + '"]');
       }
+      if (!port) port = n.el.querySelector(".port.input:not([data-level])");
       if (!port) port = n.el.querySelector(".port.input");
     } else if (level) {
       port = n.el.querySelector('.port.output[data-level="' + cssEscape(level) + '"]');
@@ -92,10 +98,89 @@
       ", " + x2 + " " + y2;
   }
 
+  function setContentSize(w, h) {
+    if (!nodesLayer || !svgLayer || !wrap) return;
+    var cw = Math.max(Math.ceil(w), wrap.clientWidth);
+    var ch = Math.max(Math.ceil(h), wrap.clientHeight);
+    nodesLayer.style.width = cw + "px";
+    nodesLayer.style.height = ch + "px";
+    svgLayer.setAttribute("width", cw);
+    svgLayer.setAttribute("height", ch);
+    svgLayer.style.width = cw + "px";
+    svgLayer.style.height = ch + "px";
+  }
+
+  /**
+   * Grow the scrollable canvas so every node sits inside a margin.
+   * Top/left growth is done by shifting all nodes into positive space
+   * and compensating scroll so the view stays stable under the cursor.
+   */
+  function ensureContentBounds() {
+    if (!wrap || !nodesLayer) return false;
+    var ids = Object.keys(nodes);
+    if (!ids.length) {
+      setContentSize(wrap.clientWidth, wrap.clientHeight);
+      return false;
+    }
+
+    var minX = Infinity;
+    var minY = Infinity;
+    var maxX = -Infinity;
+    var maxY = -Infinity;
+    ids.forEach(function (id) {
+      var n = nodes[id];
+      var w = (n.el && n.el.offsetWidth) || 120;
+      var h = (n.el && n.el.offsetHeight) || 60;
+      minX = Math.min(minX, n.x);
+      minY = Math.min(minY, n.y);
+      maxX = Math.max(maxX, n.x + w);
+      maxY = Math.max(maxY, n.y + h);
+    });
+
+    var dx = 0;
+    var dy = 0;
+    if (minX < CANVAS_MARGIN) dx = CANVAS_MARGIN - minX;
+    if (minY < CANVAS_MARGIN) dy = CANVAS_MARGIN - minY;
+    if (dx || dy) {
+      ids.forEach(function (id) {
+        var n = nodes[id];
+        n.x += dx;
+        n.y += dy;
+        n.el.style.left = n.x + "px";
+        n.el.style.top = n.y + "px";
+      });
+      maxX += dx;
+      maxY += dy;
+      // Keep the same world point under the viewport after the origin shift
+      wrap.scrollLeft += dx;
+      wrap.scrollTop += dy;
+      if (linking && linking.start) {
+        linking.start.x += dx;
+        linking.start.y += dy;
+      }
+      if (linking && linking.cursor) {
+        linking.cursor.x += dx;
+        linking.cursor.y += dy;
+      }
+    }
+
+    setContentSize(maxX + CANVAS_MARGIN, maxY + CANVAS_MARGIN);
+    return !!(dx || dy);
+  }
+
   function redrawEdges() {
     if (!svgLayer) return;
-    var w = Math.max(wrap.scrollWidth, wrap.clientWidth);
-    var h = Math.max(wrap.scrollHeight, wrap.clientHeight);
+    // Content size is owned by ensureContentBounds; keep SVG at least as large
+    var w = Math.max(
+      wrap.clientWidth,
+      nodesLayer ? nodesLayer.offsetWidth : 0,
+      wrap.scrollWidth
+    );
+    var h = Math.max(
+      wrap.clientHeight,
+      nodesLayer ? nodesLayer.offsetHeight : 0,
+      wrap.scrollHeight
+    );
     svgLayer.setAttribute("width", w);
     svgLayer.setAttribute("height", h);
     svgLayer.style.width = w + "px";
@@ -104,7 +189,7 @@
     var html = "";
     edges.forEach(function (e) {
       var a = portCenter(e.from, "out", e.level || null);
-      var b = portCenter(e.to, "in", null, e.toPort || null);
+      var b = portCenter(e.to, "in", e.toLevel || null, e.toPort || null);
       if (!a || !b) return;
       var selectedEdge = selected.edges.indexOf(e.id) >= 0;
       var dash = e.dashes ? ' stroke-dasharray="6 4"' : "";
@@ -123,8 +208,12 @@
       if (e.label) {
         var mx = (a.x + b.x) / 2;
         var my = (a.y + b.y) / 2 - 8;
+        var lab = escapeXml(String(e.label));
+        // Dual text: fat white copy behind (reliable halo for × / →× labels)
+        html += '<text class="smt-edge-label-halo" x="' + mx + '" y="' + my +
+          '" text-anchor="middle">' + lab + "</text>";
         html += '<text class="smt-edge-label" x="' + mx + '" y="' + my +
-          '" text-anchor="middle">' + escapeXml(String(e.label)) + "</text>";
+          '" text-anchor="middle">' + lab + "</text>";
       }
     });
 
@@ -203,12 +292,6 @@
       if (catMode === "omnibus") el.classList.add("smt-cat-omnibus");
     }
 
-    var inPort = document.createElement("div");
-    inPort.className = "port input";
-    inPort.dataset.portType = "input";
-    inPort.dataset.nodeId = n.id;
-    inPort.title = "Input";
-
     var title = document.createElement("div");
     title.className = "smt-node-title";
     title.textContent = n.label || n.id;
@@ -235,7 +318,6 @@
       title.appendChild(sub);
     });
 
-    el.appendChild(inPort);
     el.appendChild(title);
 
     if (isCat) {
@@ -249,8 +331,8 @@
         btn.textContent = mode;
         btn.dataset.mode = mode;
         btn.title = mode === "omnibus"
-          ? "Omnibus: one joint test for all levels"
-          : "Split: one effect per level (default)";
+          ? "Omnibus: joint factor as predictor; categorical DV not supported"
+          : "Split: per-level out (predictor) and in (DV one-vs-rest)";
         btn.addEventListener("mousedown", function (ev) {
           ev.preventDefault();
           ev.stopPropagation();
@@ -269,6 +351,12 @@
       el.appendChild(modeBar);
 
       if (catMode === "omnibus") {
+        var inOmni = document.createElement("div");
+        inOmni.className = "port input";
+        inOmni.dataset.portType = "input";
+        inOmni.dataset.nodeId = n.id;
+        inOmni.title = "Input";
+        el.appendChild(inOmni);
         var outOmni = document.createElement("div");
         outOmni.className = "port output";
         outOmni.dataset.portType = "output";
@@ -281,6 +369,12 @@
         levels.forEach(function (level) {
           var row = document.createElement("div");
           row.className = "smt-level-row";
+          var inPort = document.createElement("div");
+          inPort.className = "port input level";
+          inPort.dataset.portType = "input";
+          inPort.dataset.nodeId = n.id;
+          inPort.dataset.level = level;
+          inPort.title = "DV: predict " + level + " vs other categories";
           var lab = document.createElement("span");
           lab.className = "smt-level-label";
           lab.textContent = level;
@@ -290,7 +384,7 @@
           outPort.dataset.nodeId = n.id;
           outPort.dataset.level = level;
           outPort.title = "Contrast vs base (" + (n.base || "?") + "): " + level;
-          outPort.style.top = "50%";
+          row.appendChild(inPort);
           row.appendChild(lab);
           row.appendChild(outPort);
           portsWrap.appendChild(row);
@@ -298,6 +392,12 @@
         el.appendChild(portsWrap);
       }
     } else {
+      var inPort = document.createElement("div");
+      inPort.className = "port input";
+      inPort.dataset.portType = "input";
+      inPort.dataset.nodeId = n.id;
+      inPort.title = "Input";
+      el.appendChild(inPort);
       var outPort = document.createElement("div");
       outPort.className = "port output";
       outPort.dataset.portType = "output";
@@ -319,7 +419,8 @@
     edges = ((data && data.edges) || []).map(function (e) {
       return Object.assign({}, e, {
         level: e.level || "",
-        toPort: e.toPort || ""
+        toPort: e.toPort || "",
+        toLevel: e.toLevel || ""
       });
     });
 
@@ -340,7 +441,14 @@
     });
 
     selected = keepSel;
+    ensureContentBounds();
     redrawEdges();
+  }
+
+  function allNodePositions() {
+    return Object.keys(nodes).map(function (id) {
+      return { id: id, x: nodes[id].x, y: nodes[id].y };
+    });
   }
 
   function localPoint(ev) {
@@ -440,10 +548,12 @@
       if (draggingNode && nodes[draggingNode]) {
         var p = localPoint(ev);
         var n = nodes[draggingNode];
-        n.x = Math.max(0, p.x - dragOffset.x);
-        n.y = Math.max(0, p.y - dragOffset.y);
+        // Allow past the origin; ensureContentBounds expands top/left via a world shift
+        n.x = p.x - dragOffset.x;
+        n.y = p.y - dragOffset.y;
         n.el.style.left = n.x + "px";
         n.el.style.top = n.y + "px";
+        ensureContentBounds();
         redrawEdges();
       }
     });
@@ -459,6 +569,7 @@
         if (hit && hit.nodeId && hit.nodeId !== fromId) {
           if (!hit.portType || hit.portType === "input") {
             var toPort = hit.toPort || "";
+            var toLevel = hit.level || "";
             // Dropping on interaction body: fill first free input port
             var targetNode = nodes[hit.nodeId];
             if (targetNode && targetNode.el &&
@@ -469,12 +580,22 @@
               });
               if (!used.a) toPort = "a";
               else if (!used.b) toPort = "b";
+              toLevel = "";
+            }
+            // Split categorical DV: must land on a level input port
+            if (targetNode && targetNode.el &&
+                targetNode.el.classList.contains("smt-categorical") &&
+                !targetNode.el.classList.contains("smt-cat-omnibus") &&
+                !toLevel) {
+              linking = null;
+              return;
             }
             Shiny.setInputValue("smt_new_edge", {
               from: fromId,
               to: hit.nodeId,
               level: level,
               toPort: toPort,
+              toLevel: toLevel,
               nonce: Date.now()
             }, { priority: "event" });
           }
@@ -486,10 +607,15 @@
         var n = nodes[draggingNode];
         if (n) {
           n.el.classList.remove("dragging");
+          // Final bounds pass (margin on all sides); may shift peers after top/left growth
+          ensureContentBounds();
+          redrawEdges();
           Shiny.setInputValue("smt_node_moved", {
             id: n.id,
             x: n.x,
             y: n.y,
+            // Always send every node: a top/left expansion shifts the whole graph
+            positions: allNodePositions(),
             nonce: Date.now()
           }, { priority: "event" });
         }

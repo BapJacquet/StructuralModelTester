@@ -17,6 +17,12 @@ empty_model_state <- function() {
       factor_a = character(),
       factor_b = character(),
       cat_mode = character(),
+      repeated_measures = logical(),
+      cluster_column = character(),
+      dv_transform = character(),
+      factor_base = character(),
+      factor_ordered = logical(),
+      factor_levels = character(),
       stringsAsFactors = FALSE
     ),
     edges = data.frame(
@@ -26,6 +32,7 @@ empty_model_state <- function() {
       type = character(),
       level = character(),
       to_port = character(),
+      to_level = character(),
       rel_kind = character(),
       status = character(),
       estimate = numeric(),
@@ -142,6 +149,7 @@ interaction_label <- function(state, factor_a = NA_character_, factor_b = NA_cha
 ensure_edge_to_port <- function(state) {
   state <- ensure_node_kind_columns(state)
   if (!"to_port" %in% names(state$edges)) state$edges$to_port <- NA_character_
+  if (!"to_level" %in% names(state$edges)) state$edges$to_level <- NA_character_
   if (!"rel_kind" %in% names(state$edges)) state$edges$rel_kind <- "linear"
   miss <- is.na(state$edges$rel_kind) | !nzchar(state$edges$rel_kind)
   if (any(miss)) state$edges$rel_kind[miss] <- "linear"
@@ -228,7 +236,7 @@ set_node_cat_mode <- function(state, node_id, cat_mode = c("split", "omnibus"), 
   if (is.null(data)) return(state)
   col <- tryCatch(lavaan_var_name(state, node_id), error = function(e) NA_character_)
   if (is.na(col) || !col %in% names(data)) return(state)
-  coding <- variable_coding(data[[col]])
+  coding <- variable_coding_for_node(state, node_id, data)
   if (!identical(coding$kind, "categorical") || !length(coding$levels)) return(state)
 
   for (to in tos) {
@@ -310,12 +318,29 @@ is_definitional_edge <- function(state, edge_id) {
   is_interaction_node(state, state$edges$to[idx])
 }
 
+#' Match edges on optional response level (categorical DV split)
+#' @keywords internal
+edge_to_level_match <- function(edges, to_level = NA_character_) {
+  if (!"to_level" %in% names(edges)) {
+    return(rep(is.na(to_level) || !nzchar(as.character(to_level)), nrow(edges)))
+  }
+  tl <- edges$to_level
+  want <- if (is.null(to_level) || is.na(to_level) || !nzchar(as.character(to_level))) {
+    is.na(tl) | !nzchar(as.character(tl))
+  } else {
+    !is.na(tl) & as.character(tl) == as.character(to_level)
+  }
+  want
+}
+
 #' True if an unleveled structural edge from→to already exists
 #' @keywords internal
-has_plain_edge <- function(state, from, to) {
+has_plain_edge <- function(state, from, to, to_level = NA_character_) {
   if (!nrow(state$edges)) return(FALSE)
+  state <- ensure_edge_to_port(state)
   hit <- state$edges$from == from & state$edges$to == to &
-    !state$edges$type %in% c("measurement", "definitional")
+    !state$edges$type %in% c("measurement", "definitional") &
+    edge_to_level_match(state$edges, to_level)
   if (!any(hit)) return(FALSE)
   lv <- state$edges$level[hit]
   any(is.na(lv) | !nzchar(lv))
@@ -323,10 +348,12 @@ has_plain_edge <- function(state, from, to) {
 
 #' True if a leveled structural edge from→to already exists
 #' @keywords internal
-has_leveled_edge <- function(state, from, to, level) {
+has_leveled_edge <- function(state, from, to, level, to_level = NA_character_) {
   if (!nrow(state$edges) || is.na(level) || !nzchar(level)) return(FALSE)
+  state <- ensure_edge_to_port(state)
   hit <- state$edges$from == from & state$edges$to == to &
-    !state$edges$type %in% c("measurement", "definitional")
+    !state$edges$type %in% c("measurement", "definitional") &
+    edge_to_level_match(state$edges, to_level)
   if (!any(hit)) return(FALSE)
   any(!is.na(state$edges$level[hit]) & state$edges$level[hit] == level)
 }
@@ -363,27 +390,52 @@ ensure_interaction_main_effects <- function(state, ix_id, dv_id = NULL) {
 
   for (dv in dv_id) {
     ix_hit <- which(out_edges$to == dv)
-    link_type <- if (length(ix_hit)) {
-      as.character(out_edges$type[ix_hit[1]])
+    if (!length(ix_hit)) next
+    # One main-effect set per response level targeted by × → DV
+    resp_levels <- if ("to_level" %in% names(out_edges)) {
+      unique(as.character(out_edges$to_level[ix_hit]))
     } else {
-      "confirmatory"
+      NA_character_
     }
-    if (!link_type %in% c("fixed", "confirmatory", "exploratory", "measurement")) {
-      link_type <- "confirmatory"
-    }
-    if (identical(link_type, "measurement")) link_type <- "confirmatory"
+    if (!length(resp_levels)) resp_levels <- NA_character_
 
-    for (s in slots) {
-      f <- s$id
-      if (identical(f, dv)) next
-      cm <- node_cat_mode(state, f)
-      lvl <- s$level
-      if (identical(cm, "omnibus") || is.na(lvl) || !nzchar(lvl)) {
-        if (has_plain_edge(state, f, dv)) next
-        state <- add_edge(state, from = f, to = dv, type = link_type, level = NA_character_)
-      } else {
-        if (has_leveled_edge(state, f, dv, lvl) || has_plain_edge(state, f, dv)) next
-        state <- add_edge(state, from = f, to = dv, type = link_type, level = lvl)
+    for (tl in resp_levels) {
+      hit_tl <- ix_hit
+      if ("to_level" %in% names(out_edges)) {
+        if (is.na(tl) || !nzchar(tl)) {
+          hit_tl <- ix_hit[is.na(out_edges$to_level[ix_hit]) |
+                             !nzchar(as.character(out_edges$to_level[ix_hit]))]
+        } else {
+          hit_tl <- ix_hit[!is.na(out_edges$to_level[ix_hit]) &
+                             out_edges$to_level[ix_hit] == tl]
+        }
+      }
+      if (!length(hit_tl)) next
+      link_type <- as.character(out_edges$type[hit_tl[1]])
+      if (!link_type %in% c("fixed", "confirmatory", "exploratory", "measurement")) {
+        link_type <- "confirmatory"
+      }
+      if (identical(link_type, "measurement")) link_type <- "confirmatory"
+
+      for (s in slots) {
+        f <- s$id
+        if (identical(f, dv)) next
+        cm <- node_cat_mode(state, f)
+        lvl <- s$level
+        if (identical(cm, "omnibus") || is.na(lvl) || !nzchar(lvl)) {
+          if (has_plain_edge(state, f, dv, to_level = tl)) next
+          state <- add_edge(
+            state, from = f, to = dv, type = link_type,
+            level = NA_character_, to_level = tl
+          )
+        } else {
+          if (has_leveled_edge(state, f, dv, lvl, to_level = tl) ||
+                has_plain_edge(state, f, dv, to_level = tl)) next
+          state <- add_edge(
+            state, from = f, to = dv, type = link_type,
+            level = lvl, to_level = tl
+          )
+        }
       }
     }
   }
@@ -395,6 +447,9 @@ ensure_interaction_main_effects <- function(state, ix_id, dv_id = NULL) {
 add_node <- function(state, label, observed_column = NA_character_) {
   state <- ensure_node_r2_columns(state)
   state <- ensure_node_kind_columns(state)
+  state <- ensure_node_rm_columns(state)
+  state <- ensure_node_transform_columns(state)
+  state <- ensure_node_factor_coding_columns(state)
   id <- unique_node_id(state, label)
   is_obs <- !is.na(observed_column) && nzchar(observed_column)
   shape <- if (is_obs) "box" else "ellipse"
@@ -413,6 +468,12 @@ add_node <- function(state, label, observed_column = NA_character_) {
     factor_a = NA_character_,
     factor_b = NA_character_,
     cat_mode = "split",
+    repeated_measures = FALSE,
+    cluster_column = NA_character_,
+    dv_transform = "none",
+    factor_base = NA_character_,
+    factor_ordered = FALSE,
+    factor_levels = NA_character_,
     stringsAsFactors = FALSE
   )
   state$nodes <- rbind(state$nodes, new_row)
@@ -426,6 +487,9 @@ add_node <- function(state, label, observed_column = NA_character_) {
 #' @keywords internal
 add_interaction_node <- function(state) {
   state <- ensure_node_kind_columns(state)
+  state <- ensure_node_rm_columns(state)
+  state <- ensure_node_transform_columns(state)
+  state <- ensure_node_factor_coding_columns(state)
   id <- unique_node_id(state, "ix")
   n <- nrow(state$nodes)
   new_row <- data.frame(
@@ -441,6 +505,12 @@ add_interaction_node <- function(state) {
     factor_a = NA_character_,
     factor_b = NA_character_,
     cat_mode = "split",
+    repeated_measures = FALSE,
+    cluster_column = NA_character_,
+    dv_transform = "none",
+    factor_base = NA_character_,
+    factor_ordered = FALSE,
+    factor_levels = NA_character_,
     stringsAsFactors = FALSE
   )
   state$nodes <- rbind(state$nodes, new_row)
@@ -492,11 +562,14 @@ map_column_to_node <- function(state, node_id, column = NA_character_) {
 #' @param level For categorical predictors: non-reference level this edge
 #'   represents. `NA` for continuous/binary/measurement links.
 #' @param to_port For links into an interaction node: `"a"` or `"b"`.
+#' @param to_level For categorical DV in split mode: response category
+#'   (one-vs-rest). `NA` otherwise.
 #' @keywords internal
 add_edge <- function(state, from, to,
                      type = c("fixed", "confirmatory", "exploratory", "measurement"),
                      level = NA_character_,
-                     to_port = NA_character_) {
+                     to_port = NA_character_,
+                     to_level = NA_character_) {
   type <- match.arg(type)
   state <- ensure_edge_to_port(state)
   if (!from %in% state$nodes$id || !to %in% state$nodes$id) return(state)
@@ -509,11 +582,14 @@ add_edge <- function(state, from, to,
   level <- as.character(level)
   if (is.null(to_port) || !nzchar(as.character(to_port))) to_port <- NA_character_
   to_port <- as.character(to_port)
+  if (is.null(to_level) || !nzchar(as.character(to_level))) to_level <- NA_character_
+  to_level <- as.character(to_level)
 
   # Wire into interaction operator (definitional; not a regression path)
   if (is_interaction_node(state, to)) {
     if (!to_port %in% c("a", "b")) return(state)
-    if (!is_observed_node(state, from)) return(state)
+    # Observed or latent (latents are scored in the two-step path stage)
+    if (!is_observed_node(state, from) && !is_latent_node(state, from)) return(state)
     if (is_interaction_node(state, from)) return(state)
     cm <- node_cat_mode(state, from)
     # Omnibus factor: whole-variable wire only (no level)
@@ -544,6 +620,7 @@ add_edge <- function(state, from, to,
       type = type,
       level = level,
       to_port = to_port,
+      to_level = NA_character_,
       rel_kind = "linear",
       status = "pending",
       estimate = NA_real_,
@@ -568,7 +645,8 @@ add_edge <- function(state, from, to,
     if (!is.na(level) && nzchar(level)) level <- NA_character_
   }
   same <- state$edges$from == from & state$edges$to == to &
-    !state$edges$type %in% c("measurement", "definitional")
+    !state$edges$type %in% c("measurement", "definitional") &
+    edge_to_level_match(state$edges, to_level)
   if (any(same)) {
     if (from_omni) return(state)
     existing_levels <- state$edges$level[same]
@@ -587,6 +665,9 @@ add_edge <- function(state, from, to,
   } else if (!is.na(level) && nzchar(level)) {
     lab <- paste0(lab, "·", level)
   }
+  if (!is.na(to_level) && nzchar(to_level)) {
+    lab <- paste0(lab, "\u2192", to_level)
+  }
   new_row <- data.frame(
     id = eid,
     from = from,
@@ -594,6 +675,7 @@ add_edge <- function(state, from, to,
     type = type,
     level = level,
     to_port = to_port,
+    to_level = to_level,
     rel_kind = "linear",
     status = "pending",
     estimate = NA_real_,
@@ -665,6 +747,225 @@ ensure_node_r2_columns <- function(state) {
   state
 }
 
+#' Ensure repeated-measures columns exist on nodes
+#' @keywords internal
+ensure_node_rm_columns <- function(state) {
+  if (!"repeated_measures" %in% names(state$nodes)) {
+    state$nodes$repeated_measures <- FALSE
+  }
+  miss_rm <- is.na(state$nodes$repeated_measures)
+  if (any(miss_rm)) state$nodes$repeated_measures[miss_rm] <- FALSE
+  if (!"cluster_column" %in% names(state$nodes)) {
+    state$nodes$cluster_column <- NA_character_
+  }
+  state
+}
+
+#' Repeated-measures settings for a DV node
+#' @return list(enabled, cluster)
+#' @keywords internal
+node_repeated_measures <- function(state, node_id) {
+  state <- ensure_node_rm_columns(state)
+  idx <- match(node_id, state$nodes$id)
+  if (is.na(idx)) return(list(enabled = FALSE, cluster = NA_character_))
+  en <- isTRUE(state$nodes$repeated_measures[idx])
+  cl <- state$nodes$cluster_column[idx]
+  if (is.null(cl) || is.na(cl) || !nzchar(cl)) cl <- NA_character_
+  list(enabled = en, cluster = as.character(cl))
+}
+
+#' Set repeated-measures flag and optional cluster column on a node
+#' @keywords internal
+set_node_repeated_measures <- function(state, node_id, enabled = FALSE,
+                                       cluster_column = NA_character_) {
+  state <- ensure_node_rm_columns(state)
+  idx <- match(node_id, state$nodes$id)
+  if (is.na(idx)) return(state)
+  state$nodes$repeated_measures[idx] <- isTRUE(enabled)
+  if (isTRUE(enabled)) {
+    if (is.null(cluster_column) || is.na(cluster_column) || !nzchar(cluster_column)) {
+      state$nodes$cluster_column[idx] <- NA_character_
+    } else {
+      state$nodes$cluster_column[idx] <- as.character(cluster_column)
+    }
+  } else {
+    state$nodes$cluster_column[idx] <- NA_character_
+  }
+  state
+}
+
+#' Ensure dv_transform column exists on nodes
+#' @keywords internal
+ensure_node_transform_columns <- function(state) {
+  if (!"dv_transform" %in% names(state$nodes)) {
+    state$nodes$dv_transform <- "none"
+  }
+  miss <- is.na(state$nodes$dv_transform) | !nzchar(state$nodes$dv_transform)
+  if (any(miss)) state$nodes$dv_transform[miss] <- "none"
+  allowed <- unname(dv_transform_choices())
+  bad <- !state$nodes$dv_transform %in% allowed
+  if (any(bad)) state$nodes$dv_transform[bad] <- "none"
+  state
+}
+
+#' Outcome transform for a DV node (none | log | log10 | log1p | sqrt)
+#' @keywords internal
+node_dv_transform <- function(state, node_id) {
+  state <- ensure_node_transform_columns(state)
+  idx <- match(node_id, state$nodes$id)
+  if (is.na(idx)) return("none")
+  tr <- state$nodes$dv_transform[idx]
+  if (is.na(tr) || !nzchar(tr) || !tr %in% unname(dv_transform_choices())) {
+    return("none")
+  }
+  tr
+}
+
+#' Set outcome transform on a node
+#' @keywords internal
+set_node_dv_transform <- function(state, node_id, transform = "none") {
+  state <- ensure_node_transform_columns(state)
+  idx <- match(node_id, state$nodes$id)
+  if (is.na(idx)) return(state)
+  allowed <- unname(dv_transform_choices())
+  if (is.null(transform) || is.na(transform) || !nzchar(transform) ||
+        !transform %in% allowed) {
+    transform <- "none"
+  }
+  state$nodes$dv_transform[idx] <- transform
+  state
+}
+
+#' Encode / decode factor level order for node storage
+#' @keywords internal
+encode_factor_levels <- function(levels) {
+  levels <- as.character(levels %||% character())
+  levels <- levels[!is.na(levels) & nzchar(levels)]
+  if (!length(levels)) return(NA_character_)
+  paste(levels, collapse = "\n")
+}
+
+#' @keywords internal
+decode_factor_levels <- function(text) {
+  if (is.null(text) || length(text) != 1L || is.na(text) || !nzchar(text)) {
+    return(character())
+  }
+  parts <- strsplit(as.character(text), "\n", fixed = TRUE)[[1]]
+  trimws(parts[nzchar(trimws(parts))])
+}
+
+#' Ensure factor coding columns exist on nodes
+#' @keywords internal
+ensure_node_factor_coding_columns <- function(state) {
+  if (!"factor_base" %in% names(state$nodes)) state$nodes$factor_base <- NA_character_
+  if (!"factor_ordered" %in% names(state$nodes)) state$nodes$factor_ordered <- FALSE
+  if (!"factor_levels" %in% names(state$nodes)) state$nodes$factor_levels <- NA_character_
+  miss_ord <- is.na(state$nodes$factor_ordered)
+  if (any(miss_ord)) state$nodes$factor_ordered[miss_ord] <- FALSE
+  state
+}
+
+#' Factor coding overrides for a node
+#' @return list(base, ordered, levels)
+#' @keywords internal
+node_factor_coding <- function(state, node_id) {
+  state <- ensure_node_factor_coding_columns(state)
+  idx <- match(node_id, state$nodes$id)
+  if (is.na(idx)) {
+    return(list(base = NA_character_, ordered = FALSE, levels = character()))
+  }
+  base <- state$nodes$factor_base[idx]
+  if (is.null(base) || is.na(base) || !nzchar(base)) base <- NA_character_
+  list(
+    base = as.character(base),
+    ordered = isTRUE(state$nodes$factor_ordered[idx]),
+    levels = decode_factor_levels(state$nodes$factor_levels[idx])
+  )
+}
+
+#' variable_coding using node overrides when present
+#' @keywords internal
+variable_coding_for_node <- function(state, node_id, data) {
+  col <- tryCatch(lavaan_var_name(state, node_id), error = function(e) NA_character_)
+  if (is.na(col) || is.null(data) || !col %in% names(data)) {
+    return(list(
+      kind = "continuous", base = NA_character_, levels = character(),
+      all_levels = character(), ordered = FALSE
+    ))
+  }
+  meta <- node_factor_coding(state, node_id)
+  coding <- variable_coding(
+    data[[col]],
+    base = meta$base,
+    levels_order = meta$levels
+  )
+  coding$ordered <- isTRUE(meta$ordered)
+  coding
+}
+
+#' Drop split edges that conflict with a new base / level set
+#' @keywords internal
+prune_edges_for_factor_coding <- function(state, node_id, coding) {
+  if (!nrow(state$edges)) return(state)
+  base <- coding$base
+  allowed <- coding$levels
+  drop <- integer()
+  for (i in seq_len(nrow(state$edges))) {
+    if (!identical(state$edges$from[i], node_id)) next
+    if (state$edges$type[i] %in% c("measurement", "definitional")) next
+    lv <- if ("level" %in% names(state$edges)) state$edges$level[i] else NA_character_
+    if (is.na(lv) || !nzchar(lv)) next
+    if ((!is.na(base) && identical(lv, base)) || !lv %in% allowed) {
+      drop <- c(drop, i)
+    }
+  }
+  # Also drop definitional × wires with a now-invalid level
+  for (i in seq_len(nrow(state$edges))) {
+    if (!identical(state$edges$from[i], node_id)) next
+    if (!identical(state$edges$type[i], "definitional")) next
+    lv <- state$edges$level[i]
+    if (is.na(lv) || !nzchar(lv)) next
+    if ((!is.na(base) && identical(lv, base)) ||
+          (length(allowed) && !lv %in% allowed && identical(coding$kind, "categorical"))) {
+      drop <- c(drop, i)
+    }
+  }
+  drop <- unique(drop)
+  if (length(drop)) {
+    state$edges <- state$edges[-drop, , drop = FALSE]
+    state <- refresh_interaction_nodes(state)
+  }
+  state
+}
+
+#' Set factor base / ordered flag / level order on a node
+#' @keywords internal
+set_node_factor_coding <- function(state, node_id, base = NULL, ordered = NULL,
+                                  levels = NULL, data = NULL) {
+  state <- ensure_node_factor_coding_columns(state)
+  idx <- match(node_id, state$nodes$id)
+  if (is.na(idx)) return(state)
+  if (is_interaction_node(state, node_id) || is_latent_node(state, node_id)) {
+    return(state)
+  }
+  if (!is.null(base)) {
+    base <- as.character(base)
+    if (!nzchar(base)) base <- NA_character_
+    state$nodes$factor_base[idx] <- base
+  }
+  if (!is.null(ordered)) {
+    state$nodes$factor_ordered[idx] <- isTRUE(ordered)
+  }
+  if (!is.null(levels)) {
+    state$nodes$factor_levels[idx] <- encode_factor_levels(levels)
+  }
+  if (!is.null(data)) {
+    coding <- variable_coding_for_node(state, node_id, data)
+    state <- prune_edges_for_factor_coding(state, node_id, coding)
+  }
+  state
+}
+
 #' Apply R² map (node id -> list(value, kind)) onto nodes
 #' @keywords internal
 apply_r_squared_to_nodes <- function(state, r2_map) {
@@ -716,12 +1017,13 @@ clear_fit_results <- function(state) {
     lv <- state$edges$level[i]
     if (identical(node_cat_mode(state, state$edges$from[i]), "omnibus") &&
           (is.na(lv) || !nzchar(lv))) {
-      paste0(lab, "·omnibus")
+      lab <- paste0(lab, "·omnibus")
     } else if (!is.na(lv) && nzchar(lv)) {
-      paste0(lab, "·", lv)
-    } else {
-      lab
+      lab <- paste0(lab, "·", lv)
     }
+    tl <- if ("to_level" %in% names(state$edges)) state$edges$to_level[i] else NA_character_
+    if (!is.na(tl) && nzchar(tl)) lab <- paste0(lab, "\u2192", tl)
+    lab
   }, character(1))
   state
 }
@@ -763,6 +1065,11 @@ apply_estimates_to_edges <- function(state, estimates, included_edge_ids = NULL)
     from_nm <- lavaan_var_name(state, from)
     to_nm <- lavaan_var_name(state, to)
     edge_level <- if ("level" %in% names(state$edges)) state$edges$level[i] else NA_character_
+    edge_to_level <- if ("to_level" %in% names(state$edges)) state$edges$to_level[i] else NA_character_
+    to_lhs <- dv_outcome_lhs(to_nm, edge_to_level)
+    if (identical(to_lhs, to_nm)) {
+      to_lhs <- dv_transform_lhs(to_nm, node_dv_transform(state, to))
+    }
     is_omni_edge <- identical(node_cat_mode(state, from), "omnibus")
     if (is_interaction_node(state, from)) {
       fac_ix <- interaction_factors(state, from)
@@ -773,7 +1080,7 @@ apply_estimates_to_edges <- function(state, estimates, included_edge_ids = NULL)
     if (etype == "measurement") {
       hit <- estimates$lhs == from_nm & estimates$op == "=~" & estimates$rhs == to_nm
     } else {
-      hit <- estimates$lhs == to_nm & estimates$op == "~" & estimates$rhs == from_nm
+      hit <- estimates$lhs == to_lhs & estimates$op == "~" & estimates$rhs == from_nm
       if ("kind" %in% names(estimates) && any(hit)) {
         if (is_omni_edge) {
           om <- hit & estimates$kind == "omnibus"
@@ -817,10 +1124,23 @@ apply_estimates_to_edges <- function(state, estimates, included_edge_ids = NULL)
       } else if (!is.na(edge_level) && nzchar(edge_level)) {
         prefix <- paste0(prefix, "·", edge_level)
       }
+      if (!is.na(edge_to_level) && nzchar(edge_to_level)) {
+        prefix <- paste0(prefix, "\u2192", edge_to_level)
+      }
+      # Measurement canvas: signed standardized loading (fallback: raw λ)
+      if (identical(etype, "measurement")) {
+        show <- if (is.finite(est_std)) est_std else est
+        if (is.finite(show)) {
+          state$edges$label[i] <- sprintf("%s %.2f", prefix, show)
+        } else {
+          state$edges$label[i] <- prefix
+        }
+        next
+      }
       # Append polynomial terms for this predictor on the same DV
       poly_bits <- character()
-      if (etype != "measurement" && !is_omni_edge && "level" %in% names(estimates)) {
-        poly_hit <- estimates$lhs == to_nm & estimates$op == "~" &
+      if (!is_omni_edge && "level" %in% names(estimates)) {
+        poly_hit <- estimates$lhs == to_lhs & estimates$op == "~" &
           estimates$rhs == from_nm &
           vapply(estimates$level, is_poly_level, logical(1))
         if (any(poly_hit)) {

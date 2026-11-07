@@ -1,16 +1,23 @@
 #' Fit structural model under a p-value framework
 #'
 #' Observed-only path models use equation-wise lm / glm (binomial) based on
-#' each dependent variable's type. Models with latents use lavaan
-#' (WLSMV when endogenous observed variables are binary).
+#' each dependent variable's type. Models with latents use a two-step procedure
+#' (CFA factor scores, then the same path engine).
 #'
 #' @param state Model state.
 #' @param data Data frame.
 #' @param alpha Significance level for marking exploratory edges.
 #' @param mark_nonsig If TRUE, exploratory edges with p > alpha are marked excluded.
+#' @param uncertainty Post-selection uncertainty: "none", "bootstrap", or "plausible".
+#' @param uncertainty_draws Number of bootstrap/PV draws (defaults by method).
+#' @param uncertainty_progress Optional function(progress_i, total) callback.
 #' @return A list with updated `state`, `fit`, `estimates`, `fit_measures`, and `syntax`.
 #' @export
-fit_pvalue_model <- function(state, data, alpha = 0.05, mark_nonsig = TRUE) {
+fit_pvalue_model <- function(state, data, alpha = 0.05, mark_nonsig = TRUE,
+                             uncertainty = c("none", "bootstrap", "plausible"),
+                             uncertainty_draws = NULL,
+                             uncertainty_progress = NULL) {
+  uncertainty <- match.arg(uncertainty)
   edge_ids <- analyzable_edge_ids(state)
   # Still mark definitional wires as included (no coefficients)
   all_display_ids <- unique(c(edge_ids, state$edges$id[
@@ -18,6 +25,12 @@ fit_pvalue_model <- function(state, data, alpha = 0.05, mark_nonsig = TRUE) {
       vapply(state$edges$to, function(id) is_interaction_node(state, id), logical(1))
   ]))
   fitted <- fit_structural_model(state, data, include_edge_ids = edge_ids)
+  fitted <- apply_postselection_uncertainty(
+    state, data, edge_ids, fitted,
+    method = uncertainty,
+    draws = uncertainty_draws,
+    progress = uncertainty_progress
+  )
   state2 <- apply_estimates_to_edges(state, fitted$estimates, included_edge_ids = all_display_ids)
   state2 <- apply_r_squared_to_nodes(state2, fitted$r_squared)
 
@@ -47,7 +60,8 @@ fit_pvalue_model <- function(state, data, alpha = 0.05, mark_nonsig = TRUE) {
     fit_measures = fitted$fit_measures,
     syntax = fitted$syntax,
     comparison = NULL,
-    engine = fitted$engine
+    engine = fitted$engine,
+    uncertainty = fitted$uncertainty %||% list(method = "none")
   )
 }
 
@@ -67,16 +81,6 @@ extract_fit_measures <- function(fit) {
     value = vals[keep],
     stringsAsFactors = FALSE
   )
-}
-
-#' Round AIC/BIC to integers for display
-#' @keywords internal
-format_fit_measures_display <- function(fm) {
-  if (is.null(fm) || !nrow(fm)) return(fm)
-  out <- fm
-  ic <- tolower(out$measure) %in% c("aic", "bic")
-  out$value[ic] <- round(out$value[ic])
-  out
 }
 
 #' Pretty predictor name as HTML (ecole__B → ecole[B]; x_p2 → x<sup>2</sup>)
@@ -172,6 +176,36 @@ format_eta_from_estimates <- function(est_rows, digits = 2) {
 #' @keywords internal
 equation_link_wrapper <- function(fit, yname) {
   y_esc <- htmltools::htmlEscape(yname)
+  if (inherits(fit, "glmerMod")) {
+    fam <- tryCatch(stats::family(fit), error = function(e) NULL)
+    link <- if (!is.null(fam)) fam$link else "logit"
+    re <- "(1|cluster)"
+    if (identical(link, "logit")) {
+      return(list(
+        tag = paste("glmer · binomial · logit ·", re),
+        lhs = sprintf("P(%s = 1)", y_esc),
+        wrap_left = "logit<sup class=\"smt-link-fn\">&minus;1</sup>(",
+        wrap_right = ")",
+        note = "Random intercept only; logit<sup>&minus;1</sup> = logistic (expit)"
+      ))
+    }
+    return(list(
+      tag = paste0("glmer · binomial · ", link, " · ", re),
+      lhs = sprintf("P(%s = 1)", y_esc),
+      wrap_left = "",
+      wrap_right = "",
+      note = "Random intercept only"
+    ))
+  }
+  if (inherits(fit, "lmerMod") || (inherits(fit, "merMod") && !inherits(fit, "glmerMod"))) {
+    return(list(
+      tag = "lmer · gaussian · (1|cluster)",
+      lhs = sprintf("E(%s)", y_esc),
+      wrap_left = "",
+      wrap_right = "",
+      note = "Random intercept only"
+    ))
+  }
   if (inherits(fit, "glm")) {
     fam <- tryCatch(stats::family(fit), error = function(e) NULL)
     fam_name <- if (!is.null(fam)) fam$family else "glm"
@@ -244,18 +278,27 @@ format_best_equations_html <- function(result, state = NULL) {
         !inherits(result$fit, "lavaan")) {
     notes <- character()
     est_all <- result$estimates
-    blocks <- lapply(names(result$fit), function(dv_id) {
-      fit <- result$fit[[dv_id]]
+    blocks <- lapply(names(result$fit), function(fit_key) {
+      fit <- result$fit[[fit_key]]
       if (is.null(fit)) return(NULL)
-      cf <- stats::coef(fit)
+      cf <- path_fixed_coefs(fit)
       if (!length(cf)) return(NULL)
+      parts <- strsplit(fit_key, "::", fixed = TRUE)[[1]]
+      dv_id <- parts[[1]]
+      resp_lv <- if (length(parts) > 1L) parts[[2]] else NA_character_
       yname <- if (!is.null(state)) {
         tryCatch(node_display_name(state, dv_id), error = function(e) dv_id)
       } else {
         dv_id
       }
-      rn <- tryCatch(as.character(stats::formula(fit)[[2]]), error = function(e) yname)
-      if (nzchar(rn)) yname <- rn
+      if (!is.na(resp_lv) && nzchar(resp_lv)) {
+        yname <- dv_outcome_lhs(yname, resp_lv)
+      } else if (!is.null(state)) {
+        yname <- dv_transform_lhs(yname, node_dv_transform(state, dv_id))
+      } else {
+        rn <- tryCatch(as.character(stats::formula(fit)[[2]]), error = function(e) yname)
+        if (nzchar(rn)) yname <- rn
+      }
 
       wrap <- equation_link_wrapper(fit, yname)
       if (!is.null(wrap$note)) notes <<- c(notes, wrap$note)
@@ -454,14 +497,21 @@ format_predictor_set <- function(edge_ids_csv, state) {
 
 #' Format model-comparison table for display
 #' @keywords internal
-format_comparison_display <- function(comparison, state = NULL) {
+format_comparison_display <- function(comparison, state = NULL,
+                                      include_role = TRUE) {
   if (is.null(comparison) || !nrow(comparison)) return(comparison)
   predictors <- if (is.null(state)) {
     ifelse(is.na(comparison$edges) | !nzchar(comparison$edges), "(null)", comparison$edges)
   } else {
     unname(vapply(comparison$edges, format_predictor_set, character(1), state = state))
   }
+  role <- if ("role" %in% names(comparison)) {
+    ifelse(is.na(comparison$role), "", as.character(comparison$role))
+  } else {
+    rep("", nrow(comparison))
+  }
   out <- data.frame(
+    role = role,
     predictors = predictors,
     AIC = round(comparison$aic),
     BIC = round(comparison$bic),
@@ -470,8 +520,83 @@ format_comparison_display <- function(comparison, state = NULL) {
     status = comparison$status,
     stringsAsFactors = FALSE
   )
+  if (!isTRUE(include_role) || !any(nzchar(out$role))) {
+    out$role <- NULL
+  }
   rownames(out) <- NULL
   out
+}
+
+#' Format the dedicated best-vs-confirmatory summary table
+#' @keywords internal
+format_best_vs_confirmatory_display <- function(bvc, state = NULL) {
+  if (is.null(bvc) || !nrow(bvc)) return(NULL)
+  format_comparison_display(bvc, state = state, include_role = TRUE)
+}
+
+#' Simple two-path mediation (indirect) effects a×b from fitted edges
+#'
+#' For every chain X → M → Y of included structural paths with finite a, b and
+#' SEs, reports the product with a first-order Sobel SE / p-value.
+#' @keywords internal
+indirect_effects_table <- function(state) {
+  empty <- data.frame(
+    From = character(), Level = character(), To = character(),
+    Type = character(), Status = character(),
+    Estimate = numeric(), SE = numeric(), p = character(),
+    stringsAsFactors = FALSE
+  )
+  if (is.null(state) || !nrow(state$edges)) return(empty)
+  edges <- ensure_edge_to_port(state)$edges
+  if (!"level" %in% names(edges)) edges$level <- NA_character_
+  if (!"status" %in% names(edges)) edges$status <- "pending"
+
+  keep <- !edges$type %in% c("definitional", "measurement") &
+    !vapply(edges$to, function(id) is_interaction_node(state, id), logical(1)) &
+    !vapply(edges$from, function(id) is_interaction_node(state, id), logical(1)) &
+    !is.na(edges$estimate) & is.finite(edges$estimate) &
+    !is.na(edges$se) & is.finite(edges$se) & edges$se >= 0 &
+    (is.na(edges$status) | edges$status != "excluded")
+  # Skip omnibus / multi-level categorical edges (a×b not a single product)
+  keep <- keep & (is.na(edges$level) | !nzchar(edges$level) |
+                    !identical(as.character(edges$level), "omnibus"))
+  e <- edges[keep, , drop = FALSE]
+  if (nrow(e) < 2L) return(empty)
+
+  rows <- list()
+  for (i in seq_len(nrow(e))) {
+    for (j in seq_len(nrow(e))) {
+      if (i == j) next
+      if (!identical(e$to[i], e$from[j])) next
+      if (identical(e$from[i], e$to[j])) next
+      a <- as.numeric(e$estimate[i])
+      b <- as.numeric(e$estimate[j])
+      se_a <- as.numeric(e$se[i])
+      se_b <- as.numeric(e$se[j])
+      ab <- a * b
+      # First-order delta method (Sobel)
+      se_ab <- sqrt(b^2 * se_a^2 + a^2 * se_b^2)
+      pv <- if (is.finite(se_ab) && se_ab > 0) {
+        2 * stats::pnorm(-abs(ab / se_ab))
+      } else {
+        NA_real_
+      }
+      med <- e$to[i]
+      rows[[length(rows) + 1L]] <- data.frame(
+        From = node_display_name(state, e$from[i]),
+        Level = paste0("via ", node_display_name(state, med)),
+        To = node_display_name(state, e$to[j]),
+        Type = "indirect",
+        Status = "derived",
+        Estimate = round(ab, 3),
+        SE = round(se_ab, 3),
+        p = format_pvalue(pv, digits = 3),
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+  if (!length(rows)) return(empty)
+  do.call(rbind, rows)
 }
 
 #' Path coefficient table for results pane
@@ -480,59 +605,72 @@ estimates_table <- function(state, estimates = NULL) {
   empty <- data.frame(
     From = character(), Level = character(), To = character(),
     Type = character(), Status = character(),
-    Estimate = numeric(), SE = numeric(), p = numeric(),
+    Estimate = numeric(), SE = numeric(), p = character(),
     stringsAsFactors = FALSE
   )
 
   # Prefer full estimate rows (includes polynomial powers)
   if (!is.null(estimates) && nrow(estimates)) {
     est <- estimates[estimates$op %in% c("~", "=~"), , drop = FALSE]
-    if (!nrow(est)) return(empty)
-    from_lab <- vapply(seq_len(nrow(est)), function(i) {
-      if (identical(est$op[i], "=~")) est$lhs[i] else est$rhs[i]
-    }, character(1))
-    to_lab <- vapply(seq_len(nrow(est)), function(i) {
-      if (identical(est$op[i], "=~")) est$rhs[i] else est$lhs[i]
-    }, character(1))
-    lv <- if ("level" %in% names(est)) {
-      ifelse(is.na(est$level) | !nzchar(as.character(est$level)), "", as.character(est$level))
+    if (!nrow(est)) {
+      main <- empty
     } else {
-      rep("", nrow(est))
+      from_lab <- vapply(seq_len(nrow(est)), function(i) {
+        if (identical(est$op[i], "=~")) est$lhs[i] else est$rhs[i]
+      }, character(1))
+      to_lab <- vapply(seq_len(nrow(est)), function(i) {
+        if (identical(est$op[i], "=~")) est$rhs[i] else est$lhs[i]
+      }, character(1))
+      lv <- if ("level" %in% names(est)) {
+        ifelse(is.na(est$level) | !nzchar(as.character(est$level)), "", as.character(est$level))
+      } else {
+        rep("", nrow(est))
+      }
+      if ("kind" %in% names(est)) {
+        lv <- ifelse(est$kind == "omnibus", "omnibus", lv)
+      }
+      main <- data.frame(
+        From = from_lab,
+        Level = lv,
+        To = to_lab,
+        Type = ifelse(est$op == "=~", "measurement", "path"),
+        Status = "included",
+        Estimate = round(as.numeric(est$est), 3),
+        SE = round(as.numeric(est$se), 3),
+        p = vapply(est$pvalue, format_pvalue, character(1), digits = 3),
+        stringsAsFactors = FALSE
+      )
     }
-    if ("kind" %in% names(est)) {
-      lv <- ifelse(est$kind == "omnibus", "omnibus", lv)
+  } else {
+    edges <- state$edges
+    if (!nrow(edges)) {
+      main <- empty
+    } else {
+      if (!"level" %in% names(edges)) edges$level <- NA_character_
+      # Hide definitional wires into interaction operators
+      keep <- edges$type != "definitional" &
+        !vapply(edges$to, function(id) is_interaction_node(state, id), logical(1))
+      edges <- edges[keep, , drop = FALSE]
+      if (!nrow(edges)) {
+        main <- empty
+      } else {
+        main <- data.frame(
+          From = vapply(edges$from, function(id) node_display_name(state, id), character(1)),
+          Level = ifelse(is.na(edges$level) | !nzchar(edges$level), "", edges$level),
+          To = vapply(edges$to, function(id) node_display_name(state, id), character(1)),
+          Type = edges$type,
+          Status = edges$status,
+          Estimate = round(edges$estimate, 3),
+          SE = round(edges$se, 3),
+          p = vapply(edges$pvalue, format_pvalue, character(1), digits = 3),
+          stringsAsFactors = FALSE
+        )
+      }
     }
-    return(data.frame(
-      From = from_lab,
-      Level = lv,
-      To = to_lab,
-      Type = ifelse(est$op == "=~", "measurement", "path"),
-      Status = "included",
-      Estimate = round(as.numeric(est$est), 3),
-      SE = round(as.numeric(est$se), 3),
-      p = vapply(est$pvalue, format_pvalue, character(1), digits = 3),
-      stringsAsFactors = FALSE
-    ))
   }
 
-  edges <- state$edges
-  if (!nrow(edges)) return(empty)
-  if (!"level" %in% names(edges)) edges$level <- NA_character_
-  # Hide definitional wires into interaction operators
-  keep <- edges$type != "definitional" &
-    !vapply(edges$to, function(id) is_interaction_node(state, id), logical(1))
-  edges <- edges[keep, , drop = FALSE]
-  if (!nrow(edges)) return(empty)
-
-  data.frame(
-    From = vapply(edges$from, function(id) node_display_name(state, id), character(1)),
-    Level = ifelse(is.na(edges$level) | !nzchar(edges$level), "", edges$level),
-    To = vapply(edges$to, function(id) node_display_name(state, id), character(1)),
-    Type = edges$type,
-    Status = edges$status,
-    Estimate = round(edges$estimate, 3),
-    SE = round(edges$se, 3),
-    p = vapply(edges$pvalue, format_pvalue, character(1), digits = 3),
-    stringsAsFactors = FALSE
-  )
+  indir <- indirect_effects_table(state)
+  if (!nrow(main)) return(indir)
+  if (!nrow(indir)) return(main)
+  rbind(main, indir)
 }

@@ -6,6 +6,48 @@
 #'   (caller decides filtering).
 #' @return A character string of lavaan syntax.
 #' @export
+#' Measurement-only lavaan syntax (latent =~ indicators)
+#' @keywords internal
+build_measurement_syntax <- function(state, meas_edges = NULL) {
+  if (is.null(meas_edges)) {
+    meas_edges <- state$edges[state$edges$type == "measurement", , drop = FALSE]
+  } else {
+    meas_edges <- meas_edges[meas_edges$type == "measurement", , drop = FALSE]
+  }
+  if (!nrow(meas_edges)) {
+    stop("No measurement links to build factor scores from.", call. = FALSE)
+  }
+  lines <- character()
+  latents <- unique(meas_edges$from)
+  for (lat in latents) {
+    if (!is_latent_node(state, lat)) {
+      stop(
+        "Measurement links must start from a latent node ('",
+        node_display_name(state, lat), "').",
+        call. = FALSE
+      )
+    }
+    inds <- meas_edges$to[meas_edges$from == lat]
+    if (!length(inds)) next
+    ind_names <- vapply(inds, function(id) lavaan_var_name(state, id), character(1))
+    lat_name <- lavaan_var_name(state, lat)
+    if (length(inds) == 1L) {
+      # Single indicator: fix loading = 1 and residual = 0 → score ≡ indicator
+      lines <- c(
+        lines,
+        paste0(lat_name, " =~ 1*", ind_names[[1]]),
+        paste0(ind_names[[1]], " ~~ 0*", ind_names[[1]])
+      )
+    } else {
+      lines <- c(lines, paste0(lat_name, " =~ ", paste(ind_names, collapse = " + ")))
+    }
+  }
+  if (!length(lines)) {
+    stop("No valid measurement structure for factor scores.", call. = FALSE)
+  }
+  paste(lines, collapse = "\n")
+}
+
 build_lavaan_syntax <- function(state, include_edge_ids = NULL) {
   edges <- state$edges
   if (!is.null(include_edge_ids)) {
@@ -198,18 +240,43 @@ prepare_analysis_data <- function(state, data) {
     stop("Load a data file before running the analysis.", call. = FALSE)
   }
   state <- ensure_node_kind_columns(state)
+  state <- ensure_node_rm_columns(state)
   mapped <- state$nodes[!is.na(state$nodes$observed_column) & nzchar(state$nodes$observed_column), , drop = FALSE]
   if (!nrow(mapped)) {
     stop("Map at least one data column to a node.", call. = FALSE)
   }
-  missing_cols <- setdiff(mapped$observed_column, names(data))
+  # Clustering vars for repeated-measures DVs (lmer/glmer)
+  rm_hit <- !is.na(state$nodes$repeated_measures) & state$nodes$repeated_measures
+  cluster_cols <- unique(as.character(state$nodes$cluster_column[rm_hit]))
+  cluster_cols <- cluster_cols[!is.na(cluster_cols) & nzchar(cluster_cols)]
+  keep_cols <- unique(c(mapped$observed_column, cluster_cols))
+  missing_cols <- setdiff(keep_cols, names(data))
   if (length(missing_cols)) {
     stop("Missing columns in data: ", paste(missing_cols, collapse = ", "), call. = FALSE)
   }
-  out <- data[, mapped$observed_column, drop = FALSE]
+  out <- data[, keep_cols, drop = FALSE]
   # Drop rows with any NA in used columns (listwise)
   out <- out[stats::complete.cases(out), , drop = FALSE]
   if (!nrow(out)) stop("No complete cases after listwise deletion.", call. = FALSE)
+
+  # Apply per-node factor base / order before building products and models
+  state <- ensure_node_factor_coding_columns(state)
+  for (i in seq_len(nrow(mapped))) {
+    nid <- mapped$id[i]
+    col <- mapped$observed_column[i]
+    if (!col %in% names(out)) next
+    kind0 <- classify_variable(out[[col]])
+    if (!kind0 %in% c("categorical", "binary")) next
+    if (is.numeric(out[[col]]) && !is.factor(out[[col]])) next
+    meta <- node_factor_coding(state, nid)
+    if (is.na(meta$base) && !length(meta$levels) && !isTRUE(meta$ordered)) next
+    out[[col]] <- coerce_with_factor_coding(
+      out[[col]],
+      base = meta$base,
+      levels_order = meta$levels,
+      ordered = meta$ordered
+    )
+  }
 
   # Materialize centered products for continuous/binary × continuous/binary only.
   # Categorical interactions are expanded into dummy products in build_path_terms.
@@ -223,6 +290,10 @@ prepare_analysis_data <- function(state, data) {
     if (is.na(fa) || is.na(fb) || !nzchar(fa) || !nzchar(fb)) next
     col_a <- state$nodes$observed_column[match(fa, state$nodes$id)]
     col_b <- state$nodes$observed_column[match(fb, state$nodes$id)]
+    # Latent factors are scored in the two-step stage; skip product until then
+    if (is_latent_node(state, fa) || is_latent_node(state, fb)) {
+      next
+    }
     if (is.na(col_a) || !nzchar(col_a) || is.na(col_b) || !nzchar(col_b)) {
       stop(
         sprintf(
