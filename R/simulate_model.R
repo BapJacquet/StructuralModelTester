@@ -61,7 +61,8 @@ sim_center <- function(x) {
 #' @keywords internal
 sim_draw_continuous_column <- function(state, node_id, n) {
   sp <- node_sim_params(state, node_id)
-  stats::rnorm(n, mean = sp$mean, sd = sp$sd)
+  x <- stats::rnorm(n, mean = sp$mean, sd = sp$sd)
+  sim_clamp_values(x, min = sp$min, max = sp$max)
 }
 
 #' Assign factor levels across `n` units (subjects or rows)
@@ -261,15 +262,17 @@ sim_interaction_predictor <- function(state, dat, ix_id) {
 
 #' Simulate a path dataset from priors + node sim knobs
 #'
-#' Exogenous continuous nodes: Normal(sim_mean, sim_sd).
+#' Exogenous continuous nodes: Normal(sim_mean, sim_sd), then clamped to
+#' optional `sim_min` / `sim_max` when set.
 #' Exogenous categorical/binary: probability (`sim_level_props`) or exact
 #' (`sim_level_counts`) allocation; `sim_design_mode` `"intra"` factors expand
 #' a within-subject Cartesian design (Samples = subjects), `"inter"` factors
 #' are assigned once per subject (or once per row when all factors are inter).
-#' Structural DVs (topo order): edge prior means × predictors — unstandardized
-#' continuous mains (`b` on mean-centered X), treatment-coded factor mains, and
-#' interaction products coded like the fit (binary 0/1, continuous centered) —
-#' plus N(0, sim_resid_sd) on the outcome scale.
+#' Structural DVs (topo order): `sim_intercept` + edge prior means × predictors —
+#' unstandardized continuous mains (`b` on mean-centered X), treatment-coded
+#' factor mains, and interaction products coded like the fit (binary 0/1,
+#' continuous centered) — plus N(0, sim_resid_sd) on the outcome scale, then
+#' clamped to the DV's `sim_min` / `sim_max` when set.
 #'
 #' When any factor is intra, the result includes a `subject` column.
 #'
@@ -373,7 +376,10 @@ simulate_path_data <- function(state, n = 500L, seed = 1L) {
   for (dv in dv_order) {
     dv_nm <- node_sim_column(state, dv)
     inc <- struct[struct$to == dv, , drop = FALSE]
-    eta <- rep(0, n_rows)
+    sp_dv <- node_sim_params(state, dv)
+    intercept <- sp_dv$intercept
+    if (!is.finite(intercept)) intercept <- 0
+    eta <- rep(intercept, n_rows)
 
     if (nrow(inc)) {
       for (i in seq_len(nrow(inc))) {
@@ -384,12 +390,28 @@ simulate_path_data <- function(state, n = 500L, seed = 1L) {
 
         if (is_interaction_node(state, from_id)) {
           fac <- interaction_factors(state, from_id)
-          if (is.na(fac$a) || is.na(fac$b) || !nzchar(fac$a) || !nzchar(fac$b)) next
+          if (is.na(fac$a) || is.na(fac$b) || !nzchar(fac$a) || !nzchar(fac$b)) {
+            if (exists("smt_debug", mode = "function")) {
+              smt_debug("sim skip incomplete ix | edge=", eid, " from=", from_id)
+            }
+            next
+          }
           ensure_col(fac$a)
           ensure_col(fac$b)
           prod <- sim_interaction_predictor(state, dat, from_id)
-          if (is.null(prod)) next
+          if (is.null(prod)) {
+            if (exists("smt_debug", mode = "function")) {
+              smt_debug("sim skip null ix product | edge=", eid, " from=", from_id)
+            }
+            next
+          }
           eta <- eta + beta * prod
+          if (exists("smt_debug", mode = "function")) {
+            smt_debug(
+              "sim apply ix | edge=", eid, " beta=", beta,
+              " mean_prod=", round(mean(prod), 4)
+            )
+          }
           next
         }
 
@@ -401,16 +423,57 @@ simulate_path_data <- function(state, n = 500L, seed = 1L) {
           for (ind in pred) {
             eta <- eta + beta * ind
           }
+          if (exists("smt_debug", mode = "function")) {
+            smt_debug(
+              "sim apply omnibus | edge=", eid, " from=", from_id,
+              " beta=", beta, " n_ind=", length(pred)
+            )
+          }
         } else {
           eta <- eta + beta * pred
+          if (exists("smt_debug", mode = "function")) {
+            smt_debug(
+              "sim apply | edge=", eid, " from=", from_id,
+              " beta=", beta, " mean_pred=", round(mean(pred), 4)
+            )
+          }
         }
       }
     }
 
-    resid_sd <- node_sim_params(state, dv)$resid_sd
-    if (!is.finite(resid_sd) || resid_sd <= 0) resid_sd <- 1
-    # Factor DVs are not simulated yet — always continuous outcome scale
-    dat[[dv_nm]] <- eta + stats::rnorm(n_rows, mean = 0, sd = resid_sd)
+    y_kind <- node_sim_var_kind(state, dv, data = NULL)
+    if (identical(y_kind, "binary")) {
+      # Logistic / Bernoulli DV: η is the logit; no extra Gaussian residual
+      p <- stats::plogis(eta)
+      p[!is.finite(p)] <- 0.5
+      p <- pmax(1e-8, pmin(1 - 1e-8, p))
+      y01 <- stats::rbinom(n_rows, size = 1L, prob = p)
+      levs <- node_sim_factor_levels(state, dv, data = NULL)
+      if (length(levs) < 2L) levs <- c("0", "1")
+      # Match as_binary01 / treatment coding: first level = 0, second = 1
+      dat[[dv_nm]] <- factor(
+        ifelse(y01 == 1L, levs[[2]], levs[[1]]),
+        levels = levs[seq_len(2L)]
+      )
+      if (exists("smt_debug", mode = "function")) {
+        smt_debug(
+          "sim DV binary/logit | dv=", dv_nm,
+          " mean_p=", round(mean(p), 4),
+          " rate=", round(mean(y01), 4)
+        )
+      }
+    } else if (identical(y_kind, "categorical")) {
+      stop(
+        "Categorical DVs are not simulated yet. Set the DV simulation type to ",
+        "binary (logistic) or continuous, or use Prepare / real data.",
+        call. = FALSE
+      )
+    } else {
+      resid_sd <- sp_dv$resid_sd
+      if (!is.finite(resid_sd) || resid_sd <= 0) resid_sd <- 1
+      y_draw <- eta + stats::rnorm(n_rows, mean = 0, sd = resid_sd)
+      dat[[dv_nm]] <- sim_clamp_values(y_draw, min = sp_dv$min, max = sp_dv$max)
+    }
   }
 
   if (!length(dat)) {
@@ -468,15 +531,47 @@ restore_column_mappings <- function(fitted_state, source_state) {
   fitted_state
 }
 
+#' Indicator column names for latents (measurement links)
+#' @keywords internal
+latent_indicator_columns <- function(state, latent_ids) {
+  state <- ensure_node_kind_columns(state)
+  meas <- state$edges[state$edges$type == "measurement", , drop = FALSE]
+  if (!nrow(meas)) return(character())
+  latent_ids <- unique(as.character(latent_ids))
+  latent_ids <- latent_ids[!is.na(latent_ids) & nzchar(latent_ids)]
+  if (!length(latent_ids)) return(character())
+  hits <- meas[meas$from %in% latent_ids, , drop = FALSE]
+  if (!nrow(hits)) return(character())
+  unique(vapply(hits$to, function(id) lavaan_var_name(state, id), character(1)))
+}
+
+#' TRUE when measurement indicators for latents are present in `dat`
+#' @keywords internal
+latent_indicators_available <- function(state, dat, latent_ids) {
+  if (is.null(dat) || !NROW(dat)) return(FALSE)
+  inds <- latent_indicator_columns(state, latent_ids)
+  if (!length(inds)) return(FALSE)
+  all(vapply(inds, function(col) {
+    !is.null(col) && !is.na(col) && nzchar(col) &&
+      col %in% names(dat) && sum(!is.na(dat[[col]])) > 0L
+  }, logical(1)))
+}
+
 #' Prefer analysis data only when nodes are mapped; else simulated data
 #'
 #' Analysis columns are used only via `observed_column` mappings — never by
 #' matching an unmapped node id/label to a dataset column.
 #'
+#' Latents are not mapped columns: before an analysis they cannot be plotted;
+#' after an analysis, factor scores are built from the measurement model on the
+#' chosen dataset (see `enrich_data_with_factor_scores`).
+#'
 #' @param node_ids Character vector of endpoint node ids (and interaction factors).
-#' @return list(data, simulated) or list(data=NULL, simulated=FALSE, reason=...)
+#' @param has_result TRUE when a fitted result is available (factor scores OK).
+#' @return list(data, simulated) or list(data=NULL, simulated=FALSE, reason=..., title=...)
 #' @keywords internal
-pick_plot_data_for_nodes <- function(state, analysis, sim, node_ids) {
+pick_plot_data_for_nodes <- function(state, analysis, sim, node_ids,
+                                     has_result = FALSE) {
   node_ids <- unique(as.character(node_ids))
   node_ids <- node_ids[!is.na(node_ids) & nzchar(node_ids)]
   node_ids <- node_ids[
@@ -485,6 +580,73 @@ pick_plot_data_for_nodes <- function(state, analysis, sim, node_ids) {
   col_ok <- function(dat, col) {
     !is.null(col) && !is.na(col) && nzchar(col) &&
       !is.null(dat) && col %in% names(dat) && sum(!is.na(dat[[col]])) > 0L
+  }
+
+  is_lat <- vapply(node_ids, function(id) is_latent_node(state, id), logical(1))
+  lat_ids <- node_ids[is_lat]
+  obs_ids <- node_ids[!is_lat]
+
+  if (length(lat_ids) && !isTRUE(has_result)) {
+    labs <- vapply(lat_ids, function(id) node_display_name(state, id), character(1))
+    return(list(
+      data = NULL,
+      simulated = FALSE,
+      title = "Run analysis",
+      reason = paste0(
+        "Latent variable", if (length(lat_ids) > 1L) "s" else "", " (",
+        paste(unique(labs), collapse = ", "),
+        ") cannot be plotted before an analysis. ",
+        "Run the analysis to compute factor scores from the measurement model."
+      )
+    ))
+  }
+
+  obs_analysis_ok <- function() {
+    if (!length(obs_ids)) {
+      return(!is.null(analysis) && NROW(analysis) > 0L)
+    }
+    mapped <- vapply(obs_ids, function(id) node_analysis_column(state, id), character(1))
+    all(!is.na(mapped) & nzchar(mapped)) &&
+      all(vapply(mapped, function(c) col_ok(analysis, c), logical(1)))
+  }
+  obs_sim_ok <- function() {
+    if (!length(obs_ids)) {
+      return(!is.null(sim) && NROW(sim) > 0L)
+    }
+    cols <- vapply(obs_ids, function(id) node_plot_column(state, id), character(1))
+    all(vapply(cols, function(c) col_ok(sim, c), logical(1)))
+  }
+
+  # Post-analysis: admit analysis/sim even though latents are unmapped, then
+  # enrich_data_with_factor_scores attaches CFA regression scores.
+  if (length(lat_ids) && isTRUE(has_result)) {
+    if (obs_analysis_ok() && latent_indicators_available(state, analysis, lat_ids)) {
+      return(list(data = analysis, simulated = FALSE))
+    }
+    if (obs_sim_ok() && latent_indicators_available(state, sim, lat_ids)) {
+      return(list(data = sim, simulated = TRUE))
+    }
+    labs <- vapply(lat_ids, function(id) node_display_name(state, id), character(1))
+    no_meas <- !length(latent_indicator_columns(state, lat_ids))
+    return(list(
+      data = NULL,
+      simulated = FALSE,
+      title = if (no_meas) "Measurement needed" else "Missing indicators",
+      reason = if (no_meas) {
+        paste0(
+          "Latent variable", if (length(lat_ids) > 1L) "s" else "", " (",
+          paste(unique(labs), collapse = ", "),
+          ") need measurement links to observed indicators before scores can be plotted."
+        )
+      } else {
+        paste0(
+          "Could not find measurement indicators for ",
+          paste(unique(labs), collapse = ", "),
+          " in the analysis or simulated data. ",
+          "Map indicator nodes to columns (or include them in Simulate)."
+        )
+      }
+    ))
   }
 
   mapped <- vapply(node_ids, function(id) node_analysis_column(state, id), character(1))
@@ -498,16 +660,11 @@ pick_plot_data_for_nodes <- function(state, analysis, sim, node_ids) {
     return(list(data = sim, simulated = TRUE))
   }
 
-  missing <- character()
-  if (!all_mapped) {
-    missing <- c(missing, node_ids[is.na(mapped) | !nzchar(mapped)])
-  } else {
-    missing <- c(missing, mapped[!vapply(mapped, function(c) col_ok(analysis, c), logical(1))])
-  }
   missing_sim <- plot_cols[!vapply(plot_cols, function(c) col_ok(sim, c), logical(1))]
   list(
     data = NULL,
     simulated = FALSE,
+    title = "No data",
     reason = paste0(
       "No plottable data. ",
       if (length(missing_sim)) {

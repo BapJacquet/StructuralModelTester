@@ -7,3 +7,4 @@
 .Ruserdata
 *.tar.gz
 smt-debug.log
+.smt/

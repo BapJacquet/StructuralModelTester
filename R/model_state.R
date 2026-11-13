@@ -25,6 +25,9 @@ empty_model_state <- function() {
       factor_levels = character(),
       sim_mean = numeric(),
       sim_sd = numeric(),
+      sim_min = numeric(),
+      sim_max = numeric(),
+      sim_intercept = numeric(),
       sim_resid_sd = numeric(),
       sim_var_kind = character(),
       sim_level_props = character(),
@@ -585,6 +588,9 @@ add_node <- function(state, label, observed_column = NA_character_,
     factor_levels = NA_character_,
     sim_mean = 0,
     sim_sd = 1,
+    sim_min = NA_real_,
+    sim_max = NA_real_,
+    sim_intercept = 0,
     sim_resid_sd = 1,
     sim_var_kind = "continuous",
     sim_level_props = NA_character_,
@@ -631,6 +637,9 @@ add_interaction_node <- function(state) {
     factor_levels = NA_character_,
     sim_mean = 0,
     sim_sd = 1,
+    sim_min = NA_real_,
+    sim_max = NA_real_,
+    sim_intercept = 0,
     sim_resid_sd = 1,
     sim_var_kind = "continuous",
     sim_level_props = NA_character_,
@@ -882,6 +891,10 @@ ensure_node_r2_columns <- function(state) {
 #' Ensure simulation generative columns on nodes
 #'
 #' - `sim_mean` / `sim_sd`: exogenous continuous draws (defaults 0 / 1).
+#' - `sim_min` / `sim_max`: optional continuous bounds (NA = unbounded);
+#'   simulated values are clamped into this range.
+#' - `sim_intercept`: structural-DV intercept on the outcome scale (default 0);
+#'   baseline mean when predictors are at reference / centered 0.
 #' - `sim_resid_sd`: structural-DV residual SD on the outcome scale (default 1).
 #' - `sim_var_kind`: declared type for unmapped nodes
 #'   (`continuous` / `categorical` / `binary`).
@@ -897,6 +910,15 @@ ensure_node_sim_columns <- function(state) {
   }
   if (!"sim_sd" %in% names(state$nodes)) {
     state$nodes$sim_sd <- rep(1, n)
+  }
+  if (!"sim_min" %in% names(state$nodes)) {
+    state$nodes$sim_min <- rep(NA_real_, n)
+  }
+  if (!"sim_max" %in% names(state$nodes)) {
+    state$nodes$sim_max <- rep(NA_real_, n)
+  }
+  if (!"sim_intercept" %in% names(state$nodes)) {
+    state$nodes$sim_intercept <- rep(0, n)
   }
   if (!"sim_resid_sd" %in% names(state$nodes)) {
     state$nodes$sim_resid_sd <- rep(1, n)
@@ -922,6 +944,21 @@ ensure_node_sim_columns <- function(state) {
   miss_s <- is.na(state$nodes$sim_sd) | !is.finite(state$nodes$sim_sd) |
     state$nodes$sim_sd <= 0
   if (any(miss_s)) state$nodes$sim_sd[miss_s] <- 1
+  # Non-finite bounds → unbounded (NA)
+  bad_lo <- !is.na(state$nodes$sim_min) & !is.finite(state$nodes$sim_min)
+  if (any(bad_lo)) state$nodes$sim_min[bad_lo] <- NA_real_
+  bad_hi <- !is.na(state$nodes$sim_max) & !is.finite(state$nodes$sim_max)
+  if (any(bad_hi)) state$nodes$sim_max[bad_hi] <- NA_real_
+  # Swap inverted bounds
+  both <- is.finite(state$nodes$sim_min) & is.finite(state$nodes$sim_max) &
+    state$nodes$sim_min > state$nodes$sim_max
+  if (any(both)) {
+    tmp <- state$nodes$sim_min[both]
+    state$nodes$sim_min[both] <- state$nodes$sim_max[both]
+    state$nodes$sim_max[both] <- tmp
+  }
+  miss_i <- is.na(state$nodes$sim_intercept) | !is.finite(state$nodes$sim_intercept)
+  if (any(miss_i)) state$nodes$sim_intercept[miss_i] <- 0
   miss_r <- is.na(state$nodes$sim_resid_sd) | !is.finite(state$nodes$sim_resid_sd) |
     state$nodes$sim_resid_sd <= 0
   if (any(miss_r)) state$nodes$sim_resid_sd[miss_r] <- 1
@@ -953,19 +990,50 @@ node_is_structural_exogenous <- function(state, node_id) {
 }
 
 #' Simulation knobs for one node
-#' @return list(mean, sd, resid_sd)
+#' @return list(mean, sd, resid_sd, intercept, min, max)
 #' @keywords internal
 node_sim_params <- function(state, node_id) {
   state <- ensure_node_sim_columns(state)
   idx <- match(node_id, state$nodes$id)
   if (is.na(idx)) {
-    return(list(mean = 0, sd = 1, resid_sd = 1))
+    return(list(
+      mean = 0, sd = 1, resid_sd = 1, intercept = 0,
+      min = NA_real_, max = NA_real_
+    ))
   }
   list(
     mean = as.numeric(state$nodes$sim_mean[idx]),
     sd = as.numeric(state$nodes$sim_sd[idx]),
-    resid_sd = as.numeric(state$nodes$sim_resid_sd[idx])
+    resid_sd = as.numeric(state$nodes$sim_resid_sd[idx]),
+    intercept = as.numeric(state$nodes$sim_intercept[idx]),
+    min = as.numeric(state$nodes$sim_min[idx]),
+    max = as.numeric(state$nodes$sim_max[idx])
   )
+}
+
+#' Clamp numeric values into optional [min, max] bounds (NA = open)
+#' @keywords internal
+sim_clamp_values <- function(x, min = NA_real_, max = NA_real_) {
+  x <- as.numeric(x)
+  lo <- as.numeric(min)
+  hi <- as.numeric(max)
+  if (length(lo) != 1L || !is.finite(lo)) lo <- NA_real_
+  if (length(hi) != 1L || !is.finite(hi)) hi <- NA_real_
+  if (is.finite(lo) && is.finite(hi) && lo > hi) {
+    tmp <- lo
+    lo <- hi
+    hi <- tmp
+  }
+  if (is.finite(lo)) x[is.finite(x) & x < lo] <- lo
+  if (is.finite(hi)) x[is.finite(x) & x > hi] <- hi
+  x
+}
+
+#' Clamp a simulated continuous column using the node's sim_min / sim_max
+#' @keywords internal
+sim_clamp_node_values <- function(state, node_id, x) {
+  sp <- node_sim_params(state, node_id)
+  sim_clamp_values(x, min = sp$min, max = sp$max)
 }
 
 #' Set exogenous continuous simulation mean/SD (does not clear fits)
@@ -983,6 +1051,26 @@ set_node_sim_exogenous <- function(state, node_id, mean = 0, sd = 1) {
   state
 }
 
+#' Set continuous simulation bounds (NA = unbounded; does not clear fits)
+#' @keywords internal
+set_node_sim_bounds <- function(state, node_id, min = NA_real_, max = NA_real_) {
+  state <- ensure_node_sim_columns(state)
+  idx <- match(node_id, state$nodes$id)
+  if (is.na(idx)) return(state)
+  lo <- as.numeric(min)
+  hi <- as.numeric(max)
+  if (length(lo) != 1L || !is.finite(lo)) lo <- NA_real_
+  if (length(hi) != 1L || !is.finite(hi)) hi <- NA_real_
+  if (is.finite(lo) && is.finite(hi) && lo > hi) {
+    tmp <- lo
+    lo <- hi
+    hi <- tmp
+  }
+  state$nodes$sim_min[idx] <- lo
+  state$nodes$sim_max[idx] <- hi
+  state
+}
+
 #' Set structural-DV residual SD on the outcome scale (does not clear fits)
 #' @keywords internal
 set_node_sim_resid_sd <- function(state, node_id, resid_sd = 1) {
@@ -992,6 +1080,18 @@ set_node_sim_resid_sd <- function(state, node_id, resid_sd = 1) {
   resid_sd <- as.numeric(resid_sd)
   if (!is.finite(resid_sd) || resid_sd <= 0) resid_sd <- 1
   state$nodes$sim_resid_sd[idx] <- resid_sd
+  state
+}
+
+#' Set structural-DV simulation intercept (does not clear fits)
+#' @keywords internal
+set_node_sim_intercept <- function(state, node_id, intercept = 0) {
+  state <- ensure_node_sim_columns(state)
+  idx <- match(node_id, state$nodes$id)
+  if (is.na(idx)) return(state)
+  intercept <- as.numeric(intercept)
+  if (!is.finite(intercept)) intercept <- 0
+  state$nodes$sim_intercept[idx] <- intercept
   state
 }
 
@@ -1055,6 +1155,45 @@ normalize_sim_props <- function(props, levels) {
     return(stats::setNames(rep(1 / length(levels), length(levels)), levels))
   }
   raw / s
+}
+
+#' Sync declared `sim_var_kind` (and binary/cat levels) from mapped analysis data
+#'
+#' Needed so Simulate / Power use logistic Bernoulli draws for binary DVs even
+#' when the inspector kind was left at the continuous default.
+#' @keywords internal
+sync_sim_kinds_from_data <- function(state, data) {
+  if (is.null(data) || !ncol(data) || !NROW(state$nodes)) return(state)
+  state <- ensure_node_sim_columns(state)
+  state <- ensure_node_factor_coding_columns(state)
+  for (i in seq_len(nrow(state$nodes))) {
+    id <- state$nodes$id[[i]]
+    if (is_interaction_node(state, id)) next
+    col <- state$nodes$observed_column[[i]]
+    if (is.na(col) || !nzchar(col) || !col %in% names(data)) next
+    kind <- classify_variable(data[[col]])
+    if (!kind %in% c("continuous", "categorical", "binary")) next
+    state$nodes$sim_var_kind[[i]] <- kind
+    if (kind %in% c("binary", "categorical")) {
+      levs <- data_levels_chr(data[[col]])
+      if (length(levs)) {
+        meta <- node_factor_coding(state, id)
+        base <- if (!is.na(meta$base) && nzchar(meta$base) && meta$base %in% levs) {
+          meta$base
+        } else {
+          levs[[1]]
+        }
+        state <- set_node_factor_coding(
+          state, id,
+          base = base,
+          levels = levs,
+          ordered = isTRUE(meta$ordered),
+          data = data
+        )
+      }
+    }
+  }
+  state
 }
 
 #' Declared or data-inferred variable kind for simulation
@@ -1296,6 +1435,24 @@ state_has_intra_sim_factor <- function(state) {
   FALSE
 }
 
+#' Enable (1|subject) on structural DVs when Intra sim factors are present
+#'
+#' Keeps Simulate / Power fits aligned with within-subject designs produced by
+#' [simulate_path_data()] (which adds a `subject` column).
+#' @keywords internal
+enable_repeated_measures_for_intra_sim <- function(state,
+                                                  cluster_column = "subject") {
+  if (!state_has_intra_sim_factor(state)) return(state)
+  for (dv in structural_dv_ids(state)) {
+    state <- set_node_repeated_measures(
+      state, dv,
+      enabled = TRUE,
+      cluster_column = cluster_column
+    )
+  }
+  state
+}
+
 #' Ensure repeated-measures columns exist on nodes
 #' @keywords internal
 ensure_node_rm_columns <- function(state) {
@@ -1433,6 +1590,11 @@ node_factor_coding <- function(state, node_id) {
 }
 
 #' variable_coding using node overrides when present
+#'
+#' When the inspector declares `sim_var_kind = "categorical"` (e.g. First /
+#' Second), keep categorical port semantics even if the observed column has
+#' only two levels (`classify_variable` → binary). That matches × level wires
+#' and split non-base ports used in simulation.
 #' @keywords internal
 variable_coding_for_node <- function(state, node_id, data) {
   col <- tryCatch(lavaan_var_name(state, node_id), error = function(e) NA_character_)
@@ -1443,12 +1605,42 @@ variable_coding_for_node <- function(state, node_id, data) {
     ))
   }
   meta <- node_factor_coding(state, node_id)
+  # Split-mode binary needs non-base ports (same as categorical dummies).
+  force_bin <- identical(node_cat_mode(state, node_id), "split") ||
+    length(meta$levels) >= 2L
   coding <- variable_coding(
     data[[col]],
     base = meta$base,
-    levels_order = meta$levels
+    levels_order = meta$levels,
+    force_factor = force_bin
   )
   coding$ordered <- isTRUE(meta$ordered)
+  declared <- tryCatch(
+    node_sim_var_kind(state, node_id, data = NULL),
+    error = function(e) NA_character_
+  )
+  # `variable_coding` treats 2-level columns as binary and leaves `all_levels`
+  # empty unless force_factor. Rebuild categorical ports from observed + meta
+  # when the inspector declares categorical (e.g. First / Second).
+  if (identical(declared, "categorical") && identical(coding$kind, "binary")) {
+    observed <- data_levels_chr(data[[col]])
+    levs <- merge_level_order(meta$levels, observed)
+    if (!length(levs)) levs <- observed
+    if (length(levs) >= 2L) {
+      base <- as.character(meta$base %||% NA_character_)
+      if (length(base) != 1L || is.na(base) || !nzchar(base) || !base %in% levs) {
+        base <- levs[[1]]
+      }
+      levs <- c(base, setdiff(levs, base))
+      coding <- list(
+        kind = "categorical",
+        base = levs[[1]],
+        levels = levs[-1],
+        all_levels = levs,
+        ordered = isTRUE(meta$ordered)
+      )
+    }
+  }
   coding
 }
 
@@ -1458,6 +1650,11 @@ prune_edges_for_factor_coding <- function(state, node_id, coding) {
   if (!nrow(state$edges)) return(state)
   base <- coding$base
   allowed <- coding$levels
+  # Binary coding may leave `levels` empty while `all_levels` has both;
+  # non-base ports are still valid in split mode.
+  if (!length(allowed) && length(coding$all_levels)) {
+    allowed <- setdiff(as.character(coding$all_levels), as.character(base %||% NA_character_))
+  }
   drop <- integer()
   for (i in seq_len(nrow(state$edges))) {
     if (!identical(state$edges$from[i], node_id)) next
@@ -1615,10 +1812,19 @@ apply_estimates_to_edges <- function(state, estimates, included_edge_ids = NULL)
     to_nm <- lavaan_var_name(state, to)
     edge_level <- if ("level" %in% names(state$edges)) state$edges$level[i] else NA_character_
     edge_to_level <- if ("to_level" %in% names(state$edges)) state$edges$to_level[i] else NA_character_
-    to_lhs <- dv_outcome_lhs(to_nm, edge_to_level)
-    if (identical(to_lhs, to_nm)) {
-      to_lhs <- dv_transform_lhs(to_nm, node_dv_transform(state, to))
-    }
+    # Categorical split DVs use Y[level] in estimate tables; binary/continuous use
+    # plain (or transformed) Y even if the edge still carries a to_level.
+    to_lhs_plain <- dv_transform_lhs(to_nm, node_dv_transform(state, to))
+    to_lhs_candidates <- unique(c(
+      if (!is.na(edge_to_level) && nzchar(as.character(edge_to_level))) {
+        dv_outcome_lhs(to_nm, edge_to_level)
+      } else {
+        character()
+      },
+      to_lhs_plain,
+      to_nm
+    ))
+    to_lhs_candidates <- to_lhs_candidates[nzchar(as.character(to_lhs_candidates))]
     is_omni_edge <- identical(node_cat_mode(state, from), "omnibus")
     if (is_interaction_node(state, from)) {
       fac_ix <- interaction_factors(state, from)
@@ -1626,32 +1832,54 @@ apply_estimates_to_edges <- function(state, estimates, included_edge_ids = NULL)
         identical(node_cat_mode(state, fac_ix$b), "omnibus")
     }
 
-    if (etype == "measurement") {
-      hit <- estimates$lhs == from_nm & estimates$op == "=~" & estimates$rhs == to_nm
-    } else {
-      hit <- estimates$lhs == to_lhs & estimates$op == "~" & estimates$rhs == from_nm
-      if ("kind" %in% names(estimates) && any(hit)) {
+    refine_structural_hit <- function(hit) {
+      if (!any(hit)) return(hit)
+      if ("kind" %in% names(estimates)) {
         if (is_omni_edge) {
           om <- hit & estimates$kind == "omnibus"
-          if (any(om)) hit <- om
-        } else if (is_interaction_node(state, from)) {
-          # Split interaction: one (or more) product terms; keep effects
-          hit <- hit & estimates$kind == "effect"
-        } else if (!is.na(edge_level) && nzchar(edge_level)) {
-          hit <- hit & estimates$kind == "effect" &
-            !is.na(estimates$level) & estimates$level == edge_level
-        } else {
-          # Primary continuous / binary term: exclude poly + omnibus
-          hit <- hit & estimates$kind == "effect" &
+          if (any(om)) return(om)
+          return(hit)
+        }
+        if (is_interaction_node(state, from)) {
+          return(hit & estimates$kind == "effect")
+        }
+        if (!is.na(edge_level) && nzchar(edge_level)) {
+          return(
+            hit & estimates$kind == "effect" &
+              !is.na(estimates$level) & estimates$level == edge_level
+          )
+        }
+        return(
+          hit & estimates$kind == "effect" &
             (is.na(estimates$level) | !nzchar(as.character(estimates$level)) |
                !vapply(estimates$level, is_poly_level, logical(1)))
-        }
-      } else if ("level" %in% names(estimates)) {
+        )
+      }
+      if ("level" %in% names(estimates)) {
         if (!is.na(edge_level) && nzchar(edge_level)) {
-          hit <- hit & !is.na(estimates$level) & estimates$level == edge_level
-        } else {
-          hit <- hit & (is.na(estimates$level) | !nzchar(as.character(estimates$level)) |
+          return(hit & !is.na(estimates$level) & estimates$level == edge_level)
+        }
+        return(
+          hit & (is.na(estimates$level) | !nzchar(as.character(estimates$level)) |
             !vapply(estimates$level, is_poly_level, logical(1)))
+        )
+      }
+      hit
+    }
+
+    if (etype == "measurement") {
+      hit <- estimates$lhs == from_nm & estimates$op == "=~" & estimates$rhs == to_nm
+      to_lhs <- from_nm
+    } else {
+      hit <- rep(FALSE, nrow(estimates))
+      to_lhs <- to_lhs_plain
+      for (lhs_try in to_lhs_candidates) {
+        cand <- estimates$lhs == lhs_try & estimates$op == "~" & estimates$rhs == from_nm
+        cand <- refine_structural_hit(cand)
+        if (any(cand)) {
+          hit <- cand
+          to_lhs <- lhs_try
+          break
         }
       }
     }
@@ -1730,6 +1958,14 @@ apply_estimates_to_edges <- function(state, estimates, included_edge_ids = NULL)
         lab <- paste0(lab, "·", edge_level)
       }
       state$edges$label[i] <- lab
+      if (exists("smt_debug", mode = "function")) {
+        smt_debug(
+          "apply_estimates miss | eid=", eid,
+          " rhs=", from_nm, " lhs_tried=", paste(to_lhs_candidates, collapse = ","),
+          " edge_level=", edge_level %||% "",
+          " to_level=", edge_to_level %||% ""
+        )
+      }
     }
   }
   state

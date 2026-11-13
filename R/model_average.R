@@ -284,6 +284,9 @@ format_averaged_equations_html <- function(result, state) {
   dvs <- unique(edges$to[edges$type != "measurement"])
   if (!length(dvs)) return(NULL)
 
+  abbrev_map <- equation_abbrev_map(result, state)
+  meas_html <- format_measurement_equations_html(result, state, abbrev_map)
+
   blocks <- lapply(dvs, function(dv) {
     eidx <- which(edges$to == dv & edges$type != "measurement")
     if (!length(eidx)) return(NULL)
@@ -291,15 +294,16 @@ format_averaged_equations_html <- function(result, state) {
       node_display_name(state, dv),
       node_dv_transform(state, dv)
     )
+    y_disp <- abbreviate_lhs_display(yname, abbrev_map)
     # Infer link from engine badge / last fit if available
     wrap_tag <- "model-averaged (full)"
-    lhs <- sprintf("E(%s)", htmltools::htmlEscape(yname))
+    lhs <- sprintf("E(%s)", htmltools::htmlEscape(y_disp))
     wrap_l <- ""
     wrap_r <- ""
     if (identical(result$engine, "path") && is.list(result$fit) && !inherits(result$fit, "lavaan")) {
       fit0 <- result$fit[[dv]]
       if (!is.null(fit0)) {
-        w <- equation_link_wrapper(fit0, yname)
+        w <- equation_link_wrapper(fit0, y_disp)
         wrap_tag <- paste(w$tag, "· averaged")
         lhs <- w$lhs
         wrap_l <- w$wrap_left
@@ -312,9 +316,7 @@ format_averaged_equations_html <- function(result, state) {
     y_key <- lavaan_var_name(state, dv)
     if (!is.null(result$averaged_intercepts) && y_key %in% names(result$averaged_intercepts)) {
       ai <- result$averaged_intercepts[[y_key]]
-      lo <- ai$est - 1.96 * ai$se
-      hi <- ai$est + 1.96 * ai$se
-      parts <- c(parts, format_est_ci_html(ai$est, lo, hi))
+      parts <- c(parts, format_est_se_html(ai$est, ai$se))
     }
 
     for (i in eidx) {
@@ -323,10 +325,12 @@ format_averaged_equations_html <- function(result, state) {
       if (is.na(hit)) next
       est <- avg$estimate[hit]
       se <- avg$se[hit]
-      lo <- est - 1.96 * se
-      hi <- est + 1.96 * se
-      pred <- edge_predictor_label(state, eid)
-      parts <- c(parts, paste0(format_est_ci_html(est, lo, hi), "&middot;", htmltools::htmlEscape(pred)))
+      pred <- edge_predictor_label(state, eid, abbrev_map = abbrev_map)
+      parts <- c(parts, paste0(
+        format_est_se_html(est, se),
+        "&middot;",
+        htmltools::htmlEscape(pred)
+      ))
 
       # Polynomial powers (from best-model estimates; not yet fully averaged)
       est_src <- result$best_estimates %||% result$estimates
@@ -340,7 +344,9 @@ format_averaged_equations_html <- function(result, state) {
         if (any(poly_hit)) {
           prows <- est_src[poly_hit, , drop = FALSE]
           prows <- prows[order(prows$level), , drop = FALSE]
-          parts <- c(parts, format_eta_from_estimates(prows))
+          parts <- c(parts, format_eta_from_estimates(
+            prows, abbrev_map = abbrev_map, state = state
+          ))
         }
       }
     }
@@ -362,12 +368,19 @@ format_averaged_equations_html <- function(result, state) {
     )
   })
   blocks <- Filter(Negate(is.null), blocks)
-  if (!length(blocks)) return(NULL)
+  if (!length(blocks) && is.null(meas_html)) return(NULL)
   htmltools::HTML(paste0(
     "<div class=\"smt-equations\">",
-    "<div class=\"smt-eq-caption\">Model-averaged (full; absent = 0) &middot; estimate<sup class=\"smt-ci\">[95% CI]</sup></div>",
-    paste(blocks, collapse = ""),
-    "<div class=\"smt-eq-note\">Full model averaging: coefficients are 0 in models that omit the predictor.</div>",
+    meas_html %||% "",
+    if (length(blocks)) {
+      paste0(
+        "<div class=\"smt-eq-caption\">Model-averaged (full; absent = 0) &middot; estimate<sup class=\"smt-ci\">&plusmn;SE</sup></div>",
+        paste(blocks, collapse = ""),
+        "<div class=\"smt-eq-note\">Full model averaging: coefficients are 0 in models that omit the predictor.</div>"
+      )
+    } else {
+      ""
+    },
     "</div>"
   ))
 }

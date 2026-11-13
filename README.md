@@ -55,11 +55,17 @@ Continuous links use **Expected `b`** (raw slope), not standardized β — so si
 ## Install
 
 ```r
-install.packages(c("devtools", "shiny", "ggplot2", "lavaan", "readr", "jsonlite", "DT", "lme4", "lmerTest"))
-# from GitHub:
-devtools::install_github("BapJacquet/StructuralModelTester")
+install.packages(c(
+  "shiny", "ggplot2", "lavaan", "readr", "readxl",
+  "jsonlite", "DT", "lme4", "lmerTest"
+))
+# from GitHub — remotes::install_github and devtools::install_github both work:
+remotes::install_github("BapJacquet/StructuralModelTester")
+```
 
-# or from a local clone:
+From a local clone:
+
+```r
 # remotes::install_local(".", force = TRUE)
 ```
 
@@ -75,13 +81,13 @@ run_app()
 During development from the source tree:
 
 ```r
-devtools::load_all()
+# pkgload::load_all()  # or remotes::install_local(".", force = TRUE)
 run_app()
 ```
 
 ## Quick start
 
-1. Demo columns (`X`, `M`, `Y`, `Z1`, `Z2`) load automatically — or **Open data** (CSV / TSV / RDS).
+1. Demo columns (`X`, `M`, `Y`, `Z1`, `Z2`) load automatically — or **Open data** (CSV / TSV / Excel / RDS). For SoSci Survey exports, set **Skip rows after header** to `1` on the Data tab to drop the description row.
 2. In **Variables**, click **＋** to place observed nodes (or **Add node** / **Add latent** / **Interaction**).
 3. On **Model**, drag between ports. Choose link role: Fixed / Confirmatory / Exploratory / Measurement.
 4. Set **Expected `b`** (and uncertainty) on selected structural links for simulation & power.
@@ -91,6 +97,76 @@ run_app()
 **Save project** / **Open project** stores the graph (nodes, links, priors, sim knobs) as JSON. Data files are opened separately.
 
 A ready-made interaction demo graph is in [`inst/sample_data/readme-demo-model.json`](inst/sample_data/readme-demo-model.json).
+
+## Project file format
+
+Projects are UTF-8 JSON (`version: 1`). They describe the **model graph and simulation knobs only** — not the data table (open CSV/Excel/RDS separately and re-map columns if needed).
+
+Top-level keys:
+
+| Key | Type | Role |
+|-----|------|------|
+| `version` | integer | Schema version (`1`) |
+| `nodes` | array of objects | Variables / latents / × operators |
+| `edges` | array of objects | Structural, measurement, and × wiring links |
+| `next_node` | integer | Counter for new node ids |
+| `next_edge` | integer | Counter for new edge ids |
+| `prepare` | object (optional) | Saved data-prepare recipe when present |
+
+### Nodes
+
+Each node is one canvas object. Important fields:
+
+| Field | Notes |
+|-------|--------|
+| `id`, `label` | Stable id (referenced by edges); display label |
+| `node_kind` | `observed`, `latent`, or `interaction` |
+| `observed_column` | Mapped data column, or null / omitted if unmapped |
+| `shape` | `box`, `ellipse`, or `operator` (×) |
+| `x`, `y` | Canvas position |
+| `cat_mode` | `split` or `omnibus` (categorical factors) |
+| `factor_a`, `factor_b` | For interactions: ids of the two wired factors |
+| `factor_base`, `factor_levels`, `factor_ordered` | Reference coding; `factor_levels` is newline-separated |
+| `sim_var_kind` | Declared type for unmapped sim: `continuous`, `categorical`, `binary` |
+| `sim_mean`, `sim_sd`, `sim_min`, `sim_max` | Exogenous continuous generative settings |
+| `sim_intercept`, `sim_resid_sd` | Outcome generative settings (logit intercept when binary) |
+| `sim_design_mode` | `inter` / `intra` for factors |
+| `sim_alloc_mode` | `probability` / `exact` |
+| `sim_level_props`, `sim_level_counts` | Encoded level allocation strings |
+| `repeated_measures`, `cluster_column` | Random-intercept DV options |
+| `dv_transform` | Outcome transform id (`none`, …) |
+| `r_squared`, `r_squared_kind` | Fit diagnostics (often null in a saved project) |
+
+### Edges
+
+| Field | Notes |
+|-------|--------|
+| `id`, `from`, `to` | Edge id; node ids |
+| `type` | `fixed`, `confirmatory`, `exploratory`, `measurement`, or `definitional` (× input wire) |
+| `level` | Non-base category on a split factor (structural or definitional) |
+| `to_port` | On × nodes: `a` or `b` |
+| `to_level` | Response category when targeting a split categorical DV |
+| `rel_kind` | Continuous expansion: usually `linear` |
+| `prior_family`, `prior_mean`, `prior_sd` | Expected effect for Simulate / Power (`normal` + mean/sd) |
+| `status`, `estimate`, `se`, `pvalue`, `estimate_std`, `label` | Fit/display fields (often pending / null when saved) |
+
+Load/save in R with `model_from_json()` / `model_to_json()` (see also the sample JSON above).
+
+## Live commands (while the app is running)
+
+With `run_app()` open, a second R process can drive the same session via `smt_cmd()` (file inbox under `.smt/`, polled by Shiny):
+
+```r
+smt_cmd("ping")
+smt_cmd("add_node", label = "X", kind = "observed")
+smt_cmd("add_edge", from = "X", to = "Y", type = "confirmatory")
+smt_cmd("set_edge_prior", from = "X", to = "Y", mean = 0.5, sd = 0.2)
+smt_cmd("set_sim_var_kind", id = "Y", kind = "binary")
+smt_cmd("simulate", n = 200, seed = 1)
+smt_cmd_actions()  # list supported actions
+```
+
+**Agents:** use the full protocol, action table, and failure modes in [docs/agent-live-commands.md](docs/agent-live-commands.md) (also summarized in [AGENTS.md](AGENTS.md)).
 
 ## Analysis modes (short)
 

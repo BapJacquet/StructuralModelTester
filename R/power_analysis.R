@@ -1,3 +1,66 @@
+#' Signal cooperative cancellation of a power analysis
+#' @keywords internal
+smt_cancel_power <- function(message = "Power analysis cancelled.") {
+  e <- simpleError(message)
+  class(e) <- c("smt_power_cancelled", class(e))
+  stop(e)
+}
+
+#' TRUE when an error is a cooperative power cancel
+#' @keywords internal
+smt_is_power_cancelled <- function(e) {
+  inherits(e, "smt_power_cancelled") ||
+    grepl("Power analysis cancelled", conditionMessage(e), fixed = TRUE)
+}
+
+#' Invoke a power progress callback; propagate cancel, swallow UI errors
+#' @keywords internal
+smt_power_progress <- function(progress, done, total) {
+  if (!is.function(progress)) return(invisible(NULL))
+  tryCatch(
+    progress(done, total),
+    error = function(e) {
+      if (smt_is_power_cancelled(e)) stop(e)
+      invisible(NULL)
+    }
+  )
+}
+
+#' Run n_reps detection counts serially (progress callback may cancel)
+#' @keywords internal
+power_run_replications <- function(state, n, n_reps, seed, conf_ids,
+                                   mode, alpha, criterion, conf_adjust,
+                                   min_weight,
+                                   latent_score_method = "own",
+                                   progress = NULL,
+                                   progress_offset = 0L,
+                                   progress_total = NULL) {
+  n_reps <- as.integer(n_reps)
+  seeds <- as.integer(as.integer(seed) + seq_len(n_reps))
+  counts <- integer(n_reps)
+  done <- as.integer(progress_offset)
+  n_i <- as.integer(n)
+  for (j in seq_len(n_reps)) {
+    # Advance the counter before the (possibly slow) fit so the UI does not
+    # sit on the previous tick while this replication is still running.
+    smt_power_progress(progress, done + 1L, progress_total)
+    counts[[j]] <- power_one_replication_count(
+      state,
+      n = n_i,
+      seed = seeds[[j]],
+      conf_ids = conf_ids,
+      mode = mode,
+      alpha = alpha,
+      criterion = criterion,
+      conf_adjust = conf_adjust,
+      min_weight = min_weight,
+      latent_score_method = latent_score_method
+    )
+    done <- done + 1L
+  }
+  list(counts = counts, done = done)
+}
+
 #' Starting sample sizes for iterative power search
 #'
 #' Several low-N anchors (log-spaced) plus the high end. Low-N coverage
@@ -55,6 +118,50 @@ confirmatory_power_edge_ids <- function(state) {
     state,
     state$edges$id[state$edges$type == "confirmatory"]
   )
+}
+
+#' Confirmatory power targets whose expected effect is still 0
+#' @return Character vector of edge ids (possibly empty).
+#' @keywords internal
+confirmatory_zero_prior_edge_ids <- function(state, conf_ids = NULL) {
+  if (is.null(conf_ids)) conf_ids <- confirmatory_power_edge_ids(state)
+  if (!length(conf_ids)) return(character())
+  state <- ensure_edge_priors(state)
+  conf_ids[vapply(conf_ids, function(eid) {
+    m <- edge_prior(state, eid)$mean
+    !is.finite(m) || abs(as.numeric(m)) <= 1e-12
+  }, logical(1))]
+}
+
+#' Short labels for confirmatory links (for power warnings)
+#' @keywords internal
+confirmatory_edge_warning_labels <- function(state, edge_ids) {
+  edge_ids <- as.character(edge_ids)
+  if (!length(edge_ids) || is.null(state) || !nrow(state$edges)) {
+    return(character())
+  }
+  vapply(edge_ids, function(eid) {
+    idx <- match(eid, state$edges$id)
+    if (is.na(idx)) return(eid)
+    from_lab <- tryCatch(
+      node_display_name(state, state$edges$from[[idx]]),
+      error = function(e) state$edges$from[[idx]]
+    )
+    to_lab <- tryCatch(
+      node_display_name(state, state$edges$to[[idx]]),
+      error = function(e) state$edges$to[[idx]]
+    )
+    lv <- if ("level" %in% names(state$edges)) state$edges$level[[idx]] else NA_character_
+    tl <- if ("to_level" %in% names(state$edges)) state$edges$to_level[[idx]] else NA_character_
+    lab <- sprintf("%s \u2192 %s", from_lab, to_lab)
+    if (!is.na(lv) && nzchar(as.character(lv))) {
+      lab <- sprintf("%s[%s] \u2192 %s", from_lab, lv, to_lab)
+    }
+    if (!is.na(tl) && nzchar(as.character(tl))) {
+      lab <- paste0(lab, "[", tl, "]")
+    }
+    lab
+  }, character(1), USE.NAMES = FALSE)
 }
 
 #' Copy of state with confirmatory expected effects set to 0
@@ -122,12 +229,14 @@ power_one_replication_count <- function(state, n, seed, conf_ids,
                                         alpha = 0.05,
                                         criterion = c("aic", "bic"),
                                         conf_adjust = c("none", "bonferroni", "holm", "BH"),
-                                        min_weight = 0) {
+                                        min_weight = 0,
+                                        latent_score_method = "own") {
   mode <- match.arg(mode)
   criterion <- match.arg(criterion)
   conf_adjust <- match.arg(conf_adjust)
   min_weight <- as.numeric(min_weight)
   if (!is.finite(min_weight) || min_weight < 0) min_weight <- 0
+  latent_score_method <- normalize_latent_score_method(latent_score_method, state)
   n_hit <- tryCatch({
     sim <- simulate_path_data(state, n = as.integer(n), seed = as.integer(seed))
     fit_st <- bind_sim_columns_to_state(state, sim)
@@ -137,7 +246,8 @@ power_one_replication_count <- function(state, n, seed, conf_ids,
         alpha = alpha,
         mark_nonsig = FALSE,
         conf_adjust = conf_adjust,
-        uncertainty = "none"
+        uncertainty = "none",
+        latent_score_method = latent_score_method
       )
     } else {
       fit_aic_bic_search(
@@ -145,7 +255,8 @@ power_one_replication_count <- function(state, n, seed, conf_ids,
         criterion = criterion,
         uncertainty = "none",
         min_weight = min_weight,
-        mark_low_weight = is.finite(min_weight) && min_weight > 0
+        mark_low_weight = is.finite(min_weight) && min_weight > 0,
+        latent_score_method = latent_score_method
       )
     }
     if (identical(mode, "pvalue")) {
@@ -153,7 +264,15 @@ power_one_replication_count <- function(state, n, seed, conf_ids,
     } else {
       confirmatory_detection_count_search(res, conf_ids, min_weight = min_weight)
     }
-  }, error = function(e) 0L)
+  }, error = function(e) {
+    if (exists("smt_debug", mode = "function")) {
+      smt_debug(
+        "power rep error | n=", n, " seed=", seed,
+        " | ", conditionMessage(e)
+      )
+    }
+    0L
+  })
   as.integer(n_hit)
 }
 
@@ -177,6 +296,7 @@ binomial_rate_band <- function(n_ok, n_reps, z = 1.96) {
 power_count_grid <- function(state, n_grid, n_reps, seed, conf_ids,
                              mode, alpha, criterion, conf_adjust = "none",
                              min_weight = 0,
+                             latent_score_method = "own",
                              progress = NULL,
                              progress_offset = 0L, progress_total = NULL) {
   n_conf <- length(conf_ids)
@@ -190,19 +310,17 @@ power_count_grid <- function(state, n_grid, n_reps, seed, conf_ids,
 
   for (i in seq_along(n_grid)) {
     n <- n_grid[[i]]
-    counts <- integer(n_reps)
-    for (r in seq_len(n_reps)) {
-      rep_seed <- as.integer(seed + (i - 1L) * n_reps + r)
-      counts[[r]] <- power_one_replication_count(
-        state, n = n, seed = rep_seed, conf_ids = conf_ids,
-        mode = mode, alpha = alpha, criterion = criterion,
-        conf_adjust = conf_adjust, min_weight = min_weight
-      )
-      done <- done + 1L
-      if (is.function(progress)) {
-        try(progress(done, progress_total), silent = TRUE)
-      }
-    }
+    seed_i <- as.integer(seed + (i - 1L) * n_reps)
+    run <- power_run_replications(
+      state, n = n, n_reps = n_reps, seed = seed_i, conf_ids = conf_ids,
+      mode = mode, alpha = alpha, criterion = criterion,
+      conf_adjust = conf_adjust, min_weight = min_weight,
+      latent_score_method = latent_score_method,
+      progress = progress,
+      progress_offset = done, progress_total = progress_total
+    )
+    counts <- run$counts
+    done <- run$done
     n_all <- sum(counts == n_conf)
     band_all <- binomial_rate_band(n_all, n_reps)
     rows_power[[i]] <- data.frame(
@@ -645,7 +763,8 @@ power_eval_and_merge <- function(state, null_state, n_vals, n_reps, seed,
                                  power, fdr, progress = NULL,
                                  progress_offset = 0L, progress_total = NULL,
                                  conf_adjust = "none",
-                                 min_weight = 0) {
+                                 min_weight = 0,
+                                 latent_score_method = "own") {
   n_vals <- sort(unique(as.integer(n_vals)))
   n_vals <- n_vals[is.finite(n_vals) & n_vals >= 10L]
   if (!length(n_vals)) {
@@ -656,6 +775,7 @@ power_eval_and_merge <- function(state, null_state, n_vals, n_reps, seed,
     state, n_vals, n_reps, seed, conf_ids,
     mode = mode, alpha = alpha, criterion = criterion,
     conf_adjust = conf_adjust, min_weight = min_weight,
+    latent_score_method = latent_score_method,
     progress = progress,
     progress_offset = progress_offset,
     progress_total = progress_total
@@ -665,6 +785,7 @@ power_eval_and_merge <- function(state, null_state, n_vals, n_reps, seed,
     null_state, n_vals, n_reps, null_seed, conf_ids,
     mode = mode, alpha = alpha, criterion = criterion,
     conf_adjust = conf_adjust, min_weight = min_weight,
+    latent_score_method = latent_score_method,
     progress = progress,
     progress_offset = progress_offset + units_half,
     progress_total = progress_total
@@ -697,6 +818,7 @@ run_confirmatory_power <- function(state, n_max = NULL, n_reps = 100L, seed = 1L
                                    criterion = c("aic", "bic"),
                                    conf_adjust = c("none", "bonferroni", "holm", "BH"),
                                    min_weight = 0,
+                                   latent_score_method = "own",
                                    progress = NULL,
                                    n_steps = 3L,
                                    n_grid = NULL,
@@ -707,6 +829,7 @@ run_confirmatory_power <- function(state, n_max = NULL, n_reps = 100L, seed = 1L
   min_weight <- as.numeric(min_weight)
   if (!is.finite(min_weight) || min_weight < 0) min_weight <- 0
   if (min_weight > 1) min_weight <- 1
+  latent_score_method <- normalize_latent_score_method(latent_score_method, state)
   n_reps <- as.integer(n_reps)
   if (!is.finite(n_reps) || n_reps < 1L) {
     stop("Power replications must be at least 1.", call. = FALSE)
@@ -752,20 +875,43 @@ run_confirmatory_power <- function(state, n_max = NULL, n_reps = 100L, seed = 1L
       call. = FALSE
     )
   }
+  zero_ids <- confirmatory_zero_prior_edge_ids(state, conf_ids)
+  if (length(zero_ids)) {
+    labs <- confirmatory_edge_warning_labels(state, zero_ids)
+    stop(
+      "Set Expected effect (b ≠ 0) on confirmatory link",
+      if (length(zero_ids) > 1L) "s" else "",
+      " currently at 0: ",
+      paste(labs, collapse = "; "),
+      ". Auto-added interaction mains default to 0 until you set them.",
+      call. = FALSE
+    )
+  }
+
+  # Intra sim expands rows per subject; fit with (1|subject) like Simulate.
+  state <- enable_repeated_measures_for_intra_sim(state)
 
   # Endpoints + up to n_steps single-N resamples (power + null each)
   total <- 2L * (length(n_grid) + n_steps) * n_reps
   null_state <- state_with_null_confirmatory(state, conf_ids)
 
+  # Hot path: each replication simulates + fits. sim_debug lines would be
+  # thousands of file writes (e.g. 1600 × ~4) and freeze the progress UI.
+  quiet_prev <- getOption("smt.quiet", FALSE)
+  options(smt.quiet = TRUE)
+  on.exit(options(smt.quiet = quiet_prev), add = TRUE)
+
   power <- NULL
   fdr <- NULL
   done <- 0L
   require_zero_null <- !identical(mode, "pvalue")
+  smt_power_progress(progress, 0L, total)
   ev <- power_eval_and_merge(
     state, null_state, n_grid, n_reps, seed, conf_ids,
     mode, alpha, criterion, power, fdr, progress,
     progress_offset = 0L, progress_total = total,
-    conf_adjust = conf_adjust, min_weight = min_weight
+    conf_adjust = conf_adjust, min_weight = min_weight,
+    latent_score_method = latent_score_method
   )
   power <- ev$power
   fdr <- ev$fdr
@@ -793,7 +939,8 @@ run_confirmatory_power <- function(state, n_max = NULL, n_reps = 100L, seed = 1L
       state, null_state, n_next, n_reps, step_seed, conf_ids,
       mode, alpha, criterion, power, fdr, progress,
       progress_offset = done, progress_total = total,
-      conf_adjust = conf_adjust, min_weight = min_weight
+      conf_adjust = conf_adjust, min_weight = min_weight,
+      latent_score_method = latent_score_method
     )
     power <- ev$power
     fdr <- ev$fdr
@@ -820,9 +967,7 @@ run_confirmatory_power <- function(state, n_max = NULL, n_reps = 100L, seed = 1L
   fdr <- fdr[order(fdr$n, fdr$n_detected), , drop = FALSE]
   rownames(fdr) <- NULL
 
-  if (is.function(progress)) {
-    try(progress(total, total), silent = TRUE)
-  }
+  smt_power_progress(progress, total, total)
 
   meta <- list(
     mode = mode,
@@ -830,6 +975,7 @@ run_confirmatory_power <- function(state, n_max = NULL, n_reps = 100L, seed = 1L
     criterion = criterion,
     conf_adjust = conf_adjust,
     min_weight = as.numeric(min_weight),
+    latent_score_method = latent_score_method,
     require_zero_null = require_zero_null,
     seed = as.integer(seed),
     null_seed = as.integer(null_seed),

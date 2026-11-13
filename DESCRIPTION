@@ -19,6 +19,7 @@ Imports:
     lavaan,
     ggplot2 (>= 3.4.0),
     readr,
+    readxl,
     jsonlite,
     DT,
     lme4,

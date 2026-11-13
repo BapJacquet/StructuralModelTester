@@ -34,15 +34,19 @@ graph_payload <- function(state, data = NULL) {
       if (!latent && !is_ix && mapped && !is.null(data) && col %in% names(data)) {
         coding <- variable_coding_for_node(state, nid, data)
         var_kind <- coding$kind
-        if (coding$kind %in% c("categorical", "binary")) {
+        if (identical(coding$kind, "categorical")) {
           base <- coding$base
-          # Non-base levels drive split ports (same as unmapped path)
+          # Non-base levels drive split / omnibus ports
           levels <- coding$levels
+        } else if (identical(coding$kind, "binary")) {
+          base <- coding$base
+          levels <- character()
         }
       } else if (!latent && !is_ix && !mapped) {
-        # Unmapped observed: declared sim kind / factor coding owns the canvas ports
+        # Unmapped observed: declared sim kind / factor coding owns the canvas ports.
+        # Binary uses treatment coding (single body port) — no split/omnibus UI.
         var_kind <- node_sim_var_kind(state, nid, data = NULL)
-        if (var_kind %in% c("categorical", "binary")) {
+        if (identical(var_kind, "categorical")) {
           all_levs <- node_sim_factor_levels(state, nid, data = NULL)
           meta <- node_factor_coding(state, nid)
           base <- if (!is.na(meta$base) && nzchar(meta$base)) {
@@ -57,6 +61,17 @@ graph_payload <- function(state, data = NULL) {
           } else {
             as.character(all_levs)
           }
+        } else if (identical(var_kind, "binary")) {
+          all_levs <- node_sim_factor_levels(state, nid, data = NULL)
+          meta <- node_factor_coding(state, nid)
+          base <- if (!is.na(meta$base) && nzchar(meta$base)) {
+            as.character(meta$base)
+          } else if (length(all_levs)) {
+            as.character(all_levs[[1]])
+          } else {
+            ""
+          }
+          levels <- character()
         }
       }
       r2 <- if ("r_squared" %in% names(nodes)) nodes$r_squared[i] else NA_real_

@@ -29,12 +29,42 @@
     }
     nodesLayer = document.getElementById("smt_nodes_layer");
     svgLayer = document.getElementById("smt_conn_svg");
+    if (nodesLayer && svgLayer) syncCanvasHaloColor();
     return !!(nodesLayer && svgLayer);
   }
 
   function cssEscape(s) {
     if (window.CSS && CSS.escape) return CSS.escape(String(s));
     return String(s).replace(/["\\]/g, "\\$&");
+  }
+
+  /** Opaque background color for label halos (follows dark-theme extensions). */
+  function resolveOpaqueBg(el) {
+    var cur = el;
+    while (cur && cur.nodeType === 1) {
+      var bg = window.getComputedStyle(cur).backgroundColor;
+      if (bg && bg !== "transparent" && bg !== "rgba(0, 0, 0, 0)") {
+        var m = bg.match(/rgba?\(\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)(?:\s*,\s*([0-9.]+))?\s*\)/i);
+        if (m) {
+          var a = m[4] == null ? 1 : parseFloat(m[4]);
+          if (isFinite(a) && a > 0.01) return bg;
+        } else {
+          return bg;
+        }
+      }
+      if (cur === document.documentElement) break;
+      cur = cur.parentElement;
+    }
+    if (el) {
+      var surf = window.getComputedStyle(el).getPropertyValue("--smt-surface").trim();
+      if (surf) return surf;
+    }
+    return "#ffffff";
+  }
+
+  function syncCanvasHaloColor() {
+    if (!wrap) return;
+    wrap.style.setProperty("--smt-canvas-halo", resolveOpaqueBg(wrap));
   }
 
   function portCenter(nodeId, which, level, toPort) {
@@ -52,7 +82,13 @@
       if (!port) port = n.el.querySelector(".port.input:not([data-level])");
       if (!port) port = n.el.querySelector(".port.input");
     } else if (level) {
+      // Binary / continuous: single body output (no data-level). Edges may still
+      // carry a treatment level for the model — fall back to the body port.
       port = n.el.querySelector('.port.output[data-level="' + cssEscape(level) + '"]');
+      if (!port) {
+        port = n.el.querySelector(".port.output:not([data-level])") ||
+          n.el.querySelector(".port.output");
+      }
     } else {
       port = n.el.querySelector(".port.output:not([data-level])") ||
         n.el.querySelector(".port.output");
@@ -170,6 +206,7 @@
 
   function redrawEdges() {
     if (!svgLayer) return;
+    syncCanvasHaloColor();
     // Content size is owned by ensureContentBounds; keep SVG at least as large
     var w = Math.max(
       wrap.clientWidth,
@@ -190,7 +227,22 @@
     edges.forEach(function (e) {
       var a = portCenter(e.from, "out", e.level || null);
       var b = portCenter(e.to, "in", e.toLevel || null, e.toPort || null);
-      if (!a || !b) return;
+      if (!a || !b) {
+        if (typeof Shiny !== "undefined" && Shiny.setInputValue) {
+          Shiny.setInputValue("smt_debug_event", {
+            kind: "edge_port_miss",
+            id: e.id,
+            from: e.from,
+            to: e.to,
+            level: e.level || "",
+            toPort: e.toPort || "",
+            toLevel: e.toLevel || "",
+            missFrom: !a,
+            missTo: !b
+          }, { priority: "event" });
+        }
+        return;
+      }
       var selectedEdge = selected.edges.indexOf(e.id) >= 0;
       var dash = e.dashes ? ' stroke-dasharray="6 4"' : "";
       var color = e.color || "#6B4CE6";
@@ -209,7 +261,7 @@
         var mx = (a.x + b.x) / 2;
         var my = (a.y + b.y) / 2 - 8;
         var lab = escapeXml(String(e.label));
-        // Dual text: fat white copy behind (reliable halo for × / →× labels).
+        // Dual text: fat halo behind (fill/stroke = canvas bg via --smt-canvas-halo).
         // data-edge-id so clicks on the coefficient text select the link.
         html += '<text class="smt-edge-label-halo" data-edge-id="' + e.id +
           '" x="' + mx + '" y="' + my +
@@ -289,7 +341,8 @@
     if (!n.latent && n.unmapped) el.classList.add("smt-unmapped");
 
     var levels = normalizeLevels(n.levels);
-    var isCat = levels.length > 0;
+    // Split/omnibus is categorical-only (binary uses a single treatment-coded port)
+    var isCat = n.varKind === "categorical" && levels.length > 0;
     var catMode = (n.catMode === "omnibus") ? "omnibus" : "split";
     if (isCat) {
       el.classList.add("smt-categorical");

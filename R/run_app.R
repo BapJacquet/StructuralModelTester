@@ -36,6 +36,15 @@ run_app <- function(launch.browser = TRUE, ...) {
   }
   # ragg can be ABI-incompatible after R upgrades ("Version de l'API graphiques incompatible")
   options(shiny.useragg = FALSE)
+  # Live smt_cmd() inbox lives under <pkg>/.smt — pin it before Shiny chdirs to inst/app
+  if (nzchar(pkg_root)) {
+    options(smt.cmd.root = file.path(normalizePath(pkg_root, winslash = "/", mustWork = FALSE), ".smt"))
+  } else {
+    found <- tryCatch(smt_find_pkg_root(), error = function(e) "")
+    if (nzchar(found)) {
+      options(smt.cmd.root = file.path(found, ".smt"))
+    }
+  }
   shiny::runApp(app_dir, launch.browser = launch.browser, ...)
 }
 

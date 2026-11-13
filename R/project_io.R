@@ -35,16 +35,17 @@ model_from_json <- function(json) {
     "r_squared", "r_squared_kind", "node_kind", "factor_a", "factor_b", "cat_mode",
     "repeated_measures", "cluster_column", "dv_transform",
     "factor_base", "factor_ordered", "factor_levels",
-    "sim_mean", "sim_sd", "sim_resid_sd", "sim_var_kind", "sim_level_props",
-    "sim_level_counts", "sim_design_mode", "sim_alloc_mode"
+    "sim_mean", "sim_sd", "sim_min", "sim_max", "sim_intercept", "sim_resid_sd",
+    "sim_var_kind", "sim_level_props", "sim_level_counts", "sim_design_mode",
+    "sim_alloc_mode"
   )
   for (nm in need_n) {
     if (!nm %in% names(nodes)) {
       nodes[[nm]] <- if (nm == "shape") {
         "ellipse"
-      } else if (nm %in% c("x", "y", "r_squared")) {
+      } else if (nm %in% c("x", "y", "r_squared", "sim_min", "sim_max")) {
         NA_real_
-      } else if (nm == "sim_mean") {
+      } else if (nm %in% c("sim_mean", "sim_intercept")) {
         0
       } else if (nm %in% c("sim_sd", "sim_resid_sd")) {
         1
@@ -95,6 +96,9 @@ model_from_json <- function(json) {
     nodes$factor_levels <- as.character(nodes$factor_levels)
     nodes$sim_mean <- as.numeric(nodes$sim_mean)
     nodes$sim_sd <- as.numeric(nodes$sim_sd)
+    nodes$sim_min <- as.numeric(nodes$sim_min)
+    nodes$sim_max <- as.numeric(nodes$sim_max)
+    nodes$sim_intercept <- as.numeric(nodes$sim_intercept)
     nodes$sim_resid_sd <- as.numeric(nodes$sim_resid_sd)
     nodes$sim_var_kind <- as.character(nodes$sim_var_kind)
     miss_sk <- is.na(nodes$sim_var_kind) | !nzchar(nodes$sim_var_kind)

@@ -26,9 +26,11 @@ fit_aic_bic_search <- function(state, data, criterion = c("aic", "bic"), max_exp
                                uncertainty_draws = NULL,
                                uncertainty_progress = NULL,
                                min_weight = 0,
-                               mark_low_weight = TRUE) {
+                               mark_low_weight = TRUE,
+                               latent_score_method = "own") {
   criterion <- match.arg(criterion)
   uncertainty <- match.arg(uncertainty)
+  latent_score_method <- normalize_latent_score_method(latent_score_method, state)
   min_weight <- as.numeric(min_weight)
   if (!is.finite(min_weight) || min_weight < 0) min_weight <- 0
   if (min_weight > 1) min_weight <- 1
@@ -86,7 +88,11 @@ fit_aic_bic_search <- function(state, data, criterion = c("aic", "bic"), max_exp
     ids <- c(always, subset)
     res <- tryCatch(
       {
-        fitted <- fit_structural_model(state, data, include_edge_ids = ids)
+        fitted <- fit_structural_model(
+          state, data,
+          include_edge_ids = ids,
+          latent_score_method = latent_score_method
+        )
         fm <- fitted$fit_measures
         aic <- fm$value[match("aic", fm$measure)]
         bic <- fm$value[match("bic", fm$measure)]
@@ -208,7 +214,8 @@ fit_aic_bic_search <- function(state, data, criterion = c("aic", "bic"), max_exp
     state, data, included, best,
     method = uncertainty,
     draws = uncertainty_draws,
-    progress = uncertainty_progress
+    progress = uncertainty_progress,
+    latent_score_method = latent_score_method
   )
 
   all_edge_ids <- unique(c(always, free))
@@ -263,7 +270,12 @@ fit_aic_bic_search <- function(state, data, criterion = c("aic", "bic"), max_exp
     mark_low_weight = mark_low_weight,
     engine = best$engine,
     model_averaged = FALSE,
-    uncertainty = best$uncertainty %||% list(method = "none")
+    uncertainty = best$uncertainty %||% list(method = "none"),
+    two_step = isTRUE(best$two_step),
+    measurement_fit = best$measurement_fit,
+    measurement_score_weights = best$measurement_score_weights,
+    measurement_score_fits = best$measurement_score_fits,
+    latent_score_method = best$latent_score_method %||% latent_score_method
   )
 }
 

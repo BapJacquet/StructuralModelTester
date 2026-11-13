@@ -66,7 +66,8 @@ variable_coding <- function(x, base = NULL, levels_order = NULL, force_factor = 
     base <- levs[[1]]
   }
   levs <- c(base, setdiff(levs, base))
-  # Ports / dummies: categorical only (3+). Binary keeps empty `levels`.
+  # Ports / dummies: categorical (3+) always; binary only when force_factor
+  # (split mode / leveled wires). Otherwise binary keeps empty `levels`.
   if (identical(kind, "binary") && !isTRUE(force_factor)) {
     return(list(
       kind = kind, base = levs[[1]], levels = character(),
@@ -75,7 +76,7 @@ variable_coding <- function(x, base = NULL, levels_order = NULL, force_factor = 
   }
   if (identical(kind, "binary")) {
     return(list(
-      kind = "binary", base = levs[[1]], levels = character(),
+      kind = "binary", base = levs[[1]], levels = levs[-1],
       all_levels = levs, ordered = FALSE
     ))
   }
@@ -115,6 +116,28 @@ model_uses_latents <- function(state, edges = state$edges) {
   if (any(edges$type == "measurement")) return(TRUE)
   used <- unique(c(edges$from, edges$to))
   any(vapply(used, function(id) is_latent_node(state, id), logical(1)))
+}
+
+#' Count latent nodes in the graph
+#' @keywords internal
+n_latent_nodes <- function(state) {
+  state <- ensure_node_kind_columns(state)
+  if (!nrow(state$nodes)) return(0L)
+  sum(vapply(state$nodes$id, function(id) is_latent_node(state, id), logical(1)))
+}
+
+#' Normalize latent scoring method
+#'
+#' `"own"` (default): each latent scored from its own indicators only.
+#' `"joint"`: Thomson/regression scores from the joint CFA (may weight other
+#' constructs' items when factors correlate). With fewer than 2 latents, both
+#' coincide and `"own"` is used.
+#' @keywords internal
+normalize_latent_score_method <- function(method, state = NULL) {
+  method <- as.character(method %||% "own")[[1]]
+  if (!method %in% c("own", "joint")) method <- "own"
+  if (!is.null(state) && n_latent_nodes(state) < 2L) return("own")
+  method
 }
 
 #' Structural dependent-variable node ids (targets of non-measurement links)
@@ -300,10 +323,34 @@ interaction_factor_series <- function(state, dat, node_id, level = NA_character_
   }
   x <- dat[[col]]
   kind <- classify_variable(x)
+  coding <- variable_coding_for_node(state, node_id, dat)
+  # Declared categorical (inspector) can promote binary→categorical coding.
+  if (identical(coding$kind, "categorical")) {
+    kind <- "categorical"
+  } else if (!is.na(level) && nzchar(as.character(level)) && identical(kind, "binary")) {
+    # Level-wired binary: same split indicator as a 2-level categorical factor
+    levs <- coding$all_levels
+    if (!length(levs)) levs <- data_levels_chr(x)
+    if (length(levs) >= 2L) {
+      base <- if (!is.na(coding$base) && nzchar(coding$base) && coding$base %in% levs) {
+        coding$base
+      } else {
+        levs[[1]]
+      }
+      levs <- c(base, setdiff(levs, base))
+      coding <- list(
+        kind = "categorical",
+        base = levs[[1]],
+        levels = levs[-1],
+        all_levels = levs,
+        ordered = isTRUE(coding$ordered)
+      )
+      kind <- "categorical"
+    }
+  }
   cm <- node_cat_mode(state, node_id)
 
   if (identical(kind, "categorical")) {
-    coding <- variable_coding_for_node(state, node_id, dat)
     if (!length(coding$levels)) {
       stop("Categorical predictor '", col, "' has no non-base levels.", call. = FALSE)
     }
@@ -379,10 +426,12 @@ expand_interaction_terms <- function(state, dat, ix_id, local_dat) {
   series_a <- interaction_factor_series(state, dat, fac$a, fac$level_a)
   series_b <- interaction_factor_series(state, dat, fac$b, fac$level_b)
   ix_nm <- lavaan_var_name(state, ix_id)
+  a_coding <- variable_coding_for_node(state, fac$a, dat)
+  b_coding <- variable_coding_for_node(state, fac$b, dat)
   a_omni <- identical(node_cat_mode(state, fac$a), "omnibus") &&
-    identical(classify_variable(dat[[lavaan_var_name(state, fac$a)]]), "categorical")
+    identical(a_coding$kind, "categorical")
   b_omni <- identical(node_cat_mode(state, fac$b), "omnibus") &&
-    identical(classify_variable(dat[[lavaan_var_name(state, fac$b)]]), "categorical")
+    identical(b_coding$kind, "categorical")
 
   term_names <- character()
   term_meta <- list()
@@ -445,19 +494,34 @@ dv_model_engine <- function(state, data, node_id, edges = state$edges) {
   rm <- node_repeated_measures(state, node_id)
   use_rm <- isTRUE(rm$enabled) && !is.na(rm$cluster) && nzchar(rm$cluster)
 
-  # Latents are scored then treated as continuous in the path stage
+  # True measurement latents stay continuous in the path stage
   if (is_latent_node(state, node_id)) {
     return(if (use_rm) "lmer" else "lm")
   }
 
   col <- state$nodes$observed_column[match(node_id, state$nodes$id)]
-  if (is.na(col) || !nzchar(col)) {
-    return(if (use_rm) "lmer" else "lm")
+  mapped <- !is.na(col) && nzchar(as.character(col))
+  kind <- NULL
+  if (mapped && !is.null(data) && col %in% names(data)) {
+    kind <- classify_variable(data[[col]])
+  } else if (!mapped) {
+    # Unmapped: declared sim kind only — do not classify a coincidental
+    # same-named column from the open data file.
+    kind <- node_sim_var_kind(state, node_id, data = NULL)
+  } else if (!is.null(data)) {
+    # Mapped but column missing from this data frame (e.g. mid-sim restore):
+    # try lavaan name, else declared kind.
+    nm <- tryCatch(lavaan_var_name(state, node_id), error = function(e) NA_character_)
+    if (!is.na(nm) && nzchar(nm) && nm %in% names(data)) {
+      kind <- classify_variable(data[[nm]])
+    }
+    if (is.null(kind) || !kind %in% c("continuous", "categorical", "binary")) {
+      kind <- node_sim_var_kind(state, node_id, data = NULL)
+    }
   }
-  if (is.null(data) || !col %in% names(data)) {
-    return(if (use_rm) "lmer" else "lm")
+  if (is.null(kind) || !kind %in% c("continuous", "categorical", "binary")) {
+    kind <- node_sim_var_kind(state, node_id, data = NULL)
   }
-  kind <- classify_variable(data[[col]])
   if (identical(kind, "categorical")) {
     cm <- node_cat_mode(state, node_id)
     if (!identical(cm, "split")) return("unsupported")
@@ -508,12 +572,134 @@ state_with_latent_as_scores <- function(state, latent_ids) {
   state
 }
 
+#' Regression factor-score weights from a (typically single-factor) CFA fit
+#'
+#' Uses the Thomson/regression formula `W = Ψ Λ' Σ⁻¹` with `Σ = ΛΨΛ' + Θ`,
+#' matching `lavPredict(..., method = "regression")`.
+#'
+#' @return Named list of numeric weight vectors (one per latent), or NULL.
+#' @keywords internal
+cfa_regression_score_weights <- function(fit) {
+  if (!inherits(fit, "lavaan")) return(NULL)
+  est <- tryCatch(lavaan::lavInspect(fit, "est"), error = function(e) NULL)
+  if (is.null(est)) return(NULL)
+  lam <- est$lambda
+  th <- est$theta
+  psi <- est$psi
+  if (is.null(lam) || is.null(th) || is.null(psi)) return(NULL)
+  lam <- as.matrix(lam)
+  th <- as.matrix(th)
+  psi <- as.matrix(psi)
+  if (!nrow(lam) || !ncol(lam)) return(NULL)
+  sig <- tryCatch(
+    lam %*% psi %*% t(lam) + th,
+    error = function(e) NULL
+  )
+  if (is.null(sig)) return(NULL)
+  w_mat <- tryCatch(
+    psi %*% t(lam) %*% solve(sig),
+    error = function(e) NULL
+  )
+  if (is.null(w_mat)) return(NULL)
+  w_mat <- as.matrix(w_mat)
+  out <- list()
+  for (i in seq_len(nrow(w_mat))) {
+    lat <- rownames(w_mat)[[i]]
+    if (is.null(lat) || !nzchar(lat)) lat <- colnames(lam)[[i]]
+    ww <- as.numeric(w_mat[i, ])
+    names(ww) <- colnames(w_mat)
+    out[[lat]] <- ww
+  }
+  out
+}
+
+#' Score one latent from its own measurement indicators only
+#'
+#' Fits a single-factor CFA on the indicators linked to `lat` and returns
+#' regression factor scores. Other constructs' items are never used — matching
+#' the graph (and the intuition that separate questionnaires stay separate).
+#' @keywords internal
+score_latent_own_indicators <- function(state, dat, lat, meas_edges) {
+  lat <- as.character(lat)[[1]]
+  rows <- meas_edges[meas_edges$from == lat, , drop = FALSE]
+  if (!nrow(rows)) {
+    stop(
+      "Latent '", node_display_name(state, lat),
+      "' has no measurement links.",
+      call. = FALSE
+    )
+  }
+  syn <- build_measurement_syntax(state, rows)
+  fit <- tryCatch(
+    lavaan::cfa(syn, data = dat, meanstructure = FALSE, warn = FALSE),
+    error = function(e) {
+      stop(
+        "Factor-score CFA error for '",
+        node_display_name(state, lat), "': ", e$message,
+        call. = FALSE
+      )
+    }
+  )
+  if (!isTRUE(lavaan::lavInspect(fit, "converged"))) {
+    stop(
+      "Factor-score CFA did not converge for '",
+      node_display_name(state, lat), "'.",
+      call. = FALSE
+    )
+  }
+  sc <- tryCatch(
+    lavaan::lavPredict(fit, type = "lv", method = "regression"),
+    error = function(e) {
+      stop(
+        "Could not compute factor scores for '",
+        node_display_name(state, lat), "': ", e$message,
+        call. = FALSE
+      )
+    }
+  )
+  sc <- as.data.frame(sc, stringsAsFactors = FALSE)
+  if (!nrow(sc) || !ncol(sc)) {
+    stop(
+      "Factor-score prediction returned no scores for '",
+      node_display_name(state, lat), "'.",
+      call. = FALSE
+    )
+  }
+  lat_nm <- lavaan_var_name(state, lat)
+  # lavPredict column may be the latent name
+  score_col <- if (lat_nm %in% names(sc)) {
+    lat_nm
+  } else {
+    names(sc)[[1]]
+  }
+  used <- tryCatch(
+    lavaan::lavInspect(fit, "case.idx"),
+    error = function(e) NULL
+  )
+  if (is.list(used)) used <- used[[1]]
+  w <- cfa_regression_score_weights(fit)
+  ww <- if (!is.null(w) && length(w)) w[[1]] else NULL
+  list(
+    fit = fit,
+    scores = as.numeric(sc[[score_col]]),
+    used = used,
+    weights = ww,
+    latent_name = lat_nm
+  )
+}
+
 #' Stage 1: build factor scores from measurement links (graph unchanged)
+#'
+#' Joint CFA always supplies confirmatory loadings for the report.
+#' Path-stage scores depend on `score_method`:
+#' - `"own"` (default): each latent from its own indicators only
+#' - `"joint"`: Thomson/regression scores from the joint CFA (may use other
+#'   constructs' items when factors correlate; only meaningful with ≥2 latents)
 #'
 #' Returns analysis data with score columns, a path-ready state (latents mapped
 #' to those columns), CFA fit/estimates/syntax, and latent ids.
 #' @keywords internal
-attach_latent_factor_scores <- function(state, dat) {
+attach_latent_factor_scores <- function(state, dat, score_method = "own") {
   validate_model_state(state, state$edges)
   meas <- state$edges[state$edges$type == "measurement", , drop = FALSE]
   if (!nrow(meas)) {
@@ -523,6 +709,7 @@ attach_latent_factor_scores <- function(state, dat) {
     )
   }
   latent_ids <- unique(as.character(meas$from))
+  score_method <- normalize_latent_score_method(score_method, state)
   syntax <- build_measurement_syntax(state, meas)
 
   # Ensure indicator columns exist
@@ -538,6 +725,7 @@ attach_latent_factor_scores <- function(state, dat) {
     }
   }
 
+  # Joint CFA: loadings for canvas / Model-fit report (structure as drawn)
   fit <- tryCatch(
     lavaan::cfa(syntax, data = dat, meanstructure = FALSE, warn = FALSE),
     error = function(e) stop("Factor-score CFA error: ", e$message, call. = FALSE)
@@ -546,35 +734,78 @@ attach_latent_factor_scores <- function(state, dat) {
     stop("Factor-score CFA did not converge.", call. = FALSE)
   }
 
-  sc <- tryCatch(
-    lavaan::lavPredict(fit, type = "lv", method = "regression"),
-    error = function(e) stop("Could not compute factor scores: ", e$message, call. = FALSE)
-  )
-  sc <- as.data.frame(sc, stringsAsFactors = FALSE)
-  if (!nrow(sc) || !ncol(sc)) {
-    stop("Factor-score prediction returned no scores.", call. = FALSE)
-  }
-  # Align to cases used by lavaan
-  used <- tryCatch(
-    lavaan::lavInspect(fit, "case.idx"),
-    error = function(e) NULL
-  )
-  if (is.list(used)) used <- used[[1]]
-  if (!is.null(used) && length(used) == nrow(sc)) {
-    for (nm in names(sc)) {
-      dat[[nm]] <- NA_real_
-      dat[[nm]][used] <- as.numeric(sc[[nm]])
-    }
-  } else if (nrow(sc) == nrow(dat)) {
-    for (nm in names(sc)) dat[[nm]] <- as.numeric(sc[[nm]])
-  } else {
-    stop(
-      "Factor-score rows (", nrow(sc), ") do not match analysis data (", nrow(dat), ").",
-      call. = FALSE
+  score_weights <- list()
+  score_fits <- list()
+
+  if (identical(score_method, "joint")) {
+    sc <- tryCatch(
+      lavaan::lavPredict(fit, type = "lv", method = "regression"),
+      error = function(e) stop("Could not compute factor scores: ", e$message, call. = FALSE)
     )
+    sc <- as.data.frame(sc, stringsAsFactors = FALSE)
+    if (!nrow(sc) || !ncol(sc)) {
+      stop("Factor-score prediction returned no scores.", call. = FALSE)
+    }
+    used <- tryCatch(
+      lavaan::lavInspect(fit, "case.idx"),
+      error = function(e) NULL
+    )
+    if (is.list(used)) used <- used[[1]]
+    w_all <- cfa_regression_score_weights(fit)
+    for (lat in latent_ids) {
+      lat_nm <- lavaan_var_name(state, lat)
+      score_fits[[lat_nm]] <- fit
+      if (!is.null(w_all) && lat_nm %in% names(w_all)) {
+        score_weights[[lat_nm]] <- w_all[[lat_nm]]
+      } else if (!is.null(w_all) && length(w_all) == length(latent_ids)) {
+        score_weights[[lat_nm]] <- w_all[[match(lat, latent_ids)]]
+      }
+      col <- if (lat_nm %in% names(sc)) lat_nm else {
+        # fall back to column order matching latent_ids
+        idx <- match(lat, latent_ids)
+        if (is.finite(idx) && idx <= ncol(sc)) names(sc)[[idx]] else names(sc)[[1]]
+      }
+      dat[[lat_nm]] <- NA_real_
+      vals <- as.numeric(sc[[col]])
+      if (!is.null(used) && length(used) == length(vals)) {
+        dat[[lat_nm]][used] <- vals
+      } else if (length(vals) == nrow(dat)) {
+        dat[[lat_nm]] <- vals
+      } else {
+        stop(
+          "Factor-score rows for '", node_display_name(state, lat),
+          "' (", length(vals), ") do not match analysis data (", nrow(dat), ").",
+          call. = FALSE
+        )
+      }
+    }
+  } else {
+    # Own-indicator scores (never borrow items from other latents)
+    for (lat in latent_ids) {
+      one <- score_latent_own_indicators(state, dat, lat, meas)
+      lat_nm <- one$latent_name
+      score_fits[[lat_nm]] <- one$fit
+      if (!is.null(one$weights)) score_weights[[lat_nm]] <- one$weights
+      dat[[lat_nm]] <- NA_real_
+      if (!is.null(one$used) && length(one$used) == length(one$scores)) {
+        dat[[lat_nm]][one$used] <- one$scores
+      } else if (length(one$scores) == nrow(dat)) {
+        dat[[lat_nm]] <- one$scores
+      } else {
+        stop(
+          "Factor-score rows for '", node_display_name(state, lat),
+          "' (", length(one$scores), ") do not match analysis data (", nrow(dat), ").",
+          call. = FALSE
+        )
+      }
+    }
   }
-  # Drop rows without scores (should be rare after listwise prepare)
-  score_cols <- names(sc)
+
+  score_cols <- vapply(
+    latent_ids,
+    function(id) lavaan_var_name(state, id),
+    character(1)
+  )
   dat <- dat[stats::complete.cases(dat[, score_cols, drop = FALSE]), , drop = FALSE]
   if (!nrow(dat)) {
     stop("No complete cases after attaching factor scores.", call. = FALSE)
@@ -615,7 +846,10 @@ attach_latent_factor_scores <- function(state, dat) {
     latent_ids = latent_ids,
     measurement_fit = fit,
     measurement_estimates = meas_est,
-    measurement_syntax = syntax
+    measurement_syntax = syntax,
+    measurement_score_weights = score_weights,
+    measurement_score_fits = score_fits,
+    latent_score_method = score_method
   )
 }
 
@@ -630,16 +864,20 @@ attach_latent_factor_scores <- function(state, dat) {
 #' links with latents replaced by those scores (AIC/BIC, split logistic, etc.).
 #'
 #' @keywords internal
-fit_structural_model <- function(state, data, include_edge_ids = NULL) {
+fit_structural_model <- function(state, data, include_edge_ids = NULL,
+                                 latent_score_method = "own") {
   if (is.null(include_edge_ids)) include_edge_ids <- state$edges$id
   edges <- state$edges[state$edges$id %in% include_edge_ids, , drop = FALSE]
   # DVs from the full graph so null / reduced candidates still get intercept-only equations
   dv_ids <- structural_dv_ids(state, state$edges)
   dat <- prepare_analysis_data(state, data)
+  latent_score_method <- normalize_latent_score_method(latent_score_method, state)
 
   # Two-step whenever the *full* graph has latents (scores from all measurement links)
   if (model_uses_latents(state, state$edges)) {
-    attached <- attach_latent_factor_scores(state, dat)
+    attached <- attach_latent_factor_scores(
+      state, dat, score_method = latent_score_method
+    )
     # Rematerialize interactions / polys with latents treated as observed scores
     dat_path <- prepare_analysis_data(attached$state, attached$data)
     struct_edges <- edges[edges$type != "measurement", , drop = FALSE]
@@ -655,8 +893,14 @@ fit_structural_model <- function(state, data, include_edge_ids = NULL) {
       est <- rbind(attached$measurement_estimates, est)
     }
     path_res$estimates <- est
+    score_note <- if (identical(attached$latent_score_method, "joint")) {
+      "# scores: joint Thomson/regression (multi-factor)\n"
+    } else {
+      "# scores: own indicators only\n"
+    }
     path_res$syntax <- paste0(
       "# two-step: factor scores (CFA) then path (lm/glm)\n",
+      score_note,
       "# measurement\n",
       attached$measurement_syntax,
       "\n# path\n",
@@ -664,6 +908,9 @@ fit_structural_model <- function(state, data, include_edge_ids = NULL) {
     )
     path_res$two_step <- TRUE
     path_res$measurement_fit <- attached$measurement_fit
+    path_res$measurement_score_weights <- attached$measurement_score_weights
+    path_res$measurement_score_fits <- attached$measurement_score_fits
+    path_res$latent_score_method <- attached$latent_score_method
     path_res$engine <- "path"
     return(path_res)
   }
@@ -1072,6 +1319,7 @@ build_path_terms <- function(state, dat, preds, response_level = NA_character_) 
     lvl <- if ("level" %in% names(preds)) preds$level[i] else NA_character_
     coding <- variable_coding_for_node(state, from_id, local_dat)
     kind <- classify_variable(dat_xn)
+    if (identical(coding$kind, "categorical")) kind <- "categorical"
     rel_kind <- if ("rel_kind" %in% names(preds)) preds$rel_kind[i] else "linear"
     if (is.na(rel_kind) || !nzchar(rel_kind)) rel_kind <- "linear"
     # Prefer rel_kind from full state (preds may be a filtered copy)

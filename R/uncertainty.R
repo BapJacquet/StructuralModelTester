@@ -128,11 +128,16 @@ append_uncertainty_syntax_note <- function(syntax, method, draws, ok_draws) {
 #' Nonparametric bootstrap of the final structural model (post-selection)
 #' @keywords internal
 bootstrap_final_model <- function(state, data, include_edge_ids, base_fitted,
-                                  draws = 199L, progress = NULL) {
+                                  draws = 199L, progress = NULL,
+                                  latent_score_method = "own") {
   draws <- as.integer(draws)
   if (!is.finite(draws) || draws < 2L) {
     stop("Bootstrap needs at least 2 draws.", call. = FALSE)
   }
+  latent_score_method <- normalize_latent_score_method(
+    base_fitted$latent_score_method %||% latent_score_method,
+    state
+  )
   keys0 <- names(estimates_to_named(base_fitted$estimates))
   if (!length(keys0)) {
     return(list(estimates = base_fitted$estimates, ok = 0L, draws = draws))
@@ -149,7 +154,11 @@ bootstrap_final_model <- function(state, data, include_edge_ids, base_fitted,
     idx <- sample.int(n, n, replace = TRUE)
     boot_dat <- data[idx, , drop = FALSE]
     res <- tryCatch(
-      fit_structural_model(state, boot_dat, include_edge_ids = include_edge_ids),
+      fit_structural_model(
+        state, boot_dat,
+        include_edge_ids = include_edge_ids,
+        latent_score_method = latent_score_method
+      ),
       error = function(e) NULL
     )
     if (is.null(res) || is.null(res$estimates)) next
@@ -226,7 +235,8 @@ fit_path_with_given_scores <- function(state, dat_with_scores, include_edge_ids,
 #' N(Fhat, prediction-error cov); structural paths re-fit each time.
 #' @keywords internal
 plausible_values_final_model <- function(state, data, include_edge_ids, base_fitted,
-                                         draws = 20L, progress = NULL) {
+                                         draws = 20L, progress = NULL,
+                                         latent_score_method = "own") {
   draws <- as.integer(draws)
   if (!is.finite(draws) || draws < 2L) {
     stop("Plausible values need at least 2 draws.", call. = FALSE)
@@ -237,43 +247,61 @@ plausible_values_final_model <- function(state, data, include_edge_ids, base_fit
       call. = FALSE
     )
   }
-  dat0 <- prepare_analysis_data(state, data)
-  attached <- attach_latent_factor_scores(state, dat0)
-  fit <- attached$measurement_fit
-  sc <- tryCatch(
-    lavaan::lavPredict(fit, type = "lv", method = "regression", se = TRUE, acov = TRUE),
-    error = function(e) {
-      lavaan::lavPredict(fit, type = "lv", method = "regression")
-    }
+  latent_score_method <- normalize_latent_score_method(
+    base_fitted$latent_score_method %||% latent_score_method,
+    state
   )
-  score_mean <- as.matrix(sc)
-  if (is.null(colnames(score_mean)) || !any(nzchar(colnames(score_mean)))) {
-    colnames(score_mean) <- vapply(
-      attached$latent_ids,
-      function(id) lavaan_var_name(state, id),
-      character(1)
-    )
+  dat0 <- prepare_analysis_data(state, data)
+  attached <- attach_latent_factor_scores(
+    state, dat0, score_method = latent_score_method
+  )
+  base_dat <- attached$data
+  score_cols <- vapply(
+    attached$latent_ids,
+    function(id) lavaan_var_name(state, id),
+    character(1)
+  )
+  if (!all(score_cols %in% names(base_dat))) {
+    stop("Plausible values: attached factor-score columns are missing.", call. = FALSE)
   }
-  acov <- tryCatch(attr(sc, "acov")[[1]], error = function(e) NULL)
-  if (is.null(acov)) {
-    # Diagonal fallback from se attribute or small noise
-    se_m <- tryCatch(attr(sc, "se")[[1]], error = function(e) NULL)
-    if (!is.null(se_m) && length(se_m)) {
-      acov <- diag(as.numeric(se_m)^2, nrow = ncol(score_mean))
-    } else {
-      acov <- diag(0.05, nrow = ncol(score_mean))
+  score_mean <- as.matrix(base_dat[, score_cols, drop = FALSE])
+  colnames(score_mean) <- score_cols
+
+  # Prediction-error SEs from the score fit(s). Off-diagonals stay 0 for own
+  # scores; joint Thomson still uses a diagonal PV draw (conservative).
+  se_diag <- rep(0.05, length(score_cols))
+  names(se_diag) <- score_cols
+  fits <- attached$measurement_score_fits
+  if (is.list(fits) && length(fits)) {
+    for (j in seq_along(score_cols)) {
+      nm <- score_cols[[j]]
+      f1 <- fits[[nm]]
+      if (!inherits(f1, "lavaan")) next
+      sc1 <- tryCatch(
+        lavaan::lavPredict(f1, type = "lv", method = "regression", se = TRUE),
+        error = function(e) NULL
+      )
+      if (is.null(sc1)) next
+      se1 <- tryCatch({
+        se_attr <- attr(sc1, "se")[[1]]
+        if (is.null(se_attr)) {
+          NULL
+        } else if (is.matrix(se_attr) || is.data.frame(se_attr)) {
+          cn <- colnames(se_attr)
+          if (!is.null(cn) && nm %in% cn) se_attr[, nm] else se_attr[, min(j, ncol(se_attr))]
+        } else if (is.list(se_attr) && !is.null(names(se_attr)) && nm %in% names(se_attr)) {
+          se_attr[[nm]]
+        } else {
+          se_attr
+        }
+      }, error = function(e) NULL)
+      if (!is.null(se1) && length(se1) && is.finite(mean(as.numeric(se1), na.rm = TRUE))) {
+        se_diag[[nm]] <- mean(as.numeric(se1), na.rm = TRUE)
+      }
     }
   }
-
-  base_dat <- attached$data
-  score_cols <- colnames(score_mean)
-  if (nrow(score_mean) != nrow(base_dat)) {
-    stop(
-      "Plausible values: factor-score rows (", nrow(score_mean),
-      ") do not match analysis cases (", nrow(base_dat), ").",
-      call. = FALSE
-    )
-  }
+  acov <- diag(as.numeric(se_diag)^2, nrow = length(score_cols))
+  dimnames(acov) <- list(score_cols, score_cols)
 
   keys0 <- names(estimates_to_named(base_fitted$estimates))
   # Structural keys only for PV path refits (measurement stay fixed)
@@ -334,8 +362,13 @@ plausible_values_final_model <- function(state, data, include_edge_ids, base_fit
 #' @keywords internal
 apply_postselection_uncertainty <- function(state, data, include_edge_ids, fitted,
                                             method = c("none", "bootstrap", "plausible"),
-                                            draws = NULL, progress = NULL) {
+                                            draws = NULL, progress = NULL,
+                                            latent_score_method = "own") {
   method <- match.arg(method)
+  latent_score_method <- normalize_latent_score_method(
+    fitted$latent_score_method %||% latent_score_method,
+    state
+  )
   if (identical(method, "none")) {
     fitted$uncertainty <- list(method = "none", draws = 0L, ok = 0L)
     return(fitted)
@@ -347,11 +380,15 @@ apply_postselection_uncertainty <- function(state, data, include_edge_ids, fitte
 
   out <- if (identical(method, "bootstrap")) {
     bootstrap_final_model(
-      state, data, include_edge_ids, fitted, draws = draws, progress = progress
+      state, data, include_edge_ids, fitted,
+      draws = draws, progress = progress,
+      latent_score_method = latent_score_method
     )
   } else {
     plausible_values_final_model(
-      state, data, include_edge_ids, fitted, draws = draws, progress = progress
+      state, data, include_edge_ids, fitted,
+      draws = draws, progress = progress,
+      latent_score_method = latent_score_method
     )
   }
   fitted$estimates <- out$estimates

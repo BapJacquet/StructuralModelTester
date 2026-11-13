@@ -35,13 +35,17 @@ node_plot_column <- function(state, node_id) {
 }
 
 #' Ensure analysis data includes regression factor scores for latents (plots)
+#'
+#' Recomputes the same CFA regression scores used in the two-step path stage
+#' (`attach_latent_factor_scores`) when score columns are missing.
 #' @keywords internal
-enrich_data_with_factor_scores <- function(state, data) {
+enrich_data_with_factor_scores <- function(state, data, score_method = "own") {
   if (is.null(data) || !nrow(data)) return(data)
   state <- ensure_node_kind_columns(state)
   if (!model_uses_latents(state, state$edges)) return(data)
   meas <- state$edges[state$edges$type == "measurement", , drop = FALSE]
   if (!nrow(meas)) return(data)
+  score_method <- normalize_latent_score_method(score_method, state)
   latent_ids <- unique(as.character(meas$from))
   score_nms <- vapply(latent_ids, function(id) lavaan_var_name(state, id), character(1))
   if (all(score_nms %in% names(data))) {
@@ -51,8 +55,13 @@ enrich_data_with_factor_scores <- function(state, data) {
     if (all(ok)) return(data)
   }
   tryCatch(
-    attach_latent_factor_scores(state, data)$data,
-    error = function(e) data
+    attach_latent_factor_scores(state, data, score_method = score_method)$data,
+    error = function(e) {
+      if (exists("smt_debug", mode = "function")) {
+        smt_debug("enrich_data_with_factor_scores failed: ", e$message)
+      }
+      data
+    }
   )
 }
 
@@ -357,7 +366,8 @@ edge_relationship_plot <- function(state, data, edge_id,
                                    rel_kind = NULL,
                                    prior_mean = NULL,
                                    prior_sd = NULL,
-                                   simulated = FALSE) {
+                                   simulated = FALSE,
+                                   latent_score_method = "own") {
   if (is.null(state) || is.null(data) || is.null(edge_id) || !nzchar(edge_id)) {
     return(NULL)
   }
@@ -388,7 +398,9 @@ edge_relationship_plot <- function(state, data, edge_id,
   }
 
   # Latents → regression factor scores (same as two-step path stage)
-  data <- enrich_data_with_factor_scores(state, data)
+  data <- enrich_data_with_factor_scores(
+    state, data, score_method = latent_score_method
+  )
 
   if (is_interaction_node(state, from_id)) {
     return(edge_interaction_plot(
@@ -397,7 +409,8 @@ edge_relationship_plot <- function(state, data, edge_id,
       to_level = to_level,
       prior_mean = prior_mean,
       prior_sd = prior_sd,
-      simulated = simulated
+      simulated = simulated,
+      latent_score_method = latent_score_method
     ))
   }
 
@@ -965,11 +978,42 @@ main_effect_beta_for_dv <- function(state, from_id, to_id,
   as.numeric(state$edges$estimate[[hits[[1]]]])
 }
 
+#' Clamp probabilities away from 0/1 for logit transforms
+#' @keywords internal
+clamp_prob <- function(p, eps = 1e-6) {
+  p <- as.numeric(p)
+  p[!is.finite(p)] <- NA_real_
+  pmax(eps, pmin(1 - eps, p))
+}
+
+#' Map plot-scale y to linear predictor (identity or logit)
+#' @keywords internal
+interaction_arrow_to_eta <- function(y_plot, link = "identity") {
+  if (identical(link, "logit")) {
+    return(stats::qlogis(clamp_prob(y_plot)))
+  }
+  as.numeric(y_plot)
+}
+
+#' Map linear predictor back to plot scale
+#' @keywords internal
+interaction_arrow_from_eta <- function(eta, link = "identity") {
+  if (identical(link, "logit")) {
+    return(stats::plogis(as.numeric(eta)))
+  }
+  as.numeric(eta)
+}
+
 #' Arrow + ghost-line data for interaction correction vs main-effects-only
+#'
+#' Coefficients (`beta_*`) are on the model linear-predictor scale. For binary
+#' DVs the plot is probability (`P(Y=1)`), so effects are applied on the logit
+#' scale and mapped back with `plogis`.
 #'
 #' @param x Numeric x-axis values (0/1 if binary; raw if continuous).
 #' @param z01 Moderator coded 0/1 (reference = 0).
-#' @param y Outcome on the plot scale.
+#' @param y Outcome on the plot scale (probability for binary DV).
+#' @param link `"identity"` or `"logit"` (logistic / binomial DV plots).
 #' @param active_group Label of the moderator level the correction applies to.
 #' @param group_levels Full moderator level order (matches plot colour scale).
 #' @return data.frame with ghost start (`x0`,`y0`), arrow (`x`,`y`,`yend`),
@@ -980,8 +1024,10 @@ interaction_correction_arrow_df <- function(x, z01, y,
                                             beta_x = 0,
                                             beta_z = 0,
                                             x_is_binary = FALSE,
+                                            link = c("identity", "logit"),
                                             active_group = NULL,
                                             group_levels = NULL) {
+  link <- match.arg(link)
   if (!is.finite(beta_ix)) return(NULL)
   if (!is.finite(beta_x)) beta_x <- 0
   if (!is.finite(beta_z)) beta_z <- 0
@@ -1001,18 +1047,32 @@ interaction_correction_arrow_df <- function(x, z01, y,
 
   if (isTRUE(x_is_binary)) {
     ref <- x <= 0.5 & z01 <= 0.5
-    if (sum(ref) < 2L) return(NULL)
-    y_ref <- mean(y[ref])
+    act0 <- x <= 0.5 & z01 > 0.5
     x_star <- 1
     z_star <- 1
     prod <- x_star * z_star
     delta <- beta_ix * prod
     if (!is.finite(delta) || abs(delta) < 1e-9) return(NULL)
-    # Ghost: active-group mains-only line from x=0 to arrow base
+    # Ghost must start on the active-group mean dot at x=0 (same summary
+    # point as stat_summary), not a reference-cell + β_z reconstruction.
+    if (sum(act0) >= 1L) {
+      y0 <- mean(y[act0])
+      y_ref <- if (sum(ref) >= 1L) mean(y[ref]) else y0
+    } else if (sum(ref) >= 2L) {
+      y_ref <- mean(y[ref])
+      y0 <- interaction_arrow_from_eta(
+        interaction_arrow_to_eta(y_ref, link) + beta_z * z_star,
+        link
+      )
+    } else {
+      return(NULL)
+    }
     x0 <- 0
-    y0 <- y_ref + beta_z * z_star
-    y_mains <- y_ref + beta_x * x_star + beta_z * z_star
-    y_full <- y_mains + delta
+    eta0 <- interaction_arrow_to_eta(y0, link)
+    eta_mains <- eta0 + beta_x * x_star
+    eta_full <- eta_mains + delta
+    y_mains <- interaction_arrow_from_eta(eta_mains, link)
+    y_full <- interaction_arrow_from_eta(eta_full, link)
   } else {
     # Continuous x: product uses mean-centered x (fit coding)
     x_mu <- mean(x)
@@ -1027,11 +1087,29 @@ interaction_correction_arrow_df <- function(x, z01, y,
     delta <- beta_ix * prod
     if (!is.finite(delta) || abs(delta) < 1e-9) return(NULL)
     y_ref <- mean(y[ref])
-    y_mains <- y_ref + beta_x * x_star_c + beta_z * z_star
-    y_full <- y_mains + delta
+    eta_ref <- interaction_arrow_to_eta(y_ref, link)
+    eta_mains <- eta_ref + beta_x * x_star_c + beta_z * z_star
+    eta_full <- eta_mains + delta
+    y_mains <- interaction_arrow_from_eta(eta_mains, link)
+    y_full <- interaction_arrow_from_eta(eta_full, link)
     # Ghost from reference-region center along mains-only active-group line
     x0 <- mean(x[ref])
-    y0 <- y_ref + beta_x * (x0 - x_mu) + beta_z * z_star
+    eta0 <- eta_ref + beta_x * (x0 - x_mu) + beta_z * z_star
+    y0 <- interaction_arrow_from_eta(eta0, link)
+  }
+
+  delta_plot <- y_full - y_mains
+  if (exists("smt_debug", mode = "function")) {
+    smt_debug(
+      "ix correction arrow | link=", link,
+      " x_bin=", isTRUE(x_is_binary),
+      " x0=", round(x0, 4), " y0=", round(y0, 4),
+      " y_ref=", round(y_ref, 4),
+      " y_mains=", round(y_mains, 4),
+      " y_full=", round(y_full, 4),
+      " delta_lp=", round(delta, 4),
+      " delta_plot=", round(delta_plot, 4)
+    )
   }
 
   out <- data.frame(
@@ -1040,7 +1118,8 @@ interaction_correction_arrow_df <- function(x, z01, y,
     x = x_star,
     y = y_mains,
     yend = y_full,
-    label = sprintf("\u00D7 %+.2f", delta),
+    # Label matches the visible arrow length on the plot scale
+    label = sprintf("\u00D7 %+.2f", delta_plot),
     group = active_group,
     stringsAsFactors = FALSE
   )
@@ -1141,7 +1220,8 @@ interaction_correction_arrows_for_plot <- function(state, ix_id, to_id, to_level
                                                    est,
                                                    show_fit = FALSE,
                                                    active_group = NULL,
-                                                   group_levels = NULL) {
+                                                   group_levels = NULL,
+                                                   y_binary = FALSE) {
   # Ghost + correction arrow only when the × → DV link is kept (not excluded)
   if (!is.null(state) && nrow(state$edges)) {
     state <- ensure_edge_to_port(state)
@@ -1179,12 +1259,14 @@ interaction_correction_arrows_for_plot <- function(state, ix_id, to_id, to_level
     return(list())
   }
 
+  link <- if (isTRUE(y_binary)) "logit" else "identity"
   ad <- interaction_correction_arrow_df(
     x, z01, y,
     beta_ix = beta_ix,
     beta_x = beta_x,
     beta_z = beta_z,
     x_is_binary = x_is_binary,
+    link = link,
     active_group = active_group,
     group_levels = group_levels
   )
@@ -1250,9 +1332,12 @@ edge_interaction_plot <- function(state, data, ix_id, to_id, est, est_std, etype
                                   to_level = NA_character_,
                                   prior_mean = NULL,
                                   prior_sd = NULL,
-                                  simulated = FALSE) {
+                                  simulated = FALSE,
+                                  latent_score_method = "own") {
   state <- ensure_node_kind_columns(state)
-  data <- enrich_data_with_factor_scores(state, data)
+  data <- enrich_data_with_factor_scores(
+    state, data, score_method = latent_score_method
+  )
   fac <- interaction_factors(state, ix_id)
   fa <- fac$a
   fb <- fac$b
@@ -1506,7 +1591,8 @@ edge_interaction_plot <- function(state, data, ix_id, to_id, est, est_std, etype
       x = x, z01 = z01_cat, y = df$y,
       x_is_binary = x_is_binary,
       prior_mean = prior_mean, est = est, show_fit = show_fit,
-      active_group = active_z, group_levels = z_levs
+      active_group = active_z, group_levels = z_levs,
+      y_binary = identical(y_kind, "binary")
     )) {
       p <- p + ly
     }
@@ -1648,7 +1734,8 @@ edge_interaction_plot <- function(state, data, ix_id, to_id, est, est_std, etype
     x = x, z01 = z01_plot, y = df$y,
     x_is_binary = x_is_binary,
     prior_mean = prior_mean, est = est, show_fit = show_fit,
-    active_group = active_z, group_levels = z_levs
+    active_group = active_z, group_levels = z_levs,
+    y_binary = identical(y_kind, "binary")
   )) {
     p <- p + ly
   }

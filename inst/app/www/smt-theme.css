@@ -393,6 +393,47 @@ body.smt-resizing * {
   flex-direction: column;
 }
 
+.smt-data-load-opts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px 16px;
+  margin: 0 0 8px 0;
+}
+
+.smt-data-load-opts .shiny-input-container {
+  margin-bottom: 0 !important;
+}
+
+/* Data / prepare browse tables: stay inside the center pane */
+.smt-data-wrap,
+.smt-prepare-wrap {
+  min-height: 0;
+}
+
+.smt-data-wrap .datatables,
+.smt-data-wrap .dataTables_wrapper,
+.smt-prepare-wrap .datatables,
+.smt-prepare-wrap .dataTables_wrapper {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.smt-browse-table td,
+.smt-browse-table th {
+  max-width: 9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.smt-cell-trunc {
+  cursor: help;
+}
+
 .smt-canvas-wrap {
   padding-bottom: 0;
   flex: 1;
@@ -856,6 +897,9 @@ body.smt-resizing * {
   flex: 1 1 0;
   min-height: 120px;
   width: 100%;
+  /* Halo behind edge / × labels — keep in sync with the canvas field color.
+     JS may refresh this from computed styles so dark-theme extensions work. */
+  --smt-canvas-halo: var(--smt-surface);
   background:
     linear-gradient(var(--smt-border) 1px, transparent 1px) 0 0 / 24px 24px,
     linear-gradient(90deg, var(--smt-border) 1px, transparent 1px) 0 0 / 24px 24px,
@@ -1017,8 +1061,8 @@ body.smt-resizing-v * {
 }
 
 .smt-edge-label-halo {
-  fill: #ffffff;
-  stroke: #ffffff;
+  fill: var(--smt-canvas-halo, var(--smt-surface));
+  stroke: var(--smt-canvas-halo, var(--smt-surface));
   stroke-width: 5px;
   stroke-linejoin: round;
   font-size: 11px;
@@ -1113,19 +1157,20 @@ body.smt-resizing-v * {
   white-space: nowrap;
   font-size: 11px;
   font-weight: 600;
-  color: #2b2b2e;
+  color: var(--smt-text);
   pointer-events: none;
-  /* White halo (HTML), matching SVG .smt-edge-label stroke */
+  /* Halo matches canvas field (same token as SVG edge-label stroke) */
+  --smt-ix-halo: var(--smt-canvas-halo, var(--smt-surface));
   text-shadow:
-    -2px -2px 0 #fff,
-     2px -2px 0 #fff,
-    -2px  2px 0 #fff,
-     2px  2px 0 #fff,
-    -2px  0 0 #fff,
-     2px  0 0 #fff,
-     0 -2px 0 #fff,
-     0  2px 0 #fff,
-     0 0 3px #fff;
+    -2px -2px 0 var(--smt-ix-halo),
+     2px -2px 0 var(--smt-ix-halo),
+    -2px  2px 0 var(--smt-ix-halo),
+     2px  2px 0 var(--smt-ix-halo),
+    -2px  0 0 var(--smt-ix-halo),
+     2px  0 0 var(--smt-ix-halo),
+     0 -2px 0 var(--smt-ix-halo),
+     0  2px 0 var(--smt-ix-halo),
+     0 0 3px var(--smt-ix-halo);
 }
 
 .smt-node.smt-interaction .port.output {

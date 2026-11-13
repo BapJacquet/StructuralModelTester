@@ -16,14 +16,39 @@ smt_package_version <- function() {
   v
 }
 
+#' Cache-bust query for www assets (mtime); avoids stale canvas JS in the browser
+#' @keywords internal
+smt_www_asset_query <- function(filename) {
+  roots <- character()
+  pkg_root <- tryCatch(get_dev_pkg_root(), error = function(e) "")
+  if (nzchar(pkg_root)) {
+    roots <- c(roots, file.path(pkg_root, "inst", "app", "www"))
+  }
+  sys <- system.file("app", "www", package = "StructuralModelTester")
+  if (nzchar(sys)) roots <- c(roots, sys)
+  for (root in roots) {
+    path <- file.path(root, filename)
+    if (file.exists(path)) {
+      mt <- file.info(path)$mtime
+      if (!is.na(mt)) {
+        return(sprintf("?v=%s", format(as.numeric(mt), scientific = FALSE)))
+      }
+    }
+  }
+  sprintf("?v=%s", smt_package_version())
+}
+
 #' @keywords internal
 smt_ui <- function() {
   shiny::fluidPage(
     title = "Structural Model Tester",
     shiny::tags$head(
-      shiny::tags$link(rel = "stylesheet", type = "text/css", href = "smt-theme.css"),
-      shiny::tags$script(src = "smt-panels.js"),
-      shiny::tags$script(src = "smt-canvas.js"),
+      shiny::tags$link(
+        rel = "stylesheet", type = "text/css",
+        href = paste0("smt-theme.css", smt_www_asset_query("smt-theme.css"))
+      ),
+      shiny::tags$script(src = paste0("smt-panels.js", smt_www_asset_query("smt-panels.js"))),
+      shiny::tags$script(src = paste0("smt-canvas.js", smt_www_asset_query("smt-canvas.js"))),
       shiny::tags$link(
         rel = "stylesheet",
         href = "https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;600;700&display=swap"
@@ -57,9 +82,11 @@ smt_ui <- function() {
         ),
         shiny::div(
           class = "smt-top-actions",
-          shiny::fileInput("data_file", label = NULL, buttonLabel = "Open data",
-                           accept = c(".csv", ".tsv", ".txt", ".rds"),
-                           placeholder = "CSV / TSV / RDS"),
+          shiny::fileInput(
+            "data_file", label = NULL, buttonLabel = "Open data",
+            accept = c(".csv", ".tsv", ".txt", ".xlsx", ".xls", ".rds"),
+            placeholder = "CSV / Excel / RDS"
+          ),
           shiny::fileInput("project_file", label = NULL, buttonLabel = "Open project",
                            accept = ".json", placeholder = "Project JSON"),
           shiny::downloadButton("save_project", "Save project", class = "smt-btn smt-btn-ghost"),
@@ -170,6 +197,7 @@ smt_ui <- function() {
                 "Inference is conditional on the selected model."
               )
             ),
+            shiny::uiOutput("latent_score_method_ui"),
             shiny::hr(class = "smt-hr"),
             shiny::h3("Simulation"),
             shiny::numericInput(
@@ -240,13 +268,20 @@ smt_ui <- function() {
                 "run_power_analysis",
                 "Run Power Analysis",
                 class = "smt-btn smt-btn-secondary"
+              ),
+              shiny::actionButton(
+                "cancel_power_analysis",
+                "Cancel",
+                class = "smt-btn smt-btn-danger",
+                title = "Stop a running power analysis"
               )
             ),
             shiny::helpText(
               "Uses edge expected effects, exogenous mean/SD, and DV residual SD (\u03b5). ",
               "Simulate fits one sample; Power Analysis estimates P(all confirmatory links detected) ",
               "and, with confirmatory expected effects set to 0, the rate of detecting exactly k of them ",
-              "(p < \u03b1, or in the best AIC/BIC model with Σw ≥ Min Σw)."
+              "(p < \u03b1, or in the best AIC/BIC model with Σw ≥ Min Σw). ",
+              "Cancel stops after the current replication."
             )
           )
         ),
@@ -256,9 +291,36 @@ smt_ui <- function() {
           shiny::conditionalPanel(
             condition = "input.center_view == 'data'",
             shiny::div(
-              class = "smt-center-inner",
+              class = "smt-center-inner smt-data-wrap",
               shiny::h3(class = "smt-center-title", "Data"),
-              shiny::helpText("Raw loaded data (immutable). Use Prepare to filter or mutate before modeling."),
+              shiny::helpText(
+                "Raw loaded data (immutable). Long cells are truncated; hover for the full value. ",
+                "Use Prepare to filter or mutate before modeling."
+              ),
+              shiny::div(
+                class = "smt-data-load-opts",
+                shiny::numericInput(
+                  "data_skip_after_header",
+                  "Skip rows after header",
+                  value = 0, min = 0, max = 50, step = 1, width = "160px"
+                ),
+                shiny::textInput(
+                  "data_excel_sheet",
+                  "Excel sheet",
+                  value = "1",
+                  placeholder = "1 or sheet name",
+                  width = "160px"
+                ),
+                shiny::actionButton(
+                  "data_reload",
+                  "Reload file",
+                  class = "smt-btn smt-btn-secondary"
+                )
+              ),
+              shiny::helpText(
+                "SoSci Survey Excel/CSV exports: set skip to 1 to drop the column-description row. ",
+                "Excel sheet accepts a 1-based index or sheet name."
+              ),
               DT::DTOutput("data_table")
             )
           ),
@@ -476,6 +538,7 @@ smt_ui <- function() {
 smt_server <- function(input, output, session) {
   state <- shiny::reactiveVal(empty_model_state())
   data_rv <- shiny::reactiveVal(NULL)
+  last_data_file <- shiny::reactiveVal(NULL)
   prepare_rv <- shiny::reactiveVal(empty_prepare_state())
   analysis_rv <- shiny::reactiveVal(NULL)
   # Simulated generative data — plots only; never shown in Data / Prepare.
@@ -578,16 +641,56 @@ smt_server <- function(input, output, session) {
     }
   })
 
+  load_uploaded_data <- function(f, announce = TRUE) {
+    shiny::req(f)
+    skip <- input$data_skip_after_header %||% 0
+    sheet <- input$data_excel_sheet %||% "1"
+    dat <- read_data_file(
+      f$datapath, f$name,
+      skip_after_header = skip,
+      sheet = sheet
+    )
+    set_raw_data(dat, reset_prepare = TRUE)
+    invalidate_fit()
+    last_data_file(list(
+      datapath = f$datapath,
+      name = f$name
+    ))
+    if (isTRUE(announce)) {
+      skip_n <- suppressWarnings(as.integer(skip))
+      skip_txt <- if (is.finite(skip_n) && skip_n > 0L) {
+        sprintf(" · skipped %d row(s) after header", skip_n)
+      } else {
+        ""
+      }
+      status(sprintf(
+        "Loaded %s (%d rows × %d columns%s).",
+        f$name, nrow(dat), ncol(dat), skip_txt
+      ))
+      shiny::updateRadioButtons(session, "center_view", selected = "data")
+    }
+    invisible(dat)
+  }
+
   shiny::observeEvent(input$data_file, {
     f <- input$data_file
     shiny::req(f)
-    tryCatch({
-      dat <- read_data_file(f$datapath, f$name)
-      set_raw_data(dat, reset_prepare = TRUE)
-      invalidate_fit()
-      status(sprintf("Loaded %s (%d rows × %d columns).", f$name, nrow(dat), ncol(dat)))
-      shiny::updateRadioButtons(session, "center_view", selected = "data")
-    }, error = function(e) status(paste("Data error:", e$message)))
+    tryCatch(
+      load_uploaded_data(f, announce = TRUE),
+      error = function(e) status(paste("Data error:", e$message))
+    )
+  })
+
+  shiny::observeEvent(input$data_reload, {
+    f <- last_data_file()
+    if (is.null(f) || is.null(f$datapath) || !file.exists(f$datapath)) {
+      status("Open a data file first, then use Reload file.")
+      return()
+    }
+    tryCatch(
+      load_uploaded_data(f, announce = TRUE),
+      error = function(e) status(paste("Data error:", e$message))
+    )
   })
 
   shiny::observeEvent(input$project_file, {
@@ -638,30 +741,45 @@ smt_server <- function(input, output, session) {
     })
   })
 
-  flush_sim_params_from_inputs <- function(st) {
+  flush_sim_var_kind_from_inputs <- function(st, nid, apply_levels = FALSE) {
+    if (is.null(nid) || is_interaction_node(st, nid)) return(st)
+    col <- st$nodes$observed_column[match(nid, st$nodes$id)]
+    mapped <- !is.na(col) && nzchar(col) && !is.null(analysis_rv()) &&
+      col %in% names(analysis_rv())
+    if (mapped) return(st)
+    kind_in <- input$sim_var_kind
+    if (!is.null(kind_in) && nzchar(as.character(kind_in)) &&
+          as.character(kind_in) %in% c("continuous", "categorical", "binary")) {
+      st <- set_node_sim_var_kind(st, nid, as.character(kind_in))
+    }
+    kind <- node_sim_var_kind(st, nid, data = NULL)
+    # Level renames are committed only via Apply (or Simulate/Run flush), not
+    # on every keystroke — live updates remount ports and destabilize the UI.
+    if (isTRUE(apply_levels) && kind %in% c("categorical", "binary")) {
+      lev_txt <- input$sim_factor_levels
+      if (!is.null(lev_txt) && nzchar(trimws(as.character(lev_txt)))) {
+        levs <- decode_factor_levels(as.character(lev_txt))
+        if (length(levs)) {
+          st <- set_node_factor_coding(
+            st, nid, base = levs[[1]], levels = levs, data = NULL
+          )
+        }
+      }
+    }
+    st
+  }
+
+  flush_sim_params_from_inputs <- function(st, apply_levels = TRUE) {
     st <- ensure_node_sim_columns(st)
     nid <- shiny::isolate(selected_node_id())
     dv <- shiny::isolate(selected_dv_id())
+    # Declared type for unmapped nodes (exogenous or DV) — shared inspector control
+    if (!is.null(nid)) {
+      st <- flush_sim_var_kind_from_inputs(st, nid, apply_levels = apply_levels)
+    }
     if (!is.null(nid) && node_is_structural_exogenous(st, nid)) {
-      kind_in <- input$sim_var_kind
-      col <- st$nodes$observed_column[match(nid, st$nodes$id)]
-      mapped <- !is.na(col) && nzchar(col) && !is.null(analysis_rv()) &&
-        col %in% names(analysis_rv())
-      if (!mapped && !is.null(kind_in) && nzchar(as.character(kind_in))) {
-        st <- set_node_sim_var_kind(st, nid, as.character(kind_in))
-      }
       kind <- node_sim_var_kind(st, nid, data = analysis_rv())
       if (kind %in% c("categorical", "binary")) {
-        lev_txt <- input$sim_factor_levels
-        if (!mapped && !is.null(lev_txt) && nzchar(trimws(as.character(lev_txt)))) {
-          levs <- decode_factor_levels(as.character(lev_txt))
-          if (length(levs)) {
-            base <- levs[[1]]
-            st <- set_node_factor_coding(
-              st, nid, base = base, levels = levs, data = NULL
-            )
-          }
-        }
         dm <- input$sim_design_mode
         if (!is.null(dm) && nzchar(as.character(dm)) &&
               as.character(dm) %in% c("inter", "intra")) {
@@ -702,12 +820,54 @@ smt_server <- function(input, output, session) {
               is.finite(m) && is.finite(s) && s > 0) {
           st <- set_node_sim_exogenous(st, nid, mean = m, sd = s)
         }
+        lo <- input$sim_exog_min
+        hi <- input$sim_exog_max
+        # NULL = input not mounted; leave stored bounds. NA/blank clears a bound.
+        if (!is.null(lo) || !is.null(hi)) {
+          cur <- node_sim_params(st, nid)
+          lo_v <- if (is.null(lo) || length(lo) != 1L || is.na(lo) || !is.finite(lo)) {
+            NA_real_
+          } else {
+            as.numeric(lo)
+          }
+          hi_v <- if (is.null(hi) || length(hi) != 1L || is.na(hi) || !is.finite(hi)) {
+            NA_real_
+          } else {
+            as.numeric(hi)
+          }
+          # If only one input is present this flush, keep the other from state
+          if (is.null(lo)) lo_v <- cur$min
+          if (is.null(hi)) hi_v <- cur$max
+          st <- set_node_sim_bounds(st, nid, min = lo_v, max = hi_v)
+        }
       }
     }
     if (!is.null(dv)) {
+      icept <- input$sim_dv_intercept
+      if (!is.null(icept) && length(icept) == 1L && is.finite(icept)) {
+        st <- set_node_sim_intercept(st, dv, intercept = icept)
+      }
       r <- input$sim_resid_sd
       if (!is.null(r) && length(r) == 1L && is.finite(r) && r > 0) {
         st <- set_node_sim_resid_sd(st, dv, resid_sd = r)
+      }
+      lo <- input$sim_dv_min
+      hi <- input$sim_dv_max
+      if (!is.null(lo) || !is.null(hi)) {
+        cur <- node_sim_params(st, dv)
+        lo_v <- if (is.null(lo) || length(lo) != 1L || is.na(lo) || !is.finite(lo)) {
+          NA_real_
+        } else {
+          as.numeric(lo)
+        }
+        hi_v <- if (is.null(hi) || length(hi) != 1L || is.na(hi) || !is.finite(hi)) {
+          NA_real_
+        } else {
+          as.numeric(hi)
+        }
+        if (is.null(lo)) lo_v <- cur$min
+        if (is.null(hi)) hi_v <- cur$max
+        st <- set_node_sim_bounds(st, dv, min = lo_v, max = hi_v)
       }
     }
     st
@@ -840,12 +1000,7 @@ smt_server <- function(input, output, session) {
   output$prepare_preview_table <- DT::renderDT({
     dat <- analysis_rv()
     shiny::req(dat)
-    DT::datatable(
-      dat,
-      rownames = FALSE,
-      options = list(pageLength = 12, scrollX = TRUE, dom = "tip"),
-      class = "compact stripe hover"
-    )
+    smt_browse_datatable(dat, page_length = 12L, max_chars = 24L)
   })
 
   output$variable_list <- shiny::renderUI({
@@ -878,6 +1033,32 @@ smt_server <- function(input, output, session) {
           )
         )
       })
+    )
+  })
+
+  output$latent_score_method_ui <- shiny::renderUI({
+    st <- state()
+    if (n_latent_nodes(st) < 2L) return(NULL)
+    cur <- shiny::isolate(input$latent_score_method)
+    if (is.null(cur) || !cur %in% c("own", "joint")) cur <- "own"
+    shiny::tagList(
+      shiny::hr(class = "smt-hr"),
+      shiny::radioButtons(
+        "latent_score_method",
+        "Latent scores",
+        choices = c(
+          "Own indicators" = "own",
+          "Joint (Thomson)" = "joint"
+        ),
+        selected = cur,
+        width = "100%"
+      ),
+      shiny::helpText(
+        "Analysis-wide. Own indicators (default) score each latent from its ",
+        "measurement links only. Joint Thomson/regression scores use the ",
+        "multi-factor CFA and can weight items from other constructs when ",
+        "factors correlate. With one latent both coincide."
+      )
     )
   })
 
@@ -1003,7 +1184,12 @@ smt_server <- function(input, output, session) {
       "cat_factor_levels",
       "sim_exog_mean",
       "sim_exog_sd",
+      "sim_exog_min",
+      "sim_exog_max",
       "sim_resid_sd",
+      "sim_dv_intercept",
+      "sim_dv_min",
+      "sim_dv_max",
       "sim_var_kind",
       "sim_factor_levels",
       "sim_design_mode",
@@ -1330,11 +1516,17 @@ smt_server <- function(input, output, session) {
     } else {
       c(from_id, to_id)
     }
-    picked <- pick_plot_data_for_nodes(st, analysis_dat, sim_dat, need_ids)
+    has_result <- !is.null(shiny::isolate(last_result()))
+    picked <- pick_plot_data_for_nodes(
+      st, analysis_dat, sim_dat, need_ids, has_result = has_result
+    )
     if (is.null(picked$data)) {
-      smt_debug("R edge_plot -> no data/sim | ", picked$reason %||% "")
+      smt_debug(
+        "R edge_plot -> no data/sim | has_result=", has_result,
+        " | ", picked$reason %||% ""
+      )
       return(edge_plot_message(
-        "No data",
+        picked$title %||% "No data",
         picked$reason %||% "Load data or run Simulate to plot this link."
       ))
     }
@@ -1372,6 +1564,13 @@ smt_server <- function(input, output, session) {
       " prior_mean=", prior_mean, " prior_sd=", prior_sd,
       " nrow_data=", nrow(dat)
     )
+    score_meth <- shiny::isolate({
+      res0 <- last_result()
+      normalize_latent_score_method(
+        res0$latent_score_method %||% input$latent_score_method %||% "own",
+        st
+      )
+    })
     p <- tryCatch(
       edge_relationship_plot(
         st, dat, eid,
@@ -1379,7 +1578,8 @@ smt_server <- function(input, output, session) {
         rel_kind = rk,
         prior_mean = prior_mean,
         prior_sd = prior_sd,
-        simulated = simulated
+        simulated = simulated,
+        latent_score_method = score_meth
       ),
       error = function(e) {
         smt_debug("R edge_plot ERROR: ", e$message)
@@ -1412,6 +1612,10 @@ smt_server <- function(input, output, session) {
     draws <- input$uncertainty_draws
     if (identical(unc, "plausible") && (is.null(draws) || !is.finite(draws))) draws <- 20
     if (identical(unc, "bootstrap") && (is.null(draws) || !is.finite(draws))) draws <- 199
+    score_meth <- normalize_latent_score_method(
+      input$latent_score_method %||% "own",
+      fit_st
+    )
     progress_cb <- if (!identical(unc, "none")) {
       function(i, total) {
         shiny::setProgress(
@@ -1433,7 +1637,8 @@ smt_server <- function(input, output, session) {
           conf_adjust = input$conf_p_adjust %||% "none",
           uncertainty = unc,
           uncertainty_draws = draws,
-          uncertainty_progress = progress_cb
+          uncertainty_progress = progress_cb,
+          latent_score_method = score_meth
         )
       } else {
         mw <- as.numeric(input$min_weight %||% 0.95)
@@ -1446,7 +1651,8 @@ smt_server <- function(input, output, session) {
           uncertainty_draws = draws,
           uncertainty_progress = progress_cb,
           min_weight = mw,
-          mark_low_weight = isTRUE(input$mark_low_weight)
+          mark_low_weight = isTRUE(input$mark_low_weight),
+          latent_score_method = score_meth
         )
       }
       if (isTRUE(simulated)) {
@@ -1549,6 +1755,7 @@ smt_server <- function(input, output, session) {
     st <- ensure_edge_to_port(state())
     st <- merge_edge_priors_from_inputs(st)$state
     st <- flush_sim_params_from_inputs(st)
+    st <- sync_sim_kinds_from_data(st, analysis_rv())
     sel <- input$graph_selected
     eid <- if (!is.null(sel$edges) && length(sel$edges)) as.character(sel$edges[[1]]) else NULL
     if (!is.null(eid) && nzchar(eid) && !is.null(input$edge_rel_kind) &&
@@ -1561,11 +1768,7 @@ smt_server <- function(input, output, session) {
       sim_data_rv(sim)
       used_seed <- attr(sim, "sim_seed")
       if (isTRUE(attr(sim, "sim_has_intra")) && "subject" %in% names(sim)) {
-        for (dv in structural_dv_ids(st)) {
-          st <- set_node_repeated_measures(
-            st, dv, enabled = TRUE, cluster_column = "subject"
-          )
-        }
+        st <- enable_repeated_measures_for_intra_sim(st)
         state(st)
       }
       run_fit_pipeline(
@@ -1604,16 +1807,30 @@ smt_server <- function(input, output, session) {
     st <- ensure_edge_to_port(state())
     st <- merge_edge_priors_from_inputs(st)$state
     st <- flush_sim_params_from_inputs(st)
+    st <- sync_sim_kinds_from_data(st, analysis_rv())
     sel <- input$graph_selected
     eid <- if (!is.null(sel$edges) && length(sel$edges)) as.character(sel$edges[[1]]) else NULL
     if (!is.null(eid) && nzchar(eid) && !is.null(input$edge_rel_kind) &&
           nzchar(as.character(input$edge_rel_kind))) {
       st <- set_edge_rel_kind(st, eid, as.character(input$edge_rel_kind))
     }
+    st <- enable_repeated_measures_for_intra_sim(st)
     state(st)
     conf_ids <- confirmatory_power_edge_ids(st)
     if (!length(conf_ids)) {
       status("Power analysis error: add at least one confirmatory structural link.")
+      return()
+    }
+    zero_ids <- confirmatory_zero_prior_edge_ids(st, conf_ids)
+    if (length(zero_ids)) {
+      labs <- confirmatory_edge_warning_labels(st, zero_ids)
+      status(paste0(
+        "Power analysis error: set Expected effect (b ≠ 0) on confirmatory link",
+        if (length(zero_ids) > 1L) "s" else "",
+        " currently at 0: ",
+        paste(labs, collapse = "; "),
+        ". Auto-added interaction mains default to 0 until you set them."
+      ))
       return()
     }
     mode <- if (identical(input$inference_mode, "pvalue")) "pvalue" else "search"
@@ -1630,6 +1847,15 @@ smt_server <- function(input, output, session) {
     if (!identical(mode, "search") || !isTRUE(input$mark_low_weight)) {
       min_weight <- 0
     }
+    score_meth <- normalize_latent_score_method(
+      input$latent_score_method %||% "own",
+      st
+    )
+    session$userData$power_cancel <- FALSE
+    cancel_baseline <- shiny::isolate({
+      v <- input$cancel_power_analysis
+      if (is.null(v) || !is.finite(v)) 0L else as.integer(v)
+    })
     tryCatch({
       shiny::withProgress(
         message = "Running power analysis…",
@@ -1649,13 +1875,22 @@ smt_server <- function(input, output, session) {
             criterion = criterion,
             conf_adjust = conf_adjust,
             min_weight = min_weight,
+            latent_score_method = score_meth,
             n_steps = as.integer(n_steps),
             n_cap = as.integer(n_cap),
             progress = function(done, tot) {
+              # Do not httpuv::service()/later::run_now() here: yielding from
+              # inside this observeEvent deadlocks the session (UI stuck at
+              # 1/N, R at ~0% CPU). Progress text still updates; Cancel is
+              # cooperative via session$userData$power_cancel / smt_cmd only
+              # between runs until power is moved off the reactive thread.
               shiny::setProgress(
                 value = done / max(tot, 1L),
                 detail = sprintf("%d / %d", done, tot)
               )
+              if (isTRUE(session$userData$power_cancel)) {
+                smt_cancel_power()
+              }
             }
           )
           power_result_rv(pw)
@@ -1693,9 +1928,380 @@ smt_server <- function(input, output, session) {
         }
       )
     }, error = function(e) {
-      status(paste("Power analysis error:", e$message))
+      if (smt_is_power_cancelled(e)) {
+        status("Power analysis cancelled.")
+      } else {
+        status(paste("Power analysis error:", e$message))
+      }
     })
+    session$userData$power_cancel <- FALSE
   }, ignoreInit = TRUE)
+
+  shiny::observeEvent(input$cancel_power_analysis, {
+    session$userData$power_cancel <- TRUE
+    status("Cancelling power analysis…")
+  }, ignoreInit = TRUE)
+
+  # Live R command bus: second process calls smt_cmd() → .smt/inbox → here.
+  smt_cmd_resolve_node <- function(st, ref) {
+    ref <- as.character(ref %||% "")[[1]]
+    if (!nzchar(ref)) return(NA_character_)
+    if (ref %in% st$nodes$id) return(ref)
+    hit <- st$nodes$id[st$nodes$label == ref]
+    if (length(hit)) return(hit[[1]])
+    NA_character_
+  }
+  smt_cmd_resolve_edge <- function(st, args) {
+    eid <- as.character(smt_cmd_arg(args, "id", "")[[1]])
+    if (nzchar(eid) && eid %in% st$edges$id) return(eid)
+    from <- smt_cmd_resolve_node(st, smt_cmd_arg(args, "from"))
+    to <- smt_cmd_resolve_node(st, smt_cmd_arg(args, "to"))
+    if (is.na(from) || is.na(to)) return(NA_character_)
+    level <- smt_cmd_arg(args, "level", NULL)
+    to_level <- smt_cmd_arg(args, "to_level", NULL)
+    hit <- st$edges$id[st$edges$from == from & st$edges$to == to]
+    if (!length(hit)) return(NA_character_)
+    if (!is.null(level) && "level" %in% names(st$edges)) {
+      lv <- as.character(level)[[1]]
+      sub <- hit[as.character(st$edges$level[match(hit, st$edges$id)]) == lv]
+      if (length(sub)) hit <- sub
+    }
+    if (!is.null(to_level) && "to_level" %in% names(st$edges)) {
+      tlv <- as.character(to_level)[[1]]
+      sub <- hit[as.character(st$edges$to_level[match(hit, st$edges$id)]) == tlv]
+      if (length(sub)) hit <- sub
+    }
+    hit[[1]]
+  }
+  smt_cmd_arg <- function(args, name, default = NULL) {
+    if (is.null(args) || !length(args) || !(name %in% names(args))) return(default)
+    args[[name]]
+  }
+  smt_cmd_dispatch <- function(cmd) {
+    action <- as.character(cmd$action %||% "")[[1]]
+    args <- cmd$args %||% list()
+    if (!is.list(args)) args <- as.list(args)
+
+    if (identical(action, "ping")) {
+      return(list(ok = TRUE, message = "pong", ts = as.numeric(Sys.time())))
+    }
+    if (identical(action, "status")) {
+      return(list(
+        ok = TRUE,
+        message = as.character(status()),
+        n_nodes = nrow(state()$nodes),
+        n_edges = nrow(state()$edges),
+        has_data = !is.null(analysis_rv()),
+        has_result = !is.null(last_result()),
+        simulated = isTRUE(results_are_simulated())
+      ))
+    }
+    if (identical(action, "get_model")) {
+      st <- state()
+      return(list(
+        ok = TRUE,
+        message = "model",
+        json = model_to_json(st, prepare = prepare_rv()),
+        n_nodes = nrow(st$nodes),
+        n_edges = nrow(st$edges)
+      ))
+    }
+    if (identical(action, "cancel_power")) {
+      session$userData$power_cancel <- TRUE
+      status("Cancelling power analysis…")
+      return(list(ok = TRUE, message = "cancel requested"))
+    }
+    if (identical(action, "clear_fit")) {
+      st <- clear_fit_results(state())
+      state(st)
+      last_result(NULL)
+      results_are_simulated(FALSE)
+      power_result_rv(NULL)
+      status("Fit cleared.")
+      return(list(ok = TRUE, message = "fit cleared"))
+    }
+    if (identical(action, "load_project")) {
+      path <- as.character(smt_cmd_arg(args, "path", "")[[1]])
+      if (!nzchar(path) || !file.exists(path)) {
+        stop("load_project requires an existing path=…", call. = FALSE)
+      }
+      txt <- paste(readLines(path, warn = FALSE, encoding = "UTF-8"), collapse = "\n")
+      st <- model_from_json(txt)
+      prep <- attr(st, "prepare")
+      state(st)
+      prepare_rv(ensure_prepare_state(prep))
+      last_result(NULL)
+      results_are_simulated(FALSE)
+      power_result_rv(NULL)
+      status(sprintf("Loaded project via smt_cmd (%d nodes).", nrow(st$nodes)))
+      return(list(ok = TRUE, message = "project loaded", n_nodes = nrow(st$nodes)))
+    }
+    if (identical(action, "set_model")) {
+      json <- smt_cmd_arg(args, "json", NULL)
+      path <- as.character(smt_cmd_arg(args, "path", "")[[1]])
+      if (is.null(json) && nzchar(path) && file.exists(path)) {
+        json <- paste(readLines(path, warn = FALSE, encoding = "UTF-8"), collapse = "\n")
+      }
+      if (is.null(json) || !nzchar(as.character(json)[[1]])) {
+        stop("set_model requires json=… or path=…", call. = FALSE)
+      }
+      st <- model_from_json(as.character(json)[[1]])
+      prep <- attr(st, "prepare")
+      state(st)
+      if (!is.null(prep)) prepare_rv(ensure_prepare_state(prep))
+      last_result(NULL)
+      results_are_simulated(FALSE)
+      power_result_rv(NULL)
+      status(sprintf("Model replaced via smt_cmd (%d nodes).", nrow(st$nodes)))
+      return(list(ok = TRUE, message = "model set", n_nodes = nrow(st$nodes)))
+    }
+    if (identical(action, "open_data")) {
+      path <- as.character(smt_cmd_arg(args, "path", "")[[1]])
+      if (!nzchar(path) || !file.exists(path)) {
+        stop("open_data requires an existing path=…", call. = FALSE)
+      }
+      dat <- read_data_file(path, basename(path))
+      set_raw_data(dat, reset_prepare = TRUE)
+      last_data_file(path)
+      status(sprintf("Data opened via smt_cmd (%d × %d).", nrow(dat), ncol(dat)))
+      return(list(ok = TRUE, message = "data opened", nrow = nrow(dat), ncol = ncol(dat)))
+    }
+    if (identical(action, "add_node") || identical(action, "add_latent")) {
+      label <- as.character(smt_cmd_arg(args, "label", "Node")[[1]])
+      col <- smt_cmd_arg(args, "observed_column", NA_character_)
+      kind <- if (identical(action, "add_latent")) {
+        "latent"
+      } else {
+        as.character(smt_cmd_arg(args, "kind", "observed")[[1]])
+      }
+      st <- add_node(
+        state(),
+        label = label,
+        observed_column = if (is.null(col) || (length(col) == 1L && is.na(col))) {
+          NA_character_
+        } else {
+          as.character(col)[[1]]
+        },
+        kind = kind
+      )
+      state(st)
+      nid <- st$nodes$id[[nrow(st$nodes)]]
+      status(sprintf("Added node '%s' via smt_cmd.", label))
+      return(list(ok = TRUE, message = "node added", id = nid, label = label))
+    }
+    if (identical(action, "add_interaction")) {
+      st <- add_interaction_node(state())
+      state(clear_fit_results(st))
+      nid <- st$nodes$id[st$nodes$node_kind == "interaction"]
+      nid <- nid[[length(nid)]]
+      status("Added × node via smt_cmd.")
+      return(list(ok = TRUE, message = "interaction added", id = nid))
+    }
+    if (identical(action, "remove_node")) {
+      st <- state()
+      nid <- smt_cmd_resolve_node(st, smt_cmd_arg(args, "id", smt_cmd_arg(args, "node")))
+      if (is.na(nid)) stop("remove_node: unknown id/label.", call. = FALSE)
+      state(clear_fit_results(remove_node(st, nid)))
+      status(sprintf("Removed node '%s' via smt_cmd.", nid))
+      return(list(ok = TRUE, message = "node removed", id = nid))
+    }
+    if (identical(action, "add_edge")) {
+      st <- state()
+      from <- smt_cmd_resolve_node(st, smt_cmd_arg(args, "from"))
+      to <- smt_cmd_resolve_node(st, smt_cmd_arg(args, "to"))
+      if (is.na(from) || is.na(to)) stop("add_edge: unknown from/to.", call. = FALSE)
+      typ <- as.character(smt_cmd_arg(args, "type", "confirmatory")[[1]])
+      level <- smt_cmd_arg(args, "level", NA_character_)
+      to_port <- smt_cmd_arg(args, "to_port", NA_character_)
+      to_level <- smt_cmd_arg(args, "to_level", NA_character_)
+      before <- nrow(st$edges)
+      st <- add_edge(
+        st, from, to, type = typ,
+        level = if (is.null(level)) NA_character_ else as.character(level)[[1]],
+        to_port = if (is.null(to_port)) NA_character_ else as.character(to_port)[[1]],
+        to_level = if (is.null(to_level)) NA_character_ else as.character(to_level)[[1]]
+      )
+      if (nrow(st$edges) <= before) {
+        stop("add_edge: link not added (exists or invalid).", call. = FALSE)
+      }
+      state(clear_fit_results(st))
+      eid <- st$edges$id[[nrow(st$edges)]]
+      status(sprintf("Added edge %s → %s via smt_cmd.", from, to))
+      return(list(ok = TRUE, message = "edge added", id = eid, from = from, to = to))
+    }
+    if (identical(action, "remove_edge")) {
+      st <- state()
+      eid <- as.character(smt_cmd_arg(args, "id", "")[[1]])
+      if (!nzchar(eid) || !eid %in% st$edges$id) {
+        stop("remove_edge: unknown id=…", call. = FALSE)
+      }
+      st$edges <- st$edges[st$edges$id != eid, , drop = FALSE]
+      state(clear_fit_results(st))
+      status(sprintf("Removed edge '%s' via smt_cmd.", eid))
+      return(list(ok = TRUE, message = "edge removed", id = eid))
+    }
+    if (identical(action, "map_column")) {
+      st <- state()
+      nid <- smt_cmd_resolve_node(st, smt_cmd_arg(args, "id", smt_cmd_arg(args, "node")))
+      if (is.na(nid)) stop("map_column: unknown id/label.", call. = FALSE)
+      col <- smt_cmd_arg(args, "column", NA_character_)
+      if (is.null(col) || (length(col) == 1L && !nzchar(as.character(col)))) {
+        col <- NA_character_
+      } else {
+        col <- as.character(col)[[1]]
+      }
+      state(clear_fit_results(map_column_to_node(st, nid, col)))
+      status(sprintf("Mapped '%s' via smt_cmd.", nid))
+      return(list(ok = TRUE, message = "mapped", id = nid, column = col))
+    }
+    if (identical(action, "set_sim_var_kind")) {
+      st <- state()
+      nid <- smt_cmd_resolve_node(st, smt_cmd_arg(args, "id", smt_cmd_arg(args, "node")))
+      if (is.na(nid)) stop("set_sim_var_kind: unknown id/label.", call. = FALSE)
+      kind <- as.character(smt_cmd_arg(args, "kind", "continuous")[[1]])
+      st <- set_node_sim_var_kind(st, nid, kind)
+      levs <- smt_cmd_arg(args, "levels", NULL)
+      if (!is.null(levs)) {
+        levs <- as.character(unlist(levs, use.names = FALSE))
+        levs <- levs[nzchar(levs)]
+        if (length(levs)) {
+          st <- set_node_factor_coding(st, nid, base = levs[[1]], levels = levs, data = NULL)
+        }
+      }
+      state(st)
+      status(sprintf("Set %s sim kind=%s via smt_cmd.", nid, kind))
+      return(list(ok = TRUE, message = "sim kind set", id = nid, kind = kind))
+    }
+    if (identical(action, "set_node_sim")) {
+      st <- state()
+      nid <- smt_cmd_resolve_node(st, smt_cmd_arg(args, "id", smt_cmd_arg(args, "node")))
+      if (is.na(nid)) stop("set_node_sim: unknown id/label.", call. = FALSE)
+      if (!is.null(smt_cmd_arg(args, "mean", NULL)) || !is.null(smt_cmd_arg(args, "sd", NULL))) {
+        sp <- node_sim_params(st, nid)
+        mean <- as.numeric(smt_cmd_arg(args, "mean", sp$mean)[[1]])
+        sd <- as.numeric(smt_cmd_arg(args, "sd", sp$sd)[[1]])
+        st <- set_node_sim_exogenous(st, nid, mean = mean, sd = sd)
+      }
+      if (!is.null(smt_cmd_arg(args, "intercept", NULL))) {
+        st <- set_node_sim_intercept(
+          st, nid, intercept = as.numeric(smt_cmd_arg(args, "intercept")[[1]])
+        )
+      }
+      if (!is.null(smt_cmd_arg(args, "resid_sd", NULL))) {
+        st <- set_node_sim_resid_sd(
+          st, nid, resid_sd = as.numeric(smt_cmd_arg(args, "resid_sd")[[1]])
+        )
+      }
+      if (!is.null(smt_cmd_arg(args, "min", NULL)) || !is.null(smt_cmd_arg(args, "max", NULL))) {
+        sp <- node_sim_params(st, nid)
+        lo <- smt_cmd_arg(args, "min", sp$min)
+        hi <- smt_cmd_arg(args, "max", sp$max)
+        st <- set_node_sim_bounds(st, nid, min = lo, max = hi)
+      }
+      state(st)
+      sp <- node_sim_params(st, nid)
+      status(sprintf("Updated sim knobs on '%s' via smt_cmd.", nid))
+      return(list(
+        ok = TRUE, message = "node sim set", id = nid,
+        mean = sp$mean, sd = sp$sd, intercept = sp$intercept, resid_sd = sp$resid_sd
+      ))
+    }
+    if (identical(action, "set_edge_prior")) {
+      st <- state()
+      eid <- smt_cmd_resolve_edge(st, args)
+      if (is.na(eid)) stop("set_edge_prior: unknown id=… or from=/to=…", call. = FALSE)
+      mean <- as.numeric(smt_cmd_arg(args, "mean", 0)[[1]])
+      sd <- as.numeric(smt_cmd_arg(args, "sd", 1)[[1]])
+      family <- as.character(smt_cmd_arg(args, "family", "normal")[[1]])
+      st <- set_edge_prior(st, eid, mean = mean, sd = sd, family = family)
+      state(st)
+      sel_eid <- shiny::isolate(selected_structural_edge_id())
+      if (!is.null(sel_eid) && identical(sel_eid, eid)) {
+        skip_prior_writes_left(2L)
+        shiny::updateNumericInput(session, "prior_mean_selected", value = mean)
+        shiny::updateNumericInput(session, "prior_sd_selected", value = sd)
+        edge_plot_tick(shiny::isolate(edge_plot_tick()) + 1L)
+      }
+      status(sprintf("Updated prior on %s via smt_cmd.", eid))
+      return(list(ok = TRUE, message = "prior set", id = eid, mean = mean, sd = sd))
+    }
+    if (identical(action, "set_edge_rel_kind")) {
+      st <- state()
+      eid <- smt_cmd_resolve_edge(st, args)
+      if (is.na(eid)) stop("set_edge_rel_kind: unknown id=… or from=/to=…", call. = FALSE)
+      rk <- as.character(smt_cmd_arg(args, "rel_kind", "linear")[[1]])
+      state(set_edge_rel_kind(st, eid, rk))
+      return(list(ok = TRUE, message = "rel_kind set", id = eid, rel_kind = rk))
+    }
+    if (identical(action, "simulate")) {
+      n <- as.integer(smt_cmd_arg(args, "n", input$sim_n %||% 200)[[1]])
+      seed <- as.integer(smt_cmd_arg(args, "seed", input$sim_seed %||% 1)[[1]])
+      if (!is.finite(n) || n < 10L) stop("simulate: n must be ≥ 10.", call. = FALSE)
+      if (!is.finite(seed)) seed <- 1L
+      st <- ensure_edge_to_port(state())
+      st <- flush_sim_params_from_inputs(st)
+      st <- sync_sim_kinds_from_data(st, analysis_rv())
+      state(st)
+      sim <- simulate_path_data(st, n = n, seed = seed)
+      sim_data_rv(sim)
+      used_seed <- attr(sim, "sim_seed")
+      if (isTRUE(attr(sim, "sim_has_intra")) && "subject" %in% names(sim)) {
+        st <- enable_repeated_measures_for_intra_sim(st)
+        state(st)
+      }
+      run_fit_pipeline(
+        st, sim,
+        simulated = TRUE,
+        progress_message = "Simulating and fitting…",
+        sim_seed_used = used_seed
+      )
+      return(list(ok = TRUE, message = "simulate done", n = n, seed = used_seed %||% seed))
+    }
+    if (identical(action, "run")) {
+      dat <- analysis_rv()
+      if (is.null(dat) || !nrow(dat)) stop("run: no analysis data loaded.", call. = FALSE)
+      st <- ensure_edge_to_port(state())
+      st <- flush_sim_params_from_inputs(st)
+      st <- sync_sim_kinds_from_data(st, dat)
+      state(st)
+      run_fit_pipeline(st, dat, simulated = FALSE, progress_message = "Running analysis…")
+      return(list(ok = TRUE, message = "run done"))
+    }
+    stop("Unknown smt_cmd action: ", action, call. = FALSE)
+  }
+
+  # Steal command-bus ownership for the browser tab the user (or agent) is on.
+  shiny::observeEvent(session$clientData$url_pathname, {
+    root <- tryCatch(smt_cmd_root(), error = function(e) "")
+    if (!nzchar(root)) return()
+    smt_cmd_claim_owner(session$token, root = root)
+  }, ignoreNULL = FALSE, once = TRUE)
+
+  shiny::observe({
+    shiny::invalidateLater(400, session)
+    root <- tryCatch(smt_cmd_root(), error = function(e) "")
+    if (!nzchar(root)) return()
+    # Only the owning session consumes inbox commands (avoids split state).
+    if (!isTRUE(smt_cmd_am_owner(session$token, root = root, max_age_sec = 2))) {
+      return()
+    }
+    files <- smt_cmd_list_inbox(root)
+    if (!length(files)) return()
+    # One command per tick to keep the UI responsive
+    path <- files[[1]]
+    cmd <- smt_cmd_read_file(path)
+    unlink(path)
+    if (is.null(cmd) || is.null(cmd$id)) return()
+    id <- as.character(cmd$id)[[1]]
+    res <- tryCatch(
+      smt_cmd_dispatch(cmd),
+      error = function(e) list(ok = FALSE, message = conditionMessage(e))
+    )
+    if (is.null(res$ok)) res$ok <- TRUE
+    res$action <- as.character(cmd$action %||% "")
+    smt_cmd_write_result(id, res, root = root)
+    smt_debug("smt_cmd | action=", res$action, " ok=", isTRUE(res$ok), " id=", id)
+  })
 
   output$power_has_plot <- shiny::reactive({
     pw <- power_result_rv()
@@ -1832,12 +2438,7 @@ smt_server <- function(input, output, session) {
   output$data_table <- DT::renderDT({
     dat <- data_rv()
     shiny::req(dat)
-    DT::datatable(
-      dat,
-      rownames = FALSE,
-      options = list(pageLength = 15, scrollX = TRUE, dom = "tip"),
-      class = "compact stripe hover"
-    )
+    smt_browse_datatable(dat, page_length = 15L, max_chars = 24L)
   })
 
   output$status_msg <- shiny::renderUI({
@@ -1970,7 +2571,7 @@ smt_server <- function(input, output, session) {
     nid
   })
 
-  apply_factor_coding_from_inputs <- function() {
+  apply_factor_coding_from_inputs <- function(include_levels = FALSE) {
     if (!inspector_writes_allowed()) return()
     nid <- selected_factor_node_id()
     if (is.null(nid)) return()
@@ -1979,21 +2580,28 @@ smt_server <- function(input, output, session) {
     dat <- analysis_rv()
     base <- input$cat_factor_base %||% NA_character_
     ordered <- isTRUE(input$cat_factor_ordered)
-    lev_txt <- input$cat_factor_levels %||% ""
-    levels <- if (nzchar(trimws(lev_txt))) {
-      decode_factor_levels(lev_txt)
+    cur <- node_factor_coding(state(), nid)
+    coding <- variable_coding_for_node(state(), nid, dat)
+    # Level-order text commits only via Apply — keystrokes must not remount ports.
+    if (isTRUE(include_levels)) {
+      lev_txt <- input$cat_factor_levels %||% ""
+      levels <- if (nzchar(trimws(lev_txt))) {
+        decode_factor_levels(lev_txt)
+      } else {
+        character()
+      }
+    } else if (length(cur$levels)) {
+      levels <- cur$levels
     } else {
-      character()
+      levels <- coding$all_levels
     }
     # If order omitted, keep existing / data order with base first
     if (!length(levels)) {
-      coding <- variable_coding_for_node(state(), nid, dat)
       levels <- coding$all_levels
     }
     if (!is.na(base) && nzchar(base) && length(levels)) {
       levels <- c(base, setdiff(levels, base))
     }
-    cur <- node_factor_coding(state(), nid)
     same <- identical(as.character(cur$base %||% NA_character_), as.character(base %||% NA_character_)) &&
       identical(isTRUE(cur$ordered), ordered) &&
       identical(cur$levels, levels)
@@ -2008,16 +2616,16 @@ smt_server <- function(input, output, session) {
   }
 
   shiny::observeEvent(input$cat_factor_base, {
-    apply_factor_coding_from_inputs()
+    apply_factor_coding_from_inputs(include_levels = FALSE)
   }, ignoreInit = TRUE, ignoreNULL = TRUE)
 
   shiny::observeEvent(input$cat_factor_ordered, {
-    apply_factor_coding_from_inputs()
+    apply_factor_coding_from_inputs(include_levels = FALSE)
   }, ignoreInit = TRUE)
 
-  shiny::observeEvent(input$cat_factor_levels, {
-    apply_factor_coding_from_inputs()
-  }, ignoreInit = TRUE, ignoreNULL = TRUE)
+  shiny::observeEvent(input$apply_cat_factor_levels, {
+    apply_factor_coding_from_inputs(include_levels = TRUE)
+  }, ignoreInit = TRUE)
 
   node_mapping_inspector_ui <- function(st, dat, nid) {
     if (is.null(nid) || is_interaction_node(st, nid)) return(NULL)
@@ -2133,12 +2741,20 @@ smt_server <- function(input, output, session) {
         })
       }
       levels_ui <- if (unmapped) {
-        shiny::textAreaInput(
-          "sim_factor_levels",
-          "Levels (one per line; first = reference)",
-          value = encode_factor_levels(levs),
-          rows = max(3L, length(levs)),
-          width = "100%"
+        shiny::tagList(
+          shiny::textAreaInput(
+            "sim_factor_levels",
+            "Levels (one per line; first = reference)",
+            value = encode_factor_levels(levs),
+            rows = max(3L, length(levs)),
+            width = "100%"
+          ),
+          shiny::actionButton(
+            "apply_sim_factor_levels",
+            "Apply levels",
+            class = "btn-sm btn-default"
+          ),
+          shiny::helpText("Canvas ports update when you Apply (not while typing).")
         )
       } else {
         NULL
@@ -2185,11 +2801,26 @@ smt_server <- function(input, output, session) {
           min = 0.01,
           step = 0.1,
           width = "100%"
+        ),
+        shiny::numericInput(
+          "sim_exog_min",
+          "Min (optional)",
+          value = if (is.finite(sp$min)) sp$min else NA,
+          step = 0.1,
+          width = "100%"
+        ),
+        shiny::numericInput(
+          "sim_exog_max",
+          "Max (optional)",
+          value = if (is.finite(sp$max)) sp$max else NA,
+          step = 0.1,
+          width = "100%"
         )
       ),
       shiny::helpText(
         "Generative Normal(mean, SD) when simulating this exogenous continuous ",
-        "variable. Defaults 0 / 1. Ignored by frequentist Run."
+        "variable. Draws outside Min/Max are clamped. Leave Min/Max blank for ",
+        "no bound. Defaults 0 / 1. Ignored by frequentist Run."
       )
     )
   }
@@ -2197,43 +2828,144 @@ smt_server <- function(input, output, session) {
   node_sim_resid_ui <- function(st, nid) {
     if (is.null(nid)) return(NULL)
     if (!nid %in% structural_dv_ids(st)) return(NULL)
+    st <- ensure_node_sim_columns(st)
     sp <- node_sim_params(st, nid)
-    shiny::tagList(
-      shiny::h4("Simulation (residual)"),
-      shiny::numericInput(
-        "sim_resid_sd",
-        "Residual SD (\u03b5)",
-        value = sp$resid_sd,
-        min = 0.01,
-        step = 0.1,
-        width = "100%"
-      ),
-      shiny::helpText(
-        "Residual noise SD for this structural DV when simulating ",
-        "(same scale as the outcome; propagates to later nodes). Default 1. ",
-        "Ignored by frequentist Run."
+    unmapped <- node_is_unmapped_observed(st, nid) || is_latent_node(st, nid)
+    declared <- st$nodes$sim_var_kind[match(nid, st$nodes$id)]
+    if (is.na(declared) || !nzchar(declared)) declared <- "continuous"
+    kind <- node_sim_var_kind(st, nid, data = analysis_rv())
+
+    type_ui <- if (unmapped) {
+      shiny::tagList(
+        shiny::radioButtons(
+          "sim_var_kind",
+          "Variable type",
+          choices = c(
+            Continuous = "continuous",
+            Categorical = "categorical",
+            Binary = "binary"
+          ),
+          selected = declared,
+          inline = TRUE
+        ),
+        if (kind %in% c("categorical", "binary")) {
+          levs <- node_sim_factor_levels(st, nid, data = NULL)
+          shiny::tagList(
+            shiny::textAreaInput(
+              "sim_factor_levels",
+              "Levels (one per line; first = reference)",
+              value = encode_factor_levels(levs),
+              rows = max(2L, length(levs)),
+              width = "100%"
+            ),
+            shiny::actionButton(
+              "apply_sim_factor_levels",
+              "Apply levels",
+              class = "btn-sm btn-default"
+            ),
+            shiny::helpText("Canvas ports update when you Apply (not while typing).")
+          )
+        },
+        shiny::helpText(
+          "Sets the canvas engine (lm vs glm · binomial) and how Simulate draws ",
+          "this outcome. Binary uses a logistic / Bernoulli draw (intercept on the ",
+          "logit scale); residual SD is ignored."
+        )
       )
+    } else {
+      shiny::helpText(sprintf("Type from mapped data: %s.", kind))
+    }
+
+    cont_params <- if (identical(kind, "binary")) {
+      shiny::tagList(
+        shiny::numericInput(
+          "sim_dv_intercept",
+          "Intercept (logit)",
+          value = if (is.finite(sp$intercept)) sp$intercept else 0,
+          step = 0.1,
+          width = "100%"
+        ),
+        shiny::helpText(
+          "Baseline logit when predictors are at reference / centered 0. ",
+          "Simulate draws Bernoulli outcomes; Residual SD and Min/Max are unused."
+        )
+      )
+    } else if (identical(kind, "categorical")) {
+      shiny::helpText(
+        "Categorical outcomes are not simulated yet. Use Binary (logistic) or ",
+        "Continuous, or map a data column and Run."
+      )
+    } else {
+      shiny::tagList(
+        shiny::numericInput(
+          "sim_dv_intercept",
+          "Intercept",
+          value = if (is.finite(sp$intercept)) sp$intercept else 0,
+          step = 0.1,
+          width = "100%"
+        ),
+        shiny::numericInput(
+          "sim_resid_sd",
+          "Residual SD (\u03b5)",
+          value = sp$resid_sd,
+          min = 0.01,
+          step = 0.1,
+          width = "100%"
+        ),
+        shiny::numericInput(
+          "sim_dv_min",
+          "Min (optional)",
+          value = if (is.finite(sp$min)) sp$min else NA,
+          step = 0.1,
+          width = "100%"
+        ),
+        shiny::numericInput(
+          "sim_dv_max",
+          "Max (optional)",
+          value = if (is.finite(sp$max)) sp$max else NA,
+          step = 0.1,
+          width = "100%"
+        ),
+        shiny::helpText(
+          "Intercept is the baseline outcome mean when predictors are at reference ",
+          "(factors) or centered 0 (continuous). Residual SD adds noise on the same ",
+          "scale; outcomes outside Min/Max are clamped. Defaults intercept 0, resid 1. ",
+          "Ignored by frequentist Run."
+        )
+      )
+    }
+
+    shiny::tagList(
+      shiny::h4("Simulation (outcome)"),
+      type_ui,
+      cont_params
     )
   }
 
-  apply_sim_exogenous_from_inputs <- function() {
+  apply_sim_exogenous_from_inputs <- function(apply_levels = FALSE) {
     if (!inspector_writes_allowed()) return()
     nid <- selected_node_id()
     if (is.null(nid)) return()
     st0 <- ensure_node_sim_columns(state())
-    if (!node_is_structural_exogenous(st0, nid)) return()
+    # Kind/levels apply to unmapped DVs too (same sim_var_kind control)
+    is_exog <- node_is_structural_exogenous(st0, nid)
+    is_dv <- nid %in% structural_dv_ids(st0)
+    if (!is_exog && !is_dv) return()
     kind0 <- node_sim_var_kind(st0, nid, data = analysis_rv())
     lev0 <- node_sim_factor_levels(st0, nid, data = analysis_rv())
-    dm0 <- node_sim_design_mode(st0, nid)
-    st1 <- flush_sim_params_from_inputs(st0)
+    dm0 <- if (is_exog) node_sim_design_mode(st0, nid) else NA_character_
+    st1 <- flush_sim_params_from_inputs(st0, apply_levels = apply_levels)
     kind1 <- node_sim_var_kind(st1, nid, data = analysis_rv())
     lev1 <- node_sim_factor_levels(st1, nid, data = analysis_rv())
-    dm1 <- node_sim_design_mode(st1, nid)
+    dm1 <- if (is_exog) node_sim_design_mode(st1, nid) else NA_character_
     # Kind/level/design changes alter canvas ports/badges — never skip that redraw.
     visual_changed <- !identical(kind0, kind1) || !identical(lev0, lev1) ||
       !identical(dm0, dm1)
     if (!visual_changed) skip_graph_render(TRUE)
     state(st1)
+    if (isTRUE(apply_levels) && visual_changed) {
+      status("Levels applied.")
+    }
   }
 
   apply_sim_resid_from_inputs <- function() {
@@ -2241,12 +2973,50 @@ smt_server <- function(input, output, session) {
     dv <- selected_dv_id()
     if (is.null(dv)) return()
     st0 <- ensure_node_sim_columns(state())
-    s <- input$sim_resid_sd
-    if (is.null(s) || length(s) != 1L || is.na(s)) return()
     cur <- node_sim_params(st0, dv)
-    if (isTRUE(all.equal(cur$resid_sd, as.numeric(s), tolerance = 1e-9))) return()
+    st1 <- st0
+    changed <- FALSE
+    icept <- input$sim_dv_intercept
+    if (!is.null(icept) && length(icept) == 1L && is.finite(icept) &&
+          !isTRUE(all.equal(cur$intercept, as.numeric(icept), tolerance = 1e-9))) {
+      st1 <- set_node_sim_intercept(st1, dv, intercept = icept)
+      changed <- TRUE
+    }
+    s <- input$sim_resid_sd
+    if (!is.null(s) && length(s) == 1L && is.finite(s) && s > 0 &&
+          !isTRUE(all.equal(cur$resid_sd, as.numeric(s), tolerance = 1e-9))) {
+      st1 <- set_node_sim_resid_sd(st1, dv, resid_sd = s)
+      changed <- TRUE
+    }
+    lo <- input$sim_dv_min
+    hi <- input$sim_dv_max
+    if (!is.null(lo) || !is.null(hi)) {
+      lo_v <- if (is.null(lo) || length(lo) != 1L || is.na(lo) || !is.finite(lo)) {
+        NA_real_
+      } else {
+        as.numeric(lo)
+      }
+      hi_v <- if (is.null(hi) || length(hi) != 1L || is.na(hi) || !is.finite(hi)) {
+        NA_real_
+      } else {
+        as.numeric(hi)
+      }
+      if (is.null(lo)) lo_v <- cur$min
+      if (is.null(hi)) hi_v <- cur$max
+      same_lo <- (is.na(cur$min) && is.na(lo_v)) ||
+        (is.finite(cur$min) && is.finite(lo_v) &&
+           isTRUE(all.equal(cur$min, lo_v, tolerance = 1e-9)))
+      same_hi <- (is.na(cur$max) && is.na(hi_v)) ||
+        (is.finite(cur$max) && is.finite(hi_v) &&
+           isTRUE(all.equal(cur$max, hi_v, tolerance = 1e-9)))
+      if (!same_lo || !same_hi) {
+        st1 <- set_node_sim_bounds(st1, dv, min = lo_v, max = hi_v)
+        changed <- TRUE
+      }
+    }
+    if (!changed) return()
     skip_graph_render(TRUE)
-    state(set_node_sim_resid_sd(st0, dv, resid_sd = s))
+    state(st1)
   }
 
   shiny::observeEvent(input$sim_exog_mean, {
@@ -2255,14 +3025,20 @@ smt_server <- function(input, output, session) {
   shiny::observeEvent(input$sim_exog_sd, {
     apply_sim_exogenous_from_inputs()
   }, ignoreInit = TRUE, ignoreNULL = TRUE)
+  shiny::observeEvent(input$sim_exog_min, {
+    apply_sim_exogenous_from_inputs()
+  }, ignoreInit = TRUE, ignoreNULL = FALSE)
+  shiny::observeEvent(input$sim_exog_max, {
+    apply_sim_exogenous_from_inputs()
+  }, ignoreInit = TRUE, ignoreNULL = FALSE)
   shiny::observeEvent(input$sim_var_kind, {
-    apply_sim_exogenous_from_inputs()
+    apply_sim_exogenous_from_inputs(apply_levels = FALSE)
   }, ignoreInit = TRUE, ignoreNULL = TRUE)
-  shiny::observeEvent(input$sim_factor_levels, {
-    apply_sim_exogenous_from_inputs()
-  }, ignoreInit = TRUE, ignoreNULL = TRUE)
+  shiny::observeEvent(input$apply_sim_factor_levels, {
+    apply_sim_exogenous_from_inputs(apply_levels = TRUE)
+  }, ignoreInit = TRUE)
   shiny::observeEvent(input$sim_design_mode, {
-    apply_sim_exogenous_from_inputs()
+    apply_sim_exogenous_from_inputs(apply_levels = FALSE)
   }, ignoreInit = TRUE, ignoreNULL = TRUE)
   shiny::observeEvent(input$sim_alloc_mode, {
     apply_sim_exogenous_from_inputs()
@@ -2278,9 +3054,18 @@ smt_server <- function(input, output, session) {
       }, ignoreInit = TRUE, ignoreNULL = TRUE)
     })
   })
+  shiny::observeEvent(input$sim_dv_intercept, {
+    apply_sim_resid_from_inputs()
+  }, ignoreInit = TRUE, ignoreNULL = TRUE)
   shiny::observeEvent(input$sim_resid_sd, {
     apply_sim_resid_from_inputs()
   }, ignoreInit = TRUE, ignoreNULL = TRUE)
+  shiny::observeEvent(input$sim_dv_min, {
+    apply_sim_resid_from_inputs()
+  }, ignoreInit = TRUE, ignoreNULL = FALSE)
+  shiny::observeEvent(input$sim_dv_max, {
+    apply_sim_resid_from_inputs()
+  }, ignoreInit = TRUE, ignoreNULL = FALSE)
 
   shiny::observeEvent(input$inspector_map_column, {
     if (!inspector_writes_allowed()) return()
@@ -2339,9 +3124,15 @@ smt_server <- function(input, output, session) {
           rows = min(8L, max(3L, length(levs))),
           width = "100%"
         ),
+        shiny::actionButton(
+          "apply_cat_factor_levels",
+          "Apply level order",
+          class = "btn-sm btn-default"
+        ),
         shiny::helpText(
-          "Top to bottom = factor order. The base level is moved first for contrasts ",
-          "when you pick it above. Split ports follow non-base levels in this order."
+          "Top to bottom = factor order. Press Apply to commit — the canvas does not ",
+          "update while typing. The base level is moved first for contrasts when you ",
+          "pick it above. Split ports follow non-base levels in this order."
         )
       ),
       if (!isTRUE(meta$ordered)) {
@@ -2383,7 +3174,7 @@ smt_server <- function(input, output, session) {
         y_kind <- if (!is.null(dat) && !is.na(col) && nzchar(col) && col %in% names(dat)) {
           classify_variable(dat[[col]])
         } else {
-          "continuous"
+          node_sim_var_kind(st, dv, data = NULL)
         }
         can_transform <- identical(y_kind, "continuous") && !isTRUE(latents)
         eq_html <- NULL
@@ -2416,9 +3207,23 @@ smt_server <- function(input, output, session) {
               shiny::helpText("Outcome transforms apply to continuous DVs only.")
             },
             if (latents) {
+              meth <- shiny::isolate({
+                normalize_latent_score_method(
+                  last_result()$latent_score_method %||%
+                    input$latent_score_method %||% "own",
+                  st
+                )
+              })
+              score_txt <- if (identical(meth, "joint")) {
+                "joint Thomson/regression scores from the multi-factor CFA"
+              } else {
+                "scores from each latent's own indicators only"
+              }
               shiny::helpText(
-                "Latents: measurement links build factor scores first, then structural ",
-                "links use the usual path engine (lm/glm, AIC/BIC, split logistic)."
+                "Latents: confirmatory CFA (no rotation) for loadings on the canvas; ",
+                "path stage uses ", score_txt, " (Analysis → Latent scores when ≥2 latents). ",
+                "Structural links then use the usual path engine (lm/glm, AIC/BIC, ",
+                "split logistic). Score weights appear in Model fit after analysis."
               )
             },
             shiny::tagList(

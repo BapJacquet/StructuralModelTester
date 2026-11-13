@@ -20,21 +20,28 @@ fit_pvalue_model <- function(state, data, alpha = 0.05, mark_nonsig = TRUE,
                              conf_adjust = c("none", "bonferroni", "holm", "BH"),
                              uncertainty = c("none", "bootstrap", "plausible"),
                              uncertainty_draws = NULL,
-                             uncertainty_progress = NULL) {
+                             uncertainty_progress = NULL,
+                             latent_score_method = "own") {
   uncertainty <- match.arg(uncertainty)
   conf_adjust <- match.arg(conf_adjust)
+  latent_score_method <- normalize_latent_score_method(latent_score_method, state)
   edge_ids <- analyzable_edge_ids(state)
   # Still mark definitional wires as included (no coefficients)
   all_display_ids <- unique(c(edge_ids, state$edges$id[
     state$edges$type == "definitional" |
       vapply(state$edges$to, function(id) is_interaction_node(state, id), logical(1))
   ]))
-  fitted <- fit_structural_model(state, data, include_edge_ids = edge_ids)
+  fitted <- fit_structural_model(
+    state, data,
+    include_edge_ids = edge_ids,
+    latent_score_method = latent_score_method
+  )
   fitted <- apply_postselection_uncertainty(
     state, data, edge_ids, fitted,
     method = uncertainty,
     draws = uncertainty_draws,
-    progress = uncertainty_progress
+    progress = uncertainty_progress,
+    latent_score_method = latent_score_method
   )
   state2 <- apply_estimates_to_edges(state, fitted$estimates, included_edge_ids = all_display_ids)
   state2 <- apply_r_squared_to_nodes(state2, fitted$r_squared)
@@ -70,7 +77,12 @@ fit_pvalue_model <- function(state, data, alpha = 0.05, mark_nonsig = TRUE,
     comparison = NULL,
     engine = fitted$engine,
     uncertainty = fitted$uncertainty %||% list(method = "none"),
-    conf_adjust = conf_adjust
+    conf_adjust = conf_adjust,
+    two_step = isTRUE(fitted$two_step),
+    measurement_fit = fitted$measurement_fit,
+    measurement_score_weights = fitted$measurement_score_weights,
+    measurement_score_fits = fitted$measurement_score_fits,
+    latent_score_method = fitted$latent_score_method %||% latent_score_method
   )
 }
 
@@ -137,59 +149,286 @@ extract_fit_measures <- function(fit) {
   )
 }
 
-#' Pretty predictor name as HTML (ecole__B → ecole[B]; x_p2 → x<sup>2</sup>)
+#' Shortest unique prefixes for a set of labels (first letters only as needed)
 #' @keywords internal
-pretty_term_html <- function(name, level = NULL) {
-  if (identical(name, "(Intercept)")) return(NULL)
-  if (!is.null(level) && is_poly_level(level)) {
-    deg <- sub("^\\^", "", as.character(level))
-    return(sprintf("%s<sup>%s</sup>", htmltools::htmlEscape(name), htmltools::htmlEscape(deg)))
+shortest_unique_prefixes <- function(labels) {
+  labels <- as.character(labels)
+  labels <- labels[!is.na(labels) & nzchar(labels)]
+  labs <- unique(labels)
+  if (!length(labs)) return(character())
+  n <- length(labs)
+  abbr <- labs
+  for (i in seq_len(n)) {
+    nm <- labs[[i]]
+    nchar_nm <- nchar(nm, type = "chars")
+    if (!nchar_nm) next
+    for (L in seq_len(nchar_nm)) {
+      cand <- substr(nm, 1L, L)
+      clash <- FALSE
+      for (j in seq_len(n)[-i]) {
+        other <- labs[[j]]
+        opref <- substr(other, 1L, min(L, nchar(other, type = "chars")))
+        if (identical(opref, cand)) {
+          clash <- TRUE
+          break
+        }
+      }
+      if (!clash) {
+        abbr[[i]] <- cand
+        break
+      }
+    }
+  }
+  stats::setNames(abbr, labs)
+}
+
+#' Base identifier for equation abbreviation (strip poly / dummy suffixes)
+#' @keywords internal
+equation_term_base <- function(name) {
+  name <- as.character(name)
+  if (!nzchar(name) || identical(name, "(Intercept)")) return(name)
+  if (grepl("__", name, fixed = TRUE)) {
+    return(strsplit(name, "__", fixed = TRUE)[[1]][[1]])
   }
   if (grepl("_p[0-9]+$", name)) {
-    base <- sub("_p[0-9]+$", "", name)
+    return(sub("_p[0-9]+$", "", name))
+  }
+  name
+}
+
+#' Core variable name inside an LHS display label (strip transforms / [level])
+#' @keywords internal
+equation_lhs_core <- function(yname) {
+  y <- as.character(yname)
+  if (!nzchar(y)) return(y)
+  m <- regexec("^(log10|log1p|log|sqrt)\\((.*)\\)$", y, perl = TRUE)
+  hit <- regmatches(y, m)[[1]]
+  if (length(hit) >= 3L) y <- hit[[3]]
+  sub("\\[[^\\]]*\\]$", "", y, perl = TRUE)
+}
+
+#' Apply unique-prefix abbreviation inside an LHS display label
+#' @keywords internal
+abbreviate_lhs_display <- function(yname, abbrev_map = NULL) {
+  y <- as.character(yname)
+  if (is.null(abbrev_map) || !length(abbrev_map) || !nzchar(y)) return(y)
+  core <- equation_lhs_core(y)
+  abbr <- if (core %in% names(abbrev_map)) {
+    unname(abbrev_map[[core]])
+  } else {
+    core
+  }
+  if (identical(y, core)) return(abbr)
+  # Preserve transform / [level] wrappers around the abbreviated core
+  if (startsWith(y, paste0(core, "[")) && endsWith(y, "]")) {
+    return(paste0(abbr, substring(y, nchar(core) + 1L)))
+  }
+  m <- regexec("^(log10|log1p|log|sqrt)\\((.*)\\)$", y, perl = TRUE)
+  hit <- regmatches(y, m)[[1]]
+  if (length(hit) >= 3L) {
+    inner <- abbreviate_lhs_display(hit[[3]], abbrev_map)
+    return(paste0(hit[[2]], "(", inner, ")"))
+  }
+  # Fallback: replace first occurrence of core
+  sub(core, abbr, y, fixed = TRUE)
+}
+
+#' Shortest unique prefixes for all equation variable labels in a fit
+#'
+#' Interaction display labels (`Voice×Surprising`) are excluded: they embed
+#' factor names and would otherwise block those factors from abbreviating.
+#' @keywords internal
+equation_abbrev_map <- function(result = NULL, state = NULL) {
+  labs <- character()
+  if (!is.null(state) && NROW(state$nodes)) {
+    for (i in seq_len(nrow(state$nodes))) {
+      id <- state$nodes$id[[i]]
+      if (is_interaction_node(state, id)) {
+        labs <- c(labs, tryCatch(lavaan_var_name(state, id), error = function(e) id))
+        next
+      }
+      labs <- c(labs, node_display_name(state, id))
+      labs <- c(labs, tryCatch(lavaan_var_name(state, id), error = function(e) NA_character_))
+    }
+  }
+  est <- if (!is.null(result)) result$estimates else NULL
+  if (is.null(est) && !is.null(result)) est <- result$best_estimates
+  if (!is.null(est) && NROW(est)) {
+    if ("rhs" %in% names(est)) {
+      labs <- c(labs, vapply(as.character(est$rhs), equation_term_base, character(1)))
+    }
+    if ("lhs" %in% names(est)) {
+      labs <- c(labs, vapply(as.character(est$lhs), equation_lhs_core, character(1)))
+    }
+  }
+  labs <- labs[!is.na(labs) & nzchar(labs) & labs != "(Intercept)"]
+  # Drop compound A×B labels if any leaked in from estimates / legacy state
+  labs <- labs[!grepl("\u00D7", labs, fixed = TRUE)]
+  labs <- unique(labs)
+  shortest_unique_prefixes(labs)
+}
+
+#' Apply unique-prefix map to a term base name
+#' @keywords internal
+abbreviate_term_base <- function(name, abbrev_map = NULL) {
+  if (is.null(abbrev_map) || !length(abbrev_map)) return(as.character(name))
+  base <- equation_term_base(name)
+  if (base %in% names(abbrev_map)) return(unname(abbrev_map[[base]]))
+  if (name %in% names(abbrev_map)) return(unname(abbrev_map[[name]]))
+  as.character(name)
+}
+
+#' Resolve estimate/coef name to an interaction node id, if any
+#' @keywords internal
+resolve_interaction_node_id <- function(state, name) {
+  if (is.null(state) || !NROW(state$nodes)) return(NA_character_)
+  base <- equation_term_base(name)
+  if (!nzchar(base) || identical(base, "(Intercept)")) return(NA_character_)
+  for (i in seq_len(nrow(state$nodes))) {
+    id <- state$nodes$id[[i]]
+    if (!is_interaction_node(state, id)) next
+    ix_nm <- tryCatch(lavaan_var_name(state, id), error = function(e) id)
+    if (identical(base, id) || identical(base, ix_nm) ||
+          identical(base, sanitize_id(id)) || identical(base, sanitize_id(ix_nm))) {
+      return(id)
+    }
+  }
+  NA_character_
+}
+
+#' Abbreviated A×B HTML for an interaction term
+#' @keywords internal
+pretty_interaction_term_html <- function(state, ix_id, level = NULL,
+                                         abbrev_map = NULL) {
+  fac <- interaction_factors(state, ix_id)
+  a_nm <- if (!is.na(fac$a) && nzchar(fac$a)) {
+    node_display_name(state, fac$a)
+  } else {
+    "?"
+  }
+  b_nm <- if (!is.na(fac$b) && nzchar(fac$b)) {
+    node_display_name(state, fac$b)
+  } else {
+    "?"
+  }
+  a_abbr <- abbreviate_term_base(a_nm, abbrev_map)
+  b_abbr <- abbreviate_term_base(b_nm, abbrev_map)
+  lv_a <- fac$level_a
+  lv_b <- fac$level_b
+  if (!is.null(level) && !is.na(level) && nzchar(as.character(level)) &&
+        !is_poly_level(level)) {
+    lv <- as.character(level)
+    if (grepl("\u00D7", lv, fixed = TRUE)) {
+      parts <- strsplit(lv, "\u00D7", fixed = TRUE)[[1]]
+      if (length(parts) >= 2L) {
+        lv_a <- parts[[1]]
+        lv_b <- paste(parts[-1], collapse = "\u00D7")
+      }
+    } else if (is.na(lv_a) && is.na(lv_b)) {
+      # Single level tag with no wiring levels: keep on the product as [lv]
+      return(sprintf(
+        "%s\u00D7%s[%s]",
+        htmltools::htmlEscape(a_abbr),
+        htmltools::htmlEscape(b_abbr),
+        htmltools::htmlEscape(lv)
+      ))
+    }
+  }
+  fmt_side <- function(abbr, lv) {
+    if (!is.null(lv) && !is.na(lv) && nzchar(as.character(lv))) {
+      sprintf(
+        "%s[%s]",
+        htmltools::htmlEscape(abbr),
+        htmltools::htmlEscape(as.character(lv))
+      )
+    } else {
+      htmltools::htmlEscape(abbr)
+    }
+  }
+  paste0(fmt_side(a_abbr, lv_a), "\u00D7", fmt_side(b_abbr, lv_b))
+}
+
+#' Pretty predictor name as HTML (ecole__B → ecole[B]; x_p2 → x<sup>2</sup>)
+#' @keywords internal
+pretty_term_html <- function(name, level = NULL, abbrev_map = NULL,
+                             state = NULL) {
+  if (identical(name, "(Intercept)")) return(NULL)
+  ix_id <- resolve_interaction_node_id(state, name)
+  if (!is.na(ix_id)) {
+    return(pretty_interaction_term_html(
+      state, ix_id, level = level, abbrev_map = abbrev_map
+    ))
+  }
+  base_disp <- abbreviate_term_base(name, abbrev_map)
+  if (!is.null(level) && is_poly_level(level)) {
+    deg <- sub("^\\^", "", as.character(level))
+    return(sprintf(
+      "%s<sup>%s</sup>",
+      htmltools::htmlEscape(base_disp),
+      htmltools::htmlEscape(deg)
+    ))
+  }
+  if (grepl("_p[0-9]+$", name)) {
     deg <- sub("^.*_p", "", name)
-    return(sprintf("%s<sup>%s</sup>", htmltools::htmlEscape(base), htmltools::htmlEscape(deg)))
+    return(sprintf(
+      "%s<sup>%s</sup>",
+      htmltools::htmlEscape(base_disp),
+      htmltools::htmlEscape(deg)
+    ))
   }
   if (grepl("__", name, fixed = TRUE)) {
     parts <- strsplit(name, "__", fixed = TRUE)[[1]]
     return(sprintf(
       "%s[%s]",
-      htmltools::htmlEscape(parts[[1]]),
+      htmltools::htmlEscape(base_disp),
       htmltools::htmlEscape(paste(parts[-1], collapse = "__"))
     ))
   }
   if (!is.null(level) && !is.na(level) && nzchar(as.character(level))) {
     return(sprintf(
       "%s[%s]",
-      htmltools::htmlEscape(name),
+      htmltools::htmlEscape(base_disp),
       htmltools::htmlEscape(as.character(level))
     ))
   }
-  htmltools::htmlEscape(name)
+  htmltools::htmlEscape(base_disp)
 }
 
-#' Format one coefficient with 95% CI as superscript brackets
+#' Format one coefficient with ±SE as superscript
 #' @keywords internal
-format_est_ci_html <- function(est, lo, hi, digits = 2) {
+format_est_se_html <- function(est, se, digits = 2) {
+  est_txt <- formatC(est, digits = digits, format = "f")
+  if (!is.finite(se)) return(est_txt)
   sprintf(
-    "%s<sup class=\"smt-ci\">[%s, %s]</sup>",
-    formatC(est, digits = digits, format = "f"),
-    formatC(lo, digits = digits, format = "f"),
-    formatC(hi, digits = digits, format = "f")
+    "%s<sup class=\"smt-ci\">&plusmn;%s</sup>",
+    est_txt,
+    formatC(se, digits = digits, format = "f")
   )
 }
 
-#' Linear predictor HTML from coefficients + Wald CIs
 #' @keywords internal
-format_linear_predictor_html <- function(cf, ci, digits = 2) {
+format_est_ci_html <- function(est, lo, hi, digits = 2) {
+  # Legacy name: CI args ignored; prefer format_est_se_html.
+  # Kept so older call sites that pass (est, lo, hi) still compile if missed.
+  se <- if (is.finite(lo) && is.finite(hi)) (hi - lo) / (2 * 1.96) else NA_real_
+  format_est_se_html(est, se, digits = digits)
+}
+
+#' Linear predictor HTML from coefficients + SEs
+#' @keywords internal
+format_linear_predictor_html <- function(cf, se = NULL, digits = 2,
+                                         abbrev_map = NULL, state = NULL) {
   parts <- character()
   for (i in seq_along(cf)) {
     nm <- names(cf)[[i]]
     est <- unname(cf[[i]])
-    lo <- if (is.matrix(ci) && nm %in% rownames(ci)) unname(ci[nm, 1]) else est
-    hi <- if (is.matrix(ci) && nm %in% rownames(ci)) unname(ci[nm, 2]) else est
-    piece <- format_est_ci_html(est, lo, hi, digits = digits)
-    term <- pretty_term_html(nm)
+    se_i <- if (!is.null(se) && nm %in% names(se)) {
+      unname(se[[nm]])
+    } else {
+      NA_real_
+    }
+    piece <- format_est_se_html(est, se_i, digits = digits)
+    term <- pretty_term_html(nm, abbrev_map = abbrev_map, state = state)
     body <- if (is.null(term)) piece else paste0(piece, "&middot;", term)
     if (i == 1L) {
       parts <- c(parts, body)
@@ -202,7 +441,8 @@ format_linear_predictor_html <- function(cf, ci, digits = 2) {
 
 #' Linear predictor HTML from estimate rows (includes poly levels)
 #' @keywords internal
-format_eta_from_estimates <- function(est_rows, digits = 2) {
+format_eta_from_estimates <- function(est_rows, digits = 2, abbrev_map = NULL,
+                                      state = NULL) {
   if (is.null(est_rows) || !nrow(est_rows)) return("")
   # Skip omnibus rows (no single coefficient in the linear predictor)
   if ("kind" %in% names(est_rows)) {
@@ -214,11 +454,11 @@ format_eta_from_estimates <- function(est_rows, digits = 2) {
   for (i in seq_len(nrow(est_rows))) {
     est <- as.numeric(est_rows$est[i])
     se <- as.numeric(est_rows$se[i])
-    lo <- est - 1.96 * se
-    hi <- est + 1.96 * se
-    piece <- format_est_ci_html(est, lo, hi, digits = digits)
+    piece <- format_est_se_html(est, se, digits = digits)
     lv <- if ("level" %in% names(est_rows)) est_rows$level[i] else NA_character_
-    term <- pretty_term_html(est_rows$rhs[i], level = lv)
+    term <- pretty_term_html(
+      est_rows$rhs[i], level = lv, abbrev_map = abbrev_map, state = state
+    )
     body <- if (is.null(term)) piece else paste0(piece, "&middot;", term)
     parts <- c(parts, if (!length(parts)) body else paste0(" + ", body))
   }
@@ -319,13 +559,132 @@ equation_link_wrapper <- function(fit, yname) {
   )
 }
 
+#' Map a lavaan variable name back to a node display label
+#' @keywords internal
+display_name_from_lavaan <- function(state, lavaan_nm, abbrev_map = NULL) {
+  lavaan_nm <- as.character(lavaan_nm)
+  if (!nzchar(lavaan_nm)) return(lavaan_nm)
+  lab <- lavaan_nm
+  if (!is.null(state) && NROW(state$nodes)) {
+    for (i in seq_len(nrow(state$nodes))) {
+      id <- state$nodes$id[[i]]
+      nm <- tryCatch(lavaan_var_name(state, id), error = function(e) NA_character_)
+      if (identical(nm, lavaan_nm)) {
+        lab <- node_display_name(state, id)
+        break
+      }
+    }
+  }
+  abbreviate_lhs_display(lab, abbrev_map)
+}
+
+#' HTML for path-stage factor-score equations (measurement)
+#'
+#' Shows the regression / Thomson score weights actually used in the path
+#' stage. CFA loadings stay on the canvas, not in Model fit.
+#' @keywords internal
+format_measurement_equations_html <- function(result, state = NULL,
+                                              abbrev_map = NULL) {
+  if (is.null(result)) return(NULL)
+  if (is.null(abbrev_map)) abbrev_map <- equation_abbrev_map(result, state)
+
+  # Score projection weights used in the path stage
+  score_method <- normalize_latent_score_method(
+    result$latent_score_method %||% "own",
+    state
+  )
+  score_tag <- if (identical(score_method, "joint")) {
+    "joint Thomson"
+  } else {
+    "own indicators"
+  }
+  score_blocks <- character()
+  w_list <- result$measurement_score_weights
+  if (is.null(w_list) || !length(w_list)) {
+    # Fallback for older results: derive from per-factor score fits if present
+    fits <- result$measurement_score_fits
+    if (is.list(fits) && length(fits)) {
+      w_list <- list()
+      for (nm in names(fits)) {
+        ww <- cfa_regression_score_weights(fits[[nm]])
+        if (!is.null(ww) && length(ww)) {
+          w_list[[nm]] <- if (nm %in% names(ww)) ww[[nm]] else ww[[1]]
+        }
+      }
+    }
+  }
+  if (!is.null(w_list) && length(w_list)) {
+    score_blocks <- vapply(names(w_list), function(lat) {
+      ww <- w_list[[lat]]
+      ww <- ww[is.finite(ww)]
+      if (!length(ww)) return(NA_character_)
+      lat_disp <- htmltools::htmlEscape(
+        display_name_from_lavaan(state, lat, abbrev_map)
+      )
+      parts <- character()
+      for (j in seq_along(ww)) {
+        ind_disp <- htmltools::htmlEscape(
+          display_name_from_lavaan(state, names(ww)[[j]], abbrev_map)
+        )
+        piece <- formatC(unname(ww[[j]]), digits = 2, format = "f")
+        body <- paste0(piece, "&middot;", ind_disp)
+        parts <- c(parts, if (!length(parts)) body else paste0(" + ", body))
+      }
+      sprintf(
+        paste0(
+          "<div class=\"smt-eq-block\">",
+          "<div class=\"smt-eq-tag\">factor score · %s (%s)</div>",
+          "<div class=\"smt-eq-line\">",
+          "<span class=\"smt-eq-lhs\">%s&#770;</span> = %s",
+          "</div></div>"
+        ),
+        lat_disp,
+        score_tag,
+        lat_disp,
+        paste(parts, collapse = "")
+      )
+    }, character(1))
+    score_blocks <- score_blocks[!is.na(score_blocks)]
+  }
+  if (!length(score_blocks)) return(NULL)
+
+  note <- if (identical(score_method, "joint")) {
+    paste0(
+      "<div class=\"smt-eq-note\">",
+      "Path / plots use joint Thomson/regression scores from the multi-factor CFA ",
+      "(items from other constructs can receive non-zero weight when factors correlate).",
+      "</div>"
+    )
+  } else {
+    paste0(
+      "<div class=\"smt-eq-note\">",
+      "Path / plots score each latent from its own measurement indicators only ",
+      "(items from other constructs are never mixed into the score).",
+      "</div>"
+    )
+  }
+  paste0(
+    "<div class=\"smt-eq-caption\">Factor scores (path stage)</div>",
+    paste(score_blocks, collapse = ""),
+    note
+  )
+}
+
 #' Build HTML equations for the fitted (best) model
 #'
 #' Shows each outcome with an explicit model/link form, e.g.
-#' `P(y)=logit^{-1}(...)` for logistic GLM, plus estimates and 95% CIs.
+#' `P(y)=logit^{-1}(...)` for logistic GLM, plus estimates ± SE.
+#' Variable names are shortened to the shortest unique prefixes.
+#' When latents are used, path-stage factor-score equations are included.
 #' @keywords internal
 format_best_equations_html <- function(result, state = NULL) {
   if (is.null(result)) return(NULL)
+  abbrev_map <- equation_abbrev_map(result, state)
+  meas_html <- format_measurement_equations_html(result, state, abbrev_map)
+  caption <- paste0(
+    "<div class=\"smt-eq-caption\">Best model ",
+    "(estimate<sup class=\"smt-ci\">&plusmn;SE</sup>)</div>"
+  )
 
   # Path lm/glm: one fit object per DV
   if (identical(result$engine, "path") && is.list(result$fit) &&
@@ -354,7 +713,8 @@ format_best_equations_html <- function(result, state = NULL) {
         if (nzchar(rn)) yname <- rn
       }
 
-      wrap <- equation_link_wrapper(fit, yname)
+      y_disp <- abbreviate_lhs_display(yname, abbrev_map)
+      wrap <- equation_link_wrapper(fit, y_disp)
       if (!is.null(wrap$note)) notes <<- c(notes, wrap$note)
 
       # Prefer estimate rows (explicit poly levels) + intercept from fit
@@ -369,26 +729,23 @@ format_best_equations_html <- function(result, state = NULL) {
               error = function(e) NA_real_
             )
             b0 <- unname(cf[["(Intercept)"]])
-            if (is.finite(se0)) {
-              parts <- c(parts, format_est_ci_html(b0, b0 - 1.96 * se0, b0 + 1.96 * se0))
-            } else {
-              parts <- c(parts, formatC(b0, digits = 2, format = "f"))
-            }
+            parts <- c(parts, format_est_se_html(b0, se0))
           }
-          pred <- format_eta_from_estimates(rows)
+          pred <- format_eta_from_estimates(
+            rows, abbrev_map = abbrev_map, state = state
+          )
           if (nzchar(pred)) parts <- c(parts, pred)
           if (length(parts)) eta <- paste(parts, collapse = " + ")
         }
       }
       if (is.null(eta)) {
-        ci <- tryCatch(
-          stats::confint.default(fit, level = 0.95),
-          error = function(e) {
-            se <- sqrt(diag(stats::vcov(fit)))
-            cbind(cf - 1.96 * se, cf + 1.96 * se)
-          }
+        se_vec <- tryCatch(
+          sqrt(diag(stats::vcov(fit))),
+          error = function(e) setNames(rep(NA_real_, length(cf)), names(cf))
         )
-        eta <- format_linear_predictor_html(cf, ci)
+        eta <- format_linear_predictor_html(
+          cf, se_vec, abbrev_map = abbrev_map, state = state
+        )
       }
       sprintf(
         paste0(
@@ -406,7 +763,7 @@ format_best_equations_html <- function(result, state = NULL) {
       )
     })
     blocks <- Filter(Negate(is.null), blocks)
-    if (!length(blocks)) return(NULL)
+    if (!length(blocks) && is.null(meas_html)) return(NULL)
     notes <- unique(notes)
     note_html <- if (length(notes)) {
       paste0("<div class=\"smt-eq-note\">", paste(notes, collapse = " · "), "</div>")
@@ -415,8 +772,8 @@ format_best_equations_html <- function(result, state = NULL) {
     }
     return(htmltools::HTML(paste0(
       "<div class=\"smt-equations\">",
-      "<div class=\"smt-eq-caption\">Best model (estimate<sup class=\"smt-ci\">[95% CI]</sup>)</div>",
-      paste(blocks, collapse = ""),
+      meas_html %||% "",
+      if (length(blocks)) paste0(caption, paste(blocks, collapse = "")) else "",
       note_html,
       "</div>"
     )))
@@ -434,7 +791,10 @@ format_best_equations_html <- function(result, state = NULL) {
     pe <- est_all[est_all$op == "~", , drop = FALSE]
     blocks <- lapply(unique(pe$lhs), function(y) {
       rows <- pe[pe$lhs == y, , drop = FALSE]
-      eta <- format_eta_from_estimates(rows)
+      eta <- format_eta_from_estimates(
+        rows, abbrev_map = abbrev_map, state = state
+      )
+      y_disp <- htmltools::htmlEscape(abbreviate_lhs_display(y, abbrev_map))
       is_ord <- y %in% ordered
       if (is_ord) {
         sprintf(
@@ -445,7 +805,7 @@ format_best_equations_html <- function(result, state = NULL) {
             "<span class=\"smt-eq-lhs\">P(%s*)</span> = &Phi;(%s)",
             "</div></div>"
           ),
-          htmltools::htmlEscape(y),
+          y_disp,
           eta
         )
       } else {
@@ -457,23 +817,31 @@ format_best_equations_html <- function(result, state = NULL) {
             "<span class=\"smt-eq-lhs\">E(%s)</span> = %s",
             "</div></div>"
           ),
-          htmltools::htmlEscape(y),
+          y_disp,
           eta
         )
       }
     })
     return(htmltools::HTML(paste0(
       "<div class=\"smt-equations\">",
-      "<div class=\"smt-eq-caption\">Best model (estimate<sup class=\"smt-ci\">[95% CI]</sup>)</div>",
+      meas_html %||% "",
+      caption,
       paste(blocks, collapse = ""),
       "</div>"
     )))
   }
 
   fit <- result$fit
-  if (!inherits(fit, "lavaan")) return(NULL)
+  if (!inherits(fit, "lavaan")) {
+    if (!is.null(meas_html)) {
+      return(htmltools::HTML(paste0(
+        "<div class=\"smt-equations\">", meas_html, "</div>"
+      )))
+    }
+    return(NULL)
+  }
   pe <- tryCatch(
-    as.data.frame(lavaan::parameterEstimates(fit, ci = TRUE, level = 0.95)),
+    as.data.frame(lavaan::parameterEstimates(fit, se = TRUE)),
     error = function(e) NULL
   )
   if (is.null(pe) || !nrow(pe)) return(NULL)
@@ -483,12 +851,21 @@ format_best_equations_html <- function(result, state = NULL) {
   ordered <- tryCatch(lavaan::lavInspect(fit, "ordered"), error = function(e) character())
   if (is.null(ordered)) ordered <- character()
 
+  # Extend abbrev map with lavaan parameter names if needed
+  abbrev_map <- shortest_unique_prefixes(unique(c(
+    names(abbrev_map),
+    vapply(pe$rhs, equation_term_base, character(1)),
+    vapply(pe$lhs, equation_lhs_core, character(1))
+  )))
+
   blocks <- lapply(unique(pe$lhs), function(y) {
     rows <- pe[pe$lhs == y, , drop = FALSE]
     cf <- setNames(rows$est, rows$rhs)
-    ci <- cbind(rows$ci.lower, rows$ci.upper)
-    rownames(ci) <- rows$rhs
-    eta <- format_linear_predictor_html(cf, ci)
+    se_vec <- setNames(rows$se, rows$rhs)
+    eta <- format_linear_predictor_html(
+      cf, se_vec, abbrev_map = abbrev_map, state = state
+    )
+    y_disp <- htmltools::htmlEscape(abbreviate_lhs_display(y, abbrev_map))
     is_ord <- y %in% ordered
     if (is_ord) {
       sprintf(
@@ -499,7 +876,7 @@ format_best_equations_html <- function(result, state = NULL) {
           "<span class=\"smt-eq-lhs\">P(%s*)</span> = &Phi;(%s)",
           "</div></div>"
         ),
-        htmltools::htmlEscape(y),
+        y_disp,
         eta
       )
     } else {
@@ -511,25 +888,37 @@ format_best_equations_html <- function(result, state = NULL) {
           "<span class=\"smt-eq-lhs\">E(%s)</span> = %s",
           "</div></div>"
         ),
-        htmltools::htmlEscape(y),
+        y_disp,
         eta
       )
     }
   })
   htmltools::HTML(paste0(
     "<div class=\"smt-equations\">",
-    "<div class=\"smt-eq-caption\">Best model (estimate<sup class=\"smt-ci\">[95% CI]</sup>)</div>",
+    meas_html %||% "",
+    caption,
     paste(blocks, collapse = ""),
     "</div>"
   ))
 }
 
-#' Short predictor label for an edge (e.g. methode, ecole[B])
+#' Short predictor label for an edge (e.g. methode, ecole[B], V×Su)
 #' @keywords internal
-edge_predictor_label <- function(state, edge_id) {
+edge_predictor_label <- function(state, edge_id, abbrev_map = NULL) {
   idx <- match(edge_id, state$edges$id)
   if (is.na(idx)) return(edge_id)
-  from_lab <- node_display_name(state, state$edges$from[idx])
+  from_id <- state$edges$from[idx]
+  if (is_interaction_node(state, from_id)) {
+    # Strip HTML-ish not needed; return plain text A×B
+    html <- pretty_interaction_term_html(
+      state, from_id,
+      level = if ("level" %in% names(state$edges)) state$edges$level[idx] else NULL,
+      abbrev_map = abbrev_map
+    )
+    return(html)
+  }
+  from_lab <- node_display_name(state, from_id)
+  from_lab <- abbreviate_term_base(from_lab, abbrev_map)
   lv <- if ("level" %in% names(state$edges)) state$edges$level[idx] else NA_character_
   if (!is.na(lv) && nzchar(lv)) {
     sprintf("%s[%s]", from_lab, lv)

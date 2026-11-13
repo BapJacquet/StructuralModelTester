@@ -23,6 +23,7 @@ smt_debug_log_path <- function() {
 #' Append a structured debug line (also prints to console)
 #' @keywords internal
 smt_debug <- function(...) {
+  if (isTRUE(getOption("smt.quiet", FALSE))) return(invisible(NULL))
   msg <- paste0(...)
   line <- sprintf(
     "%s | %s",
