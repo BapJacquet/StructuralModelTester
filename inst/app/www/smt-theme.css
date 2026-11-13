@@ -1486,19 +1486,54 @@ body.smt-resizing-v * {
 .shiny-file-input-progress { display: none !important; }
 
 /* Prepare stage ----------------------------------------------------------- */
+/* Match Data: contain in the center pane and let DT scrollX/Y own scrolling.
+   overflow:auto here steals horizontal pan/wheel from .dataTables_scrollBody. */
 .smt-prepare-wrap {
   display: flex;
   flex-direction: column;
   gap: 10px;
   min-height: 0;
-  overflow: auto;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .smt-prepare-toolbar {
+  flex: 0 0 auto;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 12px;
+}
+
+.smt-prepare-steps-panel,
+.smt-prepare-script-panel {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: min(40vh, 280px);
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.smt-prepare-preview {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.smt-prepare-preview > h4 {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.smt-prepare-preview .datatables,
+.smt-prepare-preview .dataTables_wrapper {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .smt-prepare-toolbar .shiny-input-radiogroup {

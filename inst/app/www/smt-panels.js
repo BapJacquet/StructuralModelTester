@@ -202,9 +202,38 @@
     });
   }
 
+  function adjustBrowseTables() {
+    // scrollX tables init while a center view is hidden — fix widths on show
+    if (!window.jQuery || !jQuery.fn || !jQuery.fn.dataTable) return;
+    [".smt-data-wrap", ".smt-prepare-wrap"].forEach(function (sel) {
+      var root = document.querySelector(sel);
+      if (!root) return;
+      var panel = root.closest(".shiny-panel-conditional");
+      if (panel && window.getComputedStyle(panel).display === "none") return;
+      jQuery(root).find("table.dataTable").each(function () {
+        var api = jQuery(this).DataTable();
+        if (api) {
+          api.columns.adjust();
+          if (api.scroller && api.scroller.measure) api.scroller.measure();
+        }
+      });
+    });
+  }
+
+  function initViewToggleAdjust() {
+    var toggle = document.querySelector(".smt-view-toggle");
+    if (!toggle || toggle.__smtDtAdjustBound) return;
+    toggle.__smtDtAdjustBound = true;
+    toggle.addEventListener("change", function () {
+      setTimeout(adjustBrowseTables, 40);
+      setTimeout(adjustBrowseTables, 200);
+    });
+  }
+
   function initAll() {
     initSplitters();
     initPlotSplitter();
+    initViewToggleAdjust();
   }
 
   $(document).on("shiny:connected", function () {
@@ -216,5 +245,6 @@
   // conditionalPanel (model view) may mount later
   $(document).on("shiny:value shiny:idle", function () {
     setTimeout(initPlotSplitter, 30);
+    setTimeout(initViewToggleAdjust, 30);
   });
 })();

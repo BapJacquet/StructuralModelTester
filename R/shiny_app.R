@@ -387,8 +387,11 @@ smt_ui <- function() {
                   )
                 )
               ),
-              shiny::h4("Analysis preview"),
-              DT::DTOutput("prepare_preview_table")
+              shiny::div(
+                class = "smt-prepare-preview",
+                shiny::h4("Analysis preview"),
+                DT::DTOutput("prepare_preview_table")
+              )
             )
           ),
           shiny::conditionalPanel(
@@ -1091,7 +1094,13 @@ smt_server <- function(input, output, session) {
   output$prepare_preview_table <- DT::renderDT({
     dat <- analysis_rv()
     shiny::req(dat)
-    smt_browse_datatable(dat, page_length = 12L, max_chars = 24L)
+    # Extra chrome (toolbar + steps) vs Data — keep H-scrollbar on-screen
+    smt_browse_datatable(
+      dat,
+      page_length = 12L,
+      max_chars = 24L,
+      scroll_y = "calc(100vh - 360px)"
+    )
   })
 
   output$variable_list <- shiny::renderUI({

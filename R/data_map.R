@@ -171,10 +171,15 @@ variable_list_from_data <- function(data, state) {
 #' Long cell text is shortened for display; the full value is available as a
 #' native browser tooltip (`title`). Table scrolls inside the center pane.
 #' @keywords internal
-smt_browse_datatable <- function(dat, page_length = 15L, max_chars = 24L) {
+smt_browse_datatable <- function(dat,
+                                 page_length = 15L,
+                                 max_chars = 24L,
+                                 scroll_y = "calc(100vh - 240px)") {
   if (is.null(dat)) return(NULL)
   max_chars <- as.integer(max_chars)
   if (!is.finite(max_chars) || max_chars < 8L) max_chars <- 24L
+  scroll_y <- as.character(scroll_y %||% "calc(100vh - 240px)")
+  if (!nzchar(scroll_y)) scroll_y <- "calc(100vh - 240px)"
   # Escape + truncate in JS so tooltips keep the full raw cell text
   truncate_js <- sprintf(
     paste0(
@@ -202,7 +207,7 @@ smt_browse_datatable <- function(dat, page_length = 15L, max_chars = 24L) {
     options = list(
       pageLength = as.integer(page_length),
       scrollX = TRUE,
-      scrollY = "calc(100vh - 240px)",
+      scrollY = scroll_y,
       scrollCollapse = TRUE,
       autoWidth = FALSE,
       dom = "tip",
