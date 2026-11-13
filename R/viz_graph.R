@@ -20,12 +20,17 @@ graph_payload <- function(state, data = NULL) {
       # Respect node_kind: observed nodes stay observed even when unmapped.
       latent <- is_latent_node(state, nid)
       mapped <- !is.na(col) && nzchar(as.character(col))
-      label <- if (is_ix) {
-        nodes$label[i]
-      } else if (mapped) {
-        as.character(col)
-      } else {
-        nodes$label[i]
+      # Canvas always shows the node label (editable in the inspector).
+      # Mapped column is data-only and may differ after a rename.
+      label <- {
+        lab <- nodes$label[i]
+        if (!is.na(lab) && nzchar(as.character(lab))) {
+          as.character(lab)
+        } else if (mapped) {
+          as.character(col)
+        } else {
+          as.character(nid)
+        }
       }
       eng <- engines[[nid]]
       base <- ""

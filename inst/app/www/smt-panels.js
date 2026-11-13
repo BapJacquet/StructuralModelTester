@@ -211,11 +211,13 @@
       var panel = root.closest(".shiny-panel-conditional");
       if (panel && window.getComputedStyle(panel).display === "none") return;
       jQuery(root).find("table.dataTable").each(function () {
-        var api = jQuery(this).DataTable();
-        if (api) {
-          api.columns.adjust();
-          if (api.scroller && api.scroller.measure) api.scroller.measure();
-        }
+        try {
+          var api = jQuery(this).DataTable();
+          if (api) {
+            api.columns.adjust();
+            if (api.scroller && api.scroller.measure) api.scroller.measure();
+          }
+        } catch (e) {}
       });
     });
   }
@@ -236,15 +238,51 @@
     initViewToggleAdjust();
   }
 
-  $(document).on("shiny:connected", function () {
-    setTimeout(initAll, 50);
-  });
-  $(function () {
-    setTimeout(initAll, 50);
-  });
-  // conditionalPanel (model view) may mount later
-  $(document).on("shiny:value shiny:idle", function () {
-    setTimeout(initPlotSplitter, 30);
-    setTimeout(initViewToggleAdjust, 30);
-  });
+  // Register resize handler once Shiny is available (script may load before it)
+  function ensureResizeHandler() {
+    if (!window.Shiny || !Shiny.addCustomMessageHandler) return;
+    if (window.__smtResizePlotsBound) return;
+    window.__smtResizePlotsBound = true;
+    Shiny.addCustomMessageHandler("smt_resize_plots", function () {
+      function fire() {
+        window.dispatchEvent(new Event("resize"));
+      }
+      fire();
+      setTimeout(fire, 80);
+      setTimeout(fire, 250);
+    });
+  }
+
+  function boot() {
+    try {
+      ensureResizeHandler();
+      initAll();
+    } catch (e) {
+      if (window.console && console.warn) {
+        console.warn("smt-panels boot failed", e);
+      }
+    }
+  }
+
+  // Head scripts run before .smt-main exists — poll until splitters bind.
+  (function bootLoop(attempt) {
+    boot();
+    var main = document.querySelector(".smt-main");
+    if (main && main.__smtSplitBound) return;
+    if (attempt < 60) {
+      setTimeout(function () {
+        bootLoop(attempt + 1);
+      }, 100);
+    }
+  })(0);
+
+  if (window.jQuery) {
+    $(document).on("shiny:connected shiny:idle shiny:value", function () {
+      boot();
+    });
+    $(boot);
+  } else {
+    document.addEventListener("DOMContentLoaded", boot);
+    window.addEventListener("load", boot);
+  }
 })();

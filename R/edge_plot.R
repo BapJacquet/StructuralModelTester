@@ -191,15 +191,20 @@ main_effect_interaction_partners <- function(state, from_id, to_id,
 }
 
 #' Row mask: partner at interaction reference (base / centered 0)
+#'
+#' @param sd_mult Half-width in SD units for continuous partners. `Inf` keeps
+#'   all finite values (factors still use exact base). Used when intersecting
+#'   several continuous holds would otherwise empty the plot.
 #' @keywords internal
-partner_reference_row_mask <- function(state, data, partner_id) {
+partner_reference_row_mask <- function(state, data, partner_id,
+                                       sd_mult = 0.25) {
   n <- if (is.null(data)) 0L else nrow(data)
-  empty <- list(ok = logical(n), label = NULL, n_keep = 0L)
+  empty <- list(ok = logical(n), label = NULL, n_keep = 0L, kind = NA_character_)
   if (!n) return(empty)
   col <- node_plot_column(state, partner_id)
   lab <- node_plot_label(state, partner_id)
   if (is.na(col) || !nzchar(col) || !col %in% names(data)) {
-    return(list(ok = rep(TRUE, n), label = NULL, n_keep = n))
+    return(list(ok = rep(TRUE, n), label = NULL, n_keep = n, kind = "missing"))
   }
   x <- data[[col]]
   kind <- classify_variable(x)
@@ -225,25 +230,36 @@ partner_reference_row_mask <- function(state, data, partner_id) {
     list(
       ok = ok,
       label = sprintf("%s = %s", lab, base),
-      n_keep = sum(ok, na.rm = TRUE)
+      n_keep = sum(ok, na.rm = TRUE),
+      kind = kind
     )
   } else {
     xv <- suppressWarnings(as.numeric(x))
     mu <- mean(xv, na.rm = TRUE)
     s <- stats::sd(xv, na.rm = TRUE)
     if (!is.finite(mu)) {
-      return(list(ok = rep(FALSE, n), label = NULL, n_keep = 0L))
+      return(list(ok = rep(FALSE, n), label = NULL, n_keep = 0L, kind = "continuous"))
     }
     if (!is.finite(s) || s <= 0) s <- 1
-    ok <- is.finite(xv) & abs(xv - mu) <= 0.25 * s
-    if (sum(ok, na.rm = TRUE) < 10L) {
-      qs <- stats::quantile(xv, probs = c(0.4, 0.6), na.rm = TRUE, names = FALSE)
-      ok <- is.finite(xv) & xv >= qs[[1]] & xv <= qs[[2]]
+    if (!is.finite(sd_mult) || sd_mult >= 1e6) {
+      ok <- is.finite(xv)
+      band_lab <- "all"
+    } else {
+      ok <- is.finite(xv) & abs(xv - mu) <= sd_mult * s
+      # Single-covariate fallback: central quantile band when the SD window is tiny
+      if (sum(ok, na.rm = TRUE) < 10L && sd_mult <= 0.25) {
+        qs <- stats::quantile(xv, probs = c(0.4, 0.6), na.rm = TRUE, names = FALSE)
+        ok <- is.finite(xv) & xv >= qs[[1]] & xv <= qs[[2]]
+        band_lab <- "central 20%"
+      } else {
+        band_lab <- sprintf("\u00b1%.2g SD", sd_mult)
+      }
     }
     list(
       ok = ok,
-      label = sprintf("%s \u2248 mean (centered 0)", lab),
-      n_keep = sum(ok, na.rm = TRUE)
+      label = sprintf("%s \u2248 mean (centered 0, %s)", lab, band_lab),
+      n_keep = sum(ok, na.rm = TRUE),
+      kind = "continuous"
     )
   }
 }
@@ -313,29 +329,64 @@ co_predictor_ids_to_hold <- function(state, from_id, to_id,
 #' Makes the bivariate link plot match a conditional (partial) effect:
 #' other predictors in the DV equation are held at treatment-coded 0 / base
 #' or near their mean.
+#'
+#' Continuous holds start at \pm0.25 SD and widen until `min_keep` rows remain
+#' (or all finite values). Exact factor/binary base filters are never relaxed —
+#' an empty result then means no cases at those reference levels.
 #' @keywords internal
-filter_data_at_covariate_reference <- function(state, data, hold_ids) {
+filter_data_at_covariate_reference <- function(state, data, hold_ids,
+                                              min_keep = 20L) {
   if (is.null(data) || !nrow(data) || !length(hold_ids)) {
-    return(list(data = data, note = NULL, labels = character(), n_keep = nrow(data) %||% 0L))
+    return(list(
+      data = data, note = NULL, labels = character(),
+      n_keep = nrow(data) %||% 0L, sd_mult = NA_real_
+    ))
   }
-  ok <- rep(TRUE, nrow(data))
-  labels <- character()
-  for (pid in hold_ids) {
-    m <- partner_reference_row_mask(state, data, pid)
-    ok <- ok & m$ok
-    if (!is.null(m$label) && nzchar(m$label)) labels <- c(labels, m$label)
+  min_keep <- max(1L, as.integer(min_keep))
+  # Widen continuous bands until the intersection is usable. Factors stay exact.
+  sd_grid <- c(0.25, 0.5, 0.75, 1, 1.5, 2, Inf)
+  best <- NULL
+  for (sd_mult in sd_grid) {
+    ok <- rep(TRUE, nrow(data))
+    labels <- character()
+    per <- list()
+    for (pid in hold_ids) {
+      m <- partner_reference_row_mask(state, data, pid, sd_mult = sd_mult)
+      ok <- ok & m$ok
+      per[[pid]] <- m$n_keep
+      if (!is.null(m$label) && nzchar(m$label)) labels <- c(labels, m$label)
+    }
+    n_keep <- sum(ok, na.rm = TRUE)
+    best <- list(
+      ok = ok,
+      labels = unique(labels),
+      n_keep = n_keep,
+      sd_mult = sd_mult,
+      per = per
+    )
+    if (n_keep >= min_keep) break
   }
-  labels <- unique(labels)
+  labels <- best$labels
   note <- if (length(labels)) {
     paste0("holding ", paste(labels, collapse = ", "))
   } else {
     NULL
   }
+  if (exists("smt_debug", mode = "function")) {
+    smt_debug(
+      "covar_ref filter | hold=", paste(hold_ids, collapse = ","),
+      " sd_mult=", best$sd_mult,
+      " n_keep=", best$n_keep, "/", nrow(data),
+      " per=", paste(names(best$per), best$per, sep = "=", collapse = ";"),
+      " min_keep=", min_keep
+    )
+  }
   list(
-    data = data[ok, , drop = FALSE],
+    data = data[best$ok, , drop = FALSE],
     note = note,
     labels = labels,
-    n_keep = sum(ok)
+    n_keep = best$n_keep,
+    sd_mult = best$sd_mult
   )
 }
 
@@ -367,7 +418,10 @@ edge_relationship_plot <- function(state, data, edge_id,
                                    prior_mean = NULL,
                                    prior_sd = NULL,
                                    simulated = FALSE,
-                                   latent_score_method = "own") {
+                                   latent_score_method = "own",
+                                   fit = NULL,
+                                   points_mode = "observed") {
+  points_mode <- normalize_edge_plot_points(points_mode)
   if (is.null(state) || is.null(data) || is.null(edge_id) || !nzchar(edge_id)) {
     return(NULL)
   }
@@ -410,7 +464,9 @@ edge_relationship_plot <- function(state, data, edge_id,
       prior_mean = prior_mean,
       prior_sd = prior_sd,
       simulated = simulated,
-      latent_score_method = latent_score_method
+      latent_score_method = latent_score_method,
+      fit = fit,
+      points_mode = points_mode
     ))
   }
 
@@ -432,14 +488,35 @@ edge_relationship_plot <- function(state, data, edge_id,
     ))
   }
 
-  # Hold co-predictors at reference/mean so the display is a conditional effect
+  # Co-predictors: emmeans holds when a fit is available; otherwise subset rows
   hold_ids <- co_predictor_ids_to_hold(
     state, from_id, to_id, to_level = to_level
   )
   effect_kind <- if (length(hold_ids)) "conditional" else "marginal"
   effect_caption <- NULL
-  if (length(hold_ids)) {
+  hold_at <- list()
+  use_emmeans <- !is.null(fit) && isTRUE(show_fit)
+  if (length(hold_ids) && use_emmeans) {
+    hs <- emmeans_hold_specs(state, data, fit, hold_ids)
+    hold_at <- hs$at
+    effect_caption <- edge_plot_effect_caption(effect_kind, hs$labels)
+    if (exists("smt_debug", mode = "function")) {
+      smt_debug(
+        "edge_plot emmeans hold | from=", from_id, " to=", to_id,
+        " hold=", paste(hold_ids, collapse = ","),
+        " at_names=", paste(names(hold_at), collapse = ",")
+      )
+    }
+  } else if (length(hold_ids)) {
     filt <- filter_data_at_covariate_reference(state, data, hold_ids)
+    if (exists("smt_debug", mode = "function")) {
+      smt_debug(
+        "edge_plot covar hold | from=", from_id, " to=", to_id,
+        " hold=", paste(hold_ids, collapse = ","),
+        " n_keep=", filt$n_keep %||% 0L,
+        " sd_mult=", filt$sd_mult %||% NA_real_
+      )
+    }
     if (is.null(filt$data) || !nrow(filt$data)) {
       labs <- vapply(hold_ids, function(id) node_plot_label(state, id), character(1))
       return(edge_plot_message(
@@ -454,6 +531,14 @@ edge_relationship_plot <- function(state, data, edge_id,
     effect_caption <- edge_plot_effect_caption(effect_kind, filt$labels)
   } else {
     effect_caption <- edge_plot_effect_caption(effect_kind, character())
+  }
+  if (identical(points_mode, "partial") && is.null(fit)) {
+    effect_caption <- paste0(
+      effect_caption %||% "",
+      if (nzchar(effect_caption %||% "")) " · " else "",
+      "partial residuals need a Run fit (showing observed)"
+    )
+    points_mode <- "observed"
   }
 
   df <- data.frame(
@@ -518,7 +603,8 @@ edge_relationship_plot <- function(state, data, edge_id,
     return(edge_plot_group(
       df, to_lab, y_kind, x_label, subtitle,
       highlight = level, show_fit = show_fit, simulated = simulated,
-      effect = effect_kind, caption = effect_caption, title_override = title
+      effect = effect_kind, caption = effect_caption, title_override = title,
+      fit = fit, focal = from_col, hold_at = hold_at, points_mode = points_mode
     ))
   }
 
@@ -527,7 +613,8 @@ edge_relationship_plot <- function(state, data, edge_id,
     return(edge_plot_group(
       df, to_lab, y_kind, from_lab, subtitle,
       highlight = NULL, show_fit = show_fit, simulated = simulated,
-      effect = effect_kind, caption = effect_caption, title_override = title
+      effect = effect_kind, caption = effect_caption, title_override = title,
+      fit = fit, focal = from_col, hold_at = hold_at, points_mode = points_mode
     ))
   }
 
@@ -536,58 +623,139 @@ edge_relationship_plot <- function(state, data, edge_id,
     return(edge_plot_group(
       df, to_lab, y_kind, from_lab, subtitle,
       highlight = NULL, show_fit = show_fit, simulated = simulated,
-      effect = effect_kind, caption = effect_caption, title_override = title
+      effect = effect_kind, caption = effect_caption, title_override = title,
+      fit = fit, focal = from_col, hold_at = hold_at, points_mode = points_mode
     ))
   }
 
   # Continuous predictor
+  edge_plot_continuous(
+    df = df,
+    from_lab = from_lab,
+    to_lab = to_lab,
+    y_kind = y_kind,
+    title = title,
+    subtitle = subtitle,
+    caption = effect_caption,
+    show_fit = show_fit,
+    rel_kind = rel_kind,
+    prior_mean = prior_mean,
+    prior_sd = prior_sd,
+    fit = fit,
+    focal = from_col,
+    hold_at = hold_at,
+    points_mode = points_mode
+  )
+}
+
+#' Continuous-X link plot (observed / partial / none + emmeans or smooth)
+#' @keywords internal
+edge_plot_continuous <- function(df, from_lab, to_lab, y_kind, title, subtitle,
+                                 caption, show_fit, rel_kind, prior_mean, prior_sd,
+                                 fit = NULL, focal = NULL, hold_at = list(),
+                                 points_mode = "observed") {
+  points_mode <- normalize_edge_plot_points(points_mode)
+  y_binary <- identical(y_kind, "binary")
   df$x_plot <- as.numeric(df$x_raw)
-  if (identical(y_kind, "binary")) {
+  if (y_binary) {
     df$y_plot <- as_binary01(df$y_raw)
-    prior_line <- edge_prior_line_data(
-      df$x_plot, df$y_plot, prior_mean, prior_sd = prior_sd
-    )
-    p <- ggplot2::ggplot(df, ggplot2::aes(x = .data$x_plot, y = .data$y_plot)) +
-      ggplot2::geom_jitter(
-        height = 0.04, width = 0, alpha = 0.35, size = 1.6, color = "#2E86AB"
-      ) +
-      ggplot2::coord_cartesian(ylim = c(-0.05, 1.05)) +
-      ggplot2::labs(
-        title = title,
-        subtitle = subtitle,
-        caption = effect_caption,
-        x = from_lab,
-        y = sprintf("P(%s = 1)", to_lab)
-      ) +
-      edge_plot_theme()
-    for (ly in edge_prior_overlay_layers(prior_line)) p <- p + ly
-    if (isTRUE(show_fit)) {
-      sm <- edge_smooth_layer(rel_kind, y_binary = TRUE)
-      if (!is.null(sm)) p <- p + sm
-    }
-    p
+    y_lab <- sprintf("P(%s = 1)", to_lab)
   } else {
     df$y_plot <- as.numeric(df$y_raw)
-    prior_line <- edge_prior_line_data(
-      df$x_plot, df$y_plot, prior_mean, prior_sd = prior_sd
-    )
-    p <- ggplot2::ggplot(df, ggplot2::aes(x = .data$x_plot, y = .data$y_plot)) +
-      ggplot2::geom_point(alpha = 0.35, size = 1.8, color = "#2E86AB") +
-      ggplot2::labs(
-        title = title,
-        subtitle = subtitle,
-        caption = effect_caption,
-        x = from_lab,
-        y = to_lab
-      ) +
-      edge_plot_theme()
-    for (ly in edge_prior_overlay_layers(prior_line)) p <- p + ly
-    if (isTRUE(show_fit)) {
-      sm <- edge_smooth_layer(rel_kind, y_binary = FALSE)
-      if (!is.null(sm)) p <- p + sm
-    }
-    p
+    y_lab <- to_lab
   }
+
+  # Point cloud
+  pts <- NULL
+  if (identical(points_mode, "partial") && !is.null(fit) && !is.null(focal)) {
+    pts <- partial_residual_xy(fit, focal)
+    if (!is.null(pts)) {
+      caption <- paste0(
+        caption %||% "",
+        if (nzchar(caption %||% "")) " · " else "",
+        "partial residuals"
+      )
+    }
+  }
+  if (is.null(pts) && !identical(points_mode, "none")) {
+    pts <- data.frame(x = df$x_plot, y = df$y_plot, stringsAsFactors = FALSE)
+    pts <- pts[stats::complete.cases(pts), , drop = FALSE]
+  }
+
+  # Fit overlay: emmeans when available, else bivariate smooth
+  curve_df <- NULL
+  if (isTRUE(show_fit) && !is.null(fit) && !is.null(focal) && nzchar(focal)) {
+    x_rng <- range(df$x_plot, na.rm = TRUE)
+    if (all(is.finite(x_rng)) && diff(x_rng) > 0) {
+      x_grid <- seq(x_rng[[1]], x_rng[[2]], length.out = 51L)
+    } else {
+      x_grid <- stats::median(df$x_plot, na.rm = TRUE)
+    }
+    curve_df <- emmeans_edge_curve(
+      fit, focal, hold_at = hold_at, x_grid = x_grid
+    )
+  }
+
+  prior_y <- if (!is.null(pts) && nrow(pts)) pts$y else df$y_plot
+  prior_x <- if (!is.null(pts) && nrow(pts)) pts$x else df$x_plot
+  prior_line <- edge_prior_line_data(
+    prior_x, prior_y, prior_mean, prior_sd = prior_sd
+  )
+
+  # Base data for ggplot scale when points are hidden
+  base_df <- if (!is.null(pts) && nrow(pts)) {
+    pts
+  } else if (!is.null(curve_df) && nrow(curve_df)) {
+    data.frame(x = curve_df$x, y = curve_df$y, stringsAsFactors = FALSE)
+  } else {
+    data.frame(x = df$x_plot, y = df$y_plot, stringsAsFactors = FALSE)
+  }
+
+  p <- ggplot2::ggplot(base_df, ggplot2::aes(x = .data$x, y = .data$y))
+  if (!is.null(pts) && nrow(pts) && !identical(points_mode, "none")) {
+    if (y_binary && identical(points_mode, "observed")) {
+      p <- p + ggplot2::geom_jitter(
+        data = pts,
+        ggplot2::aes(x = .data$x, y = .data$y),
+        inherit.aes = FALSE,
+        height = 0.04, width = 0, alpha = 0.35, size = 1.6, color = "#2E86AB"
+      )
+    } else {
+      p <- p + ggplot2::geom_point(
+        data = pts,
+        ggplot2::aes(x = .data$x, y = .data$y),
+        inherit.aes = FALSE,
+        alpha = 0.35, size = 1.8, color = "#2E86AB"
+      )
+    }
+  }
+  if (y_binary) {
+    p <- p + ggplot2::coord_cartesian(ylim = c(-0.05, 1.05))
+  }
+  p <- p +
+    ggplot2::labs(
+      title = title,
+      subtitle = subtitle,
+      caption = caption,
+      x = from_lab,
+      y = y_lab
+    ) +
+    edge_plot_theme()
+  for (ly in edge_prior_overlay_layers(prior_line)) p <- p + ly
+  if (isTRUE(show_fit)) {
+    if (!is.null(curve_df) && nrow(curve_df)) {
+      for (ly in emmeans_fit_layers(curve_df, categorical = FALSE, y_binary = y_binary)) {
+        p <- p + ly
+      }
+    } else {
+      sm <- edge_smooth_layer(rel_kind, y_binary = y_binary)
+      if (!is.null(sm)) {
+        # geom_smooth reads mapped x/y aesthetics
+        p <- p + sm
+      }
+    }
+  }
+  p
 }
 
 #' Smooth / polynomial overlay for continuous-x plots
@@ -685,8 +853,15 @@ edge_plot_group <- function(df, to_lab, y_kind, x_label, subtitle,
                             simulated = FALSE,
                             effect = c("conditional", "marginal"),
                             caption = NULL,
-                            title_override = NULL) {
+                            title_override = NULL,
+                            fit = NULL,
+                            focal = NULL,
+                            hold_at = list(),
+                            points_mode = "observed") {
   effect <- match.arg(effect)
+  points_mode <- normalize_edge_plot_points(points_mode)
+  # Partial residuals are for continuous predictors; fall back to observed
+  if (identical(points_mode, "partial")) points_mode <- "observed"
   if (!is.null(highlight) && highlight %in% levels(df$x_plot)) {
     df$hl <- ifelse(as.character(df$x_plot) == highlight, "focus", "other")
   } else {
@@ -701,56 +876,88 @@ edge_plot_group <- function(df, to_lab, y_kind, x_label, subtitle,
     caption <- edge_plot_effect_caption(effect)
   }
 
-  if (identical(y_kind, "binary")) {
+  y_binary <- identical(y_kind, "binary")
+  if (y_binary) {
     df$y_plot <- as_binary01(df$y_raw)
-    p <- ggplot2::ggplot(df, ggplot2::aes(x = .data$x_plot, y = .data$y_plot)) +
-      ggplot2::geom_jitter(
-        height = 0.04, width = 0.12, alpha = 0.35, size = 1.6,
-        ggplot2::aes(color = .data$hl), show.legend = FALSE
-      ) +
-      ggplot2::scale_color_manual(values = c(focus = "#5B2C8B", other = "#2E86AB")) +
-      ggplot2::coord_cartesian(ylim = c(-0.05, 1.05)) +
-      ggplot2::labs(
-        title = title,
-        subtitle = subtitle,
-        caption = caption,
-        x = x_label,
-        y = sprintf("P(%s = 1)", to_lab)
-      ) +
-      edge_plot_theme()
-    if (isTRUE(show_fit)) {
+    y_lab <- sprintf("P(%s = 1)", to_lab)
+  } else {
+    df$y_plot <- as.numeric(df$y_raw)
+    y_lab <- to_lab
+  }
+
+  # emmeans level means when the fit still has the focal as a numeric 0/1 column
+  curve_df <- NULL
+  if (isTRUE(show_fit) && !is.null(fit) && !is.null(focal) && nzchar(focal)) {
+    lev <- levels(df$x_plot)
+    # Binary coded 0/1 in the model
+    if (focal %in% colnames(stats::model.matrix(fit)) &&
+          all(lev %in% c("0", "1"))) {
+      curve_df <- emmeans_edge_curve(
+        fit, focal, hold_at = hold_at, x_levels = as.numeric(lev)
+      )
+      if (!is.null(curve_df)) {
+        curve_df$x_lab <- as.character(curve_df$x_lab)
+      }
+    }
+  }
+
+  p <- ggplot2::ggplot(df, ggplot2::aes(x = .data$x_plot, y = .data$y_plot))
+  if (!identical(points_mode, "none")) {
+    if (y_binary) {
+      p <- p +
+        ggplot2::geom_jitter(
+          height = 0.04, width = 0.12, alpha = 0.35, size = 1.6,
+          ggplot2::aes(color = .data$hl), show.legend = FALSE
+        ) +
+        ggplot2::scale_color_manual(values = c(focus = "#5B2C8B", other = "#2E86AB"))
+    } else {
+      p <- p +
+        ggplot2::geom_jitter(
+          width = 0.12, alpha = 0.35, size = 1.4, color = "#2E86AB"
+        ) +
+        ggplot2::scale_fill_manual(values = c(focus = "#D9C7F5", other = "#E8EEF5"))
+    }
+  }
+  if (y_binary) {
+    p <- p + ggplot2::coord_cartesian(ylim = c(-0.05, 1.05))
+  }
+  p <- p +
+    ggplot2::labs(
+      title = title,
+      subtitle = subtitle,
+      caption = caption,
+      x = x_label,
+      y = y_lab
+    ) +
+    edge_plot_theme()
+
+  if (isTRUE(show_fit)) {
+    if (!is.null(curve_df) && nrow(curve_df)) {
+      for (ly in emmeans_fit_layers(curve_df, categorical = TRUE, y_binary = y_binary)) {
+        p <- p + ly
+      }
+    } else if (y_binary) {
       p <- p +
         ggplot2::stat_summary(fun = mean, geom = "point", size = 3, color = "#C0392B") +
         ggplot2::stat_summary(
           fun.data = mean_se_fun, geom = "errorbar", width = 0.15, color = "#C0392B"
         )
-    }
-    p
-  } else {
-    df$y_plot <- as.numeric(df$y_raw)
-    p <- ggplot2::ggplot(df, ggplot2::aes(x = .data$x_plot, y = .data$y_plot)) +
-      ggplot2::geom_jitter(
-        width = 0.12, alpha = 0.35, size = 1.4, color = "#2E86AB"
-      ) +
-      ggplot2::scale_fill_manual(values = c(focus = "#D9C7F5", other = "#E8EEF5")) +
-      ggplot2::labs(
-        title = title,
-        subtitle = subtitle,
-        caption = caption,
-        x = x_label,
-        y = to_lab
-      ) +
-      edge_plot_theme()
-    if (isTRUE(show_fit)) {
+    } else if (!identical(points_mode, "none")) {
       p <- p +
         ggplot2::geom_boxplot(
           width = 0.55, outlier.alpha = 0.35, color = "#4A5568",
           ggplot2::aes(fill = .data$hl), show.legend = FALSE, alpha = 0.55
         ) +
         ggplot2::stat_summary(fun = mean, geom = "point", size = 2.8, color = "#1F7A4D")
+    } else {
+      p <- p +
+        ggplot2::stat_summary(fun = mean, geom = "point", size = 2.8, color = "#1F7A4D") +
+        ggplot2::stat_summary(
+          fun.data = mean_se_fun, geom = "errorbar", width = 0.15, color = "#1F7A4D"
+        )
     }
-    p
   }
+  p
 }
 
 #' @keywords internal
@@ -1483,7 +1690,10 @@ edge_interaction_plot <- function(state, data, ix_id, to_id, est, est_std, etype
                                   prior_mean = NULL,
                                   prior_sd = NULL,
                                   simulated = FALSE,
-                                  latent_score_method = "own") {
+                                  latent_score_method = "own",
+                                  fit = NULL,
+                                  points_mode = "observed") {
+  points_mode <- normalize_edge_plot_points(points_mode)
   state <- ensure_node_kind_columns(state)
   data <- enrich_data_with_factor_scores(
     state, data, score_method = latent_score_method
@@ -1513,7 +1723,11 @@ edge_interaction_plot <- function(state, data, ix_id, to_id, est, est_std, etype
     state, ix_id, to_id, to_level = to_level
   )
   ix_hold_labels <- character()
-  if (length(hold_ids)) {
+  use_emmeans <- !is.null(fit) && isTRUE(show_fit)
+  if (length(hold_ids) && use_emmeans) {
+    hs <- emmeans_hold_specs(state, data, fit, hold_ids)
+    ix_hold_labels <- hs$labels %||% character()
+  } else if (length(hold_ids)) {
     filt <- filter_data_at_covariate_reference(state, data, hold_ids)
     if (is.null(filt$data) || !nrow(filt$data)) {
       labs <- vapply(hold_ids, function(id) node_plot_label(state, id), character(1))

@@ -2041,9 +2041,38 @@ apply_estimates_to_edges <- function(state, estimates, included_edge_ids = NULL)
 node_display_name <- function(state, node_id) {
   idx <- match(node_id, state$nodes$id)
   if (is.na(idx)) return(node_id)
+  lab <- state$nodes$label[idx]
+  if (!is.na(lab) && nzchar(as.character(lab))) return(as.character(lab))
   col <- state$nodes$observed_column[idx]
-  if (!is.na(col) && nzchar(col)) return(col)
-  state$nodes$label[idx]
+  if (!is.na(col) && nzchar(as.character(col))) return(as.character(col))
+  as.character(node_id)
+}
+
+#' Rename a node's display label (does not change node id or edges)
+#' @keywords internal
+set_node_label <- function(state, node_id, label) {
+  state <- ensure_node_kind_columns(state)
+  idx <- match(node_id, state$nodes$id)
+  if (is.na(idx)) return(state)
+  if (is_interaction_node(state, node_id)) return(state)
+  if (is.null(label) || length(label) < 1L || is.na(label[[1]])) {
+    label <- ""
+  } else {
+    label <- trimws(as.character(label[[1]]))
+  }
+  if (!nzchar(label)) {
+    stop("Node name cannot be empty.", call. = FALSE)
+  }
+  # Keep labels unique among non-interaction nodes for clear canvas / inspector text
+  other <- state$nodes$label[state$nodes$id != node_id]
+  if (label %in% other) {
+    stop(
+      sprintf("Another node is already named « %s ».", label),
+      call. = FALSE
+    )
+  }
+  state$nodes$label[idx] <- label
+  state
 }
 
 is_observed_node <- function(state, node_id) {

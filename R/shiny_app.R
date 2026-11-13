@@ -116,177 +116,185 @@ smt_ui <- function() {
             ),
             shiny::hr(class = "smt-hr"),
             shiny::h3("Analysis"),
-            shiny::radioButtons(
-              "inference_mode", "Framework",
-              choices = c(
-                "p-values" = "pvalue",
-                "Model comparison (AIC/BIC)" = "search"
-              ),
-              selected = "pvalue"
+            shiny::div(
+              title = "p-values: classical tests. Model comparison: AIC/BIC search over exploratory links.",
+              shiny::radioButtons(
+                "inference_mode", "Framework",
+                choices = c(
+                  "p-values" = "pvalue",
+                  "Model comparison (AIC/BIC)" = "search"
+                ),
+                selected = "pvalue"
+              )
             ),
             shiny::conditionalPanel(
               condition = "input.inference_mode == 'pvalue'",
-              shiny::numericInput("alpha", "α for exploratory marking", value = 0.05, min = 0.001, max = 0.2, step = 0.01),
-              shiny::checkboxInput("mark_nonsig", "Mark non-significant exploratory links", TRUE),
-              shiny::selectInput(
-                "conf_p_adjust",
-                "Confirmatory multiplicity correction",
-                choices = c(
-                  "None" = "none",
-                  "Bonferroni" = "bonferroni",
-                  "Holm" = "holm",
-                  "Benjamini–Hochberg" = "BH"
-                ),
-                selected = "none",
-                width = "100%"
+              shiny::div(
+                title = "Significance level used when marking non-significant exploratory links.",
+                shiny::numericInput(
+                  "alpha", "α for exploratory marking",
+                  value = 0.05, min = 0.001, max = 0.2, step = 0.01
+                )
               ),
-              shiny::helpText(
-                "Adjusts confirmatory link p-values across all confirmatory paths ",
-                "(canvas / coefficients / power detection)."
+              shiny::div(
+                title = "Exploratory links with p > α are dashed (excluded) on the canvas.",
+                shiny::checkboxInput(
+                  "mark_nonsig",
+                  "Mark non-significant exploratory links",
+                  TRUE
+                )
+              ),
+              shiny::div(
+                title = paste(
+                  "Adjusts confirmatory link p-values across all confirmatory paths",
+                  "(canvas / coefficients / power detection)."
+                ),
+                shiny::selectInput(
+                  "conf_p_adjust",
+                  "Confirmatory multiplicity correction",
+                  choices = c(
+                    "None" = "none",
+                    "Bonferroni" = "bonferroni",
+                    "Holm" = "holm",
+                    "Benjamini–Hochberg" = "BH"
+                  ),
+                  selected = "holm",
+                  width = "100%"
+                )
               )
             ),
             shiny::conditionalPanel(
               condition = "input.inference_mode == 'search'",
-              shiny::radioButtons("ic_criterion", "Criterion", choices = c("AIC" = "aic", "BIC" = "bic"), selected = "bic", inline = TRUE),
-              shiny::numericInput(
-                "min_weight",
-                "Min Σw to keep",
-                value = 0.95,
-                min = 0,
-                max = 1,
-                step = 0.05
+              shiny::div(
+                title = "Information criterion used to rank models in the exploratory search.",
+                shiny::radioButtons(
+                  "ic_criterion", "Criterion",
+                  choices = c("AIC" = "aic", "BIC" = "bic"),
+                  selected = "bic", inline = TRUE
+                )
               ),
-              shiny::checkboxInput(
-                "mark_low_weight",
-                "Reject links with Σw below threshold",
-                value = TRUE
+              shiny::div(
+                title = paste(
+                  "Sum of Akaike/BIC weights across models that include the link.",
+                  "Default 0.95 is strict; lower toward 0.50 for more permissive retention."
+                ),
+                shiny::numericInput(
+                  "min_weight",
+                  "Min Σw to keep",
+                  value = 0.95,
+                  min = 0,
+                  max = 1,
+                  step = 0.05
+                )
               ),
-              shiny::helpText(
-                "Sum of Akaike/BIC weights across models that include the link. ",
-                "Below the threshold, confirmatory and exploratory links are dashed (✕) ",
-                "and do not count as detected in power analysis. Default 0.95 is strict; ",
-                "lower toward 0.50 for more permissive retention."
+              shiny::div(
+                title = paste(
+                  "Below the Σw threshold, confirmatory and exploratory links are dashed (✕)",
+                  "and do not count as detected in power analysis."
+                ),
+                shiny::checkboxInput(
+                  "mark_low_weight",
+                  "Reject links with Σw below threshold",
+                  value = TRUE
+                )
               ),
-              shiny::checkboxInput(
-                "model_average",
-                "Model averaging (full)",
-                value = FALSE
-              ),
-              shiny::helpText("Full averaging sets missing predictors to 0 across models; canvas shows averaged estimates.")
+              shiny::div(
+                title = paste(
+                  "Full averaging sets missing predictors to 0 across models;",
+                  "canvas shows averaged estimates."
+                ),
+                shiny::checkboxInput(
+                  "model_average",
+                  "Model averaging (full)",
+                  value = FALSE
+                )
+              )
             ),
             shiny::hr(class = "smt-hr"),
-            shiny::selectInput(
-              "uncertainty_method",
-              "Final-model uncertainty",
-              choices = c(
-                "None" = "none",
-                "Bootstrap" = "bootstrap",
-                "Plausible values" = "plausible"
+            shiny::div(
+              title = paste(
+                "Applied only after the final model is chosen (not during AIC/BIC search).",
+                "Bootstrap resamples people; plausible values redraw latent scores then refit paths.",
+                "Inference is conditional on the selected model."
               ),
-              selected = "none",
-              width = "100%"
+              shiny::selectInput(
+                "uncertainty_method",
+                "Final-model uncertainty",
+                choices = c(
+                  "None" = "none",
+                  "Bootstrap" = "bootstrap",
+                  "Plausible values" = "plausible"
+                ),
+                selected = "none",
+                width = "100%"
+              )
             ),
             shiny::conditionalPanel(
               condition = "input.uncertainty_method != 'none'",
-              shiny::numericInput(
-                "uncertainty_draws",
-                "Draws",
-                value = 199,
-                min = 20,
-                max = 2000,
-                step = 1
-              ),
-              shiny::helpText(
-                "Applied only after the final model is chosen (not during AIC/BIC search). ",
-                "Bootstrap resamples people; plausible values redraw latent scores then refit paths. ",
-                "Inference is conditional on the selected model."
+              shiny::div(
+                title = paste(
+                  "Number of bootstrap or plausible-value draws for final-model uncertainty.",
+                  "Inference is conditional on the selected model."
+                ),
+                shiny::numericInput(
+                  "uncertainty_draws",
+                  "Draws",
+                  value = 199,
+                  min = 20,
+                  max = 2000,
+                  step = 1
+                )
               )
             ),
             shiny::uiOutput("latent_score_method_ui"),
             shiny::hr(class = "smt-hr"),
             shiny::h3("Simulation"),
-            shiny::numericInput(
-              "sim_seed",
-              "Seed",
-              value = 1,
-              min = -1,
-              step = 1,
-              width = "100%"
-            ),
-            shiny::helpText("Use −1 for a new random seed on each Simulate."),
-            shiny::numericInput(
-              "sim_n",
-              "Samples",
-              value = 500,
-              min = 10,
-              max = 100000,
-              step = 10,
-              width = "100%"
-            ),
-            shiny::helpText(
-              "Rows when all factors are Inter. Subjects when any factor is Intra ",
-              "(rows = subjects \u00d7 within-subject cells)."
+            shiny::div(
+              class = "smt-sim-row",
+              shiny::div(
+                title = "Use \u22121 for a new random seed on each Simulate.",
+                shiny::numericInput(
+                  "sim_seed",
+                  "Seed",
+                  value = -1,
+                  min = -1,
+                  step = 1,
+                  width = "100%"
+                )
+              ),
+              shiny::div(
+                title = paste(
+                  "Rows when all factors are Inter. Subjects when any factor is Intra",
+                  "(rows = subjects \u00d7 within-subject cells)."
+                ),
+                shiny::numericInput(
+                  "sim_n",
+                  "Samples",
+                  value = 500,
+                  min = 10,
+                  max = 100000,
+                  step = 10,
+                  width = "100%"
+                )
+              )
             ),
             shiny::div(
               class = "smt-btn-row",
               shiny::actionButton(
                 "run_simulation",
                 "Simulate",
-                class = "smt-btn smt-btn-secondary"
-              )
-            ),
-            shiny::numericInput(
-              "power_reps",
-              "Power replications",
-              value = 100,
-              min = 10,
-              max = 500,
-              step = 10,
-              width = "100%"
-            ),
-            shiny::numericInput(
-              "power_interp_steps",
-              "Interpolation steps",
-              value = 3,
-              min = 0,
-              max = 20,
-              step = 1,
-              width = "100%"
-            ),
-            shiny::numericInput(
-              "power_max_n",
-              "Max sample (N cap)",
-              value = 1000,
-              min = 10,
-              max = 100000,
-              step = 50,
-              width = "100%"
-            ),
-            shiny::helpText(
-              "Power search evaluates several low N anchors plus min(Samples, Max sample), ",
-              "then repeatedly curve-fits N* and resamples that point. Low-N coverage ",
-              "stabilizes N* (especially for AIC/BIC). Evaluations never exceed Max sample."
-            ),
-            shiny::div(
-              class = "smt-btn-row",
-              shiny::actionButton(
-                "run_power_analysis",
-                "Run Power Analysis",
-                class = "smt-btn smt-btn-secondary"
+                class = "smt-btn smt-btn-secondary",
+                title = "Draw one sample from the generative model (expected effects, residual SD)."
               ),
               shiny::actionButton(
-                "cancel_power_analysis",
-                "Cancel",
-                class = "smt-btn smt-btn-danger",
-                title = "Stop a running power analysis"
+                "open_power_modal",
+                "Run power\u2026",
+                class = "smt-btn smt-btn-secondary",
+                title = paste(
+                  "Open a dialog to estimate P(all confirmatory links detected)",
+                  "across sample sizes."
+                )
               )
-            ),
-            shiny::helpText(
-              "Uses edge expected effects, exogenous mean/SD, and DV residual SD (\u03b5). ",
-              "Simulate fits one sample; Power Analysis estimates P(all confirmatory links detected) ",
-              "and, with confirmatory expected effects set to 0, the rate of detecting exactly k of them ",
-              "(p < \u03b1, or in the best AIC/BIC model with Σw ≥ Min Σw). ",
-              "Cancel stops after the current replication."
             )
           )
         ),
@@ -456,6 +464,24 @@ smt_ui <- function() {
                     width = "160px"
                   ),
                   shiny::div(
+                    class = "smt-edge-plot-points",
+                    title = paste(
+                      "Observed: raw scatter. Partial residuals: points adjusted for",
+                      "co-predictors (needs Run). None: emmeans curve / means only."
+                    ),
+                    shiny::selectInput(
+                      "edge_plot_points",
+                      label = NULL,
+                      choices = c(
+                        "Observed" = "observed",
+                        "Partial residuals" = "partial",
+                        "None" = "none"
+                      ),
+                      selected = "observed",
+                      width = "150px"
+                    )
+                  ),
+                  shiny::div(
                     class = "smt-edge-prior-inline",
                     title = paste(
                       "Normal prior on the unstandardized coefficient b",
@@ -512,18 +538,7 @@ smt_ui <- function() {
               )
             ),
             shiny::h4("Power analysis"),
-            shiny::uiOutput("power_recommend_msg"),
-            shiny::conditionalPanel(
-              condition = "output.power_has_plot === true",
-              shiny::div(
-                class = "smt-power-plot-wrap",
-                shiny::plotOutput("power_plot", height = "280px")
-              ),
-              shiny::div(
-                class = "smt-power-plot-wrap",
-                shiny::plotOutput("power_fdr_plot", height = "280px")
-              )
-            ),
+            shiny::uiOutput("power_summary_msg"),
             shiny::h4("Path coefficients"),
             DT::DTOutput("coef_table"),
             shiny::conditionalPanel(
@@ -560,6 +575,41 @@ smt_server <- function(input, output, session) {
   results_are_simulated <- shiny::reactiveVal(FALSE)
   # Monte Carlo confirmatory power curve (does not replace last_result).
   power_result_rv <- shiny::reactiveVal(NULL)
+  power_settings_rv <- shiny::reactiveVal(list(
+    reps = 100L,
+    steps = 3L,
+    n_cap = 1000L
+  ))
+  power_modal_status_rv <- shiny::reactiveVal("")
+
+  smt_show_power_modal <- function() {
+    ps <- power_settings_rv()
+    sim_n <- shiny::isolate(input$sim_n)
+    if (is.null(sim_n) || !is.finite(sim_n)) sim_n <- 500
+    # Flush selected-edge Expected b so the target list matches the panel.
+    # merge_edge_priors_from_inputs is defined later in this server(); resolved at call time.
+    st <- ensure_edge_to_port(state())
+    st <- merge_edge_priors_from_inputs(st)$state
+    state(st)
+    shiny::showModal(smt_power_modal(
+      reps = ps$reps %||% 100L,
+      steps = ps$steps %||% 3L,
+      n_cap = ps$n_cap %||% 1000L,
+      sim_n = as.integer(sim_n),
+      targets_ui = smt_power_targets_ui(st)
+    ))
+    session$onFlushed(function() {
+      session$sendCustomMessage("smt_resize_plots", list())
+    }, once = TRUE)
+  }
+
+  shiny::observeEvent(input$open_power_modal, {
+    power_modal_status_rv({
+      pw <- power_result_rv()
+      if (is.null(pw) || is.null(pw$power) || !nrow(pw$power)) "" else "Last run is shown below. Adjust settings and run again if needed."
+    })
+    smt_show_power_modal()
+  }, ignoreInit = TRUE)
   prepare_status <- shiny::reactiveVal("")
   last_result <- shiny::reactiveVal(NULL)
   status <- shiny::reactiveVal("Load data, build a model, then Run.")
@@ -1143,21 +1193,23 @@ smt_server <- function(input, output, session) {
     if (is.null(cur) || !cur %in% c("own", "joint")) cur <- "own"
     shiny::tagList(
       shiny::hr(class = "smt-hr"),
-      shiny::radioButtons(
-        "latent_score_method",
-        "Latent scores",
-        choices = c(
-          "Own indicators" = "own",
-          "Joint (Thomson)" = "joint"
+      shiny::div(
+        title = paste(
+          "Analysis-wide. Own indicators (default) score each latent from its",
+          "measurement links only. Joint Thomson/regression scores use the",
+          "multi-factor CFA and can weight items from other constructs when",
+          "factors correlate. With one latent both coincide."
         ),
-        selected = cur,
-        width = "100%"
-      ),
-      shiny::helpText(
-        "Analysis-wide. Own indicators (default) score each latent from its ",
-        "measurement links only. Joint Thomson/regression scores use the ",
-        "multi-factor CFA and can weight items from other constructs when ",
-        "factors correlate. With one latent both coincide."
+        shiny::radioButtons(
+          "latent_score_method",
+          "Latent scores",
+          choices = c(
+            "Own indicators" = "own",
+            "Joint (Thomson)" = "joint"
+          ),
+          selected = cur,
+          width = "100%"
+        )
       )
     )
   })
@@ -1275,6 +1327,7 @@ smt_server <- function(input, output, session) {
   })
   freeze_inspector_inputs <- function() {
     for (nm in c(
+      "inspector_node_label",
       "inspector_map_column",
       "dv_transform",
       "dv_repeated_measures",
@@ -1296,9 +1349,9 @@ smt_server <- function(input, output, session) {
       "sim_alloc_mode",
       paste0("sim_prop_", seq_len(12L)),
       paste0("sim_count_", seq_len(12L))
-      # Do NOT freeze edge_rel_kind or dv_diag_equation — residual / edge
-      # renderPlot reads them; freezing silently aborts the plot flush and
-      # leaves a blank panel after a node or edge click.
+      # Do NOT freeze edge_rel_kind, edge_plot_points, or dv_diag_equation —
+      # residual / edge renderPlot reads them; freezing silently aborts the
+      # plot flush and leaves a blank panel after a node or edge click.
     )) {
       try(shiny::freezeReactiveValue(input, nm), silent = TRUE)
     }
@@ -1559,6 +1612,10 @@ smt_server <- function(input, output, session) {
     }
   }, ignoreInit = TRUE)
 
+  shiny::observeEvent(input$edge_plot_points, {
+    edge_plot_tick(shiny::isolate(edge_plot_tick()) + 1L)
+  }, ignoreInit = TRUE)
+
   # Categorical split/omnibus toggle on the variable node (canvas)
   shiny::observeEvent(input$smt_node_cat_mode, {
     msg <- input$smt_node_cat_mode
@@ -1655,6 +1712,14 @@ smt_server <- function(input, output, session) {
     if (!is.null(ps_in) && length(ps_in) == 1L && is.finite(ps_in) && ps_in > 0) {
       prior_sd <- as.numeric(ps_in)
     }
+    points_mode <- normalize_edge_plot_points(input$edge_plot_points)
+    res0 <- shiny::isolate(last_result())
+    to_level <- if ("to_level" %in% names(st$edges)) st$edges$to_level[idx] else NA_character_
+    edge_fit <- if (isTRUE(show_fit)) {
+      edge_fit_for_plot(res0, to_id, to_level = to_level)
+    } else {
+      NULL
+    }
     smt_debug(
       "R edge_plot building | from=", from_id,
       " to=", to_id,
@@ -1662,15 +1727,16 @@ smt_server <- function(input, output, session) {
       " rk=", rk, " show_fit=", show_fit,
       " simulated=", simulated,
       " prior_mean=", prior_mean, " prior_sd=", prior_sd,
-      " nrow_data=", nrow(dat)
+      " nrow_data=", nrow(dat),
+      " points=", points_mode,
+      " has_fit=", !is.null(edge_fit)
     )
-    score_meth <- shiny::isolate({
-      res0 <- last_result()
+    score_meth <- {
       normalize_latent_score_method(
-        res0$latent_score_method %||% input$latent_score_method %||% "own",
+        res0$latent_score_method %||% shiny::isolate(input$latent_score_method) %||% "own",
         st
       )
-    })
+    }
     p <- tryCatch(
       edge_relationship_plot(
         st, dat, eid,
@@ -1679,7 +1745,9 @@ smt_server <- function(input, output, session) {
         prior_mean = prior_mean,
         prior_sd = prior_sd,
         simulated = simulated,
-        latent_score_method = score_meth
+        latent_score_method = score_meth,
+        fit = edge_fit,
+        points_mode = points_mode
       ),
       error = function(e) {
         smt_debug("R edge_plot ERROR: ", e$message)
@@ -1734,7 +1802,7 @@ smt_server <- function(input, output, session) {
           fit_st, dat,
           alpha = input$alpha,
           mark_nonsig = isTRUE(input$mark_nonsig),
-          conf_adjust = input$conf_p_adjust %||% "none",
+          conf_adjust = input$conf_p_adjust %||% "holm",
           uncertainty = unc,
           uncertainty_draws = draws,
           uncertainty_progress = progress_cb,
@@ -1847,7 +1915,7 @@ smt_server <- function(input, output, session) {
   shiny::observeEvent(input$run_simulation, {
     seed <- input$sim_seed
     n <- input$sim_n
-    if (is.null(seed) || !is.finite(seed)) seed <- 1
+    if (is.null(seed) || !is.finite(seed)) seed <- -1
     if (is.null(n) || !is.finite(n) || n < 10) {
       status("Simulation needs at least 10 samples.")
       return()
@@ -1890,13 +1958,17 @@ smt_server <- function(input, output, session) {
     n_reps <- input$power_reps
     n_steps <- input$power_interp_steps
     n_cap <- input$power_max_n
-    if (is.null(seed) || !is.finite(seed)) seed <- 1
+    if (is.null(seed) || !is.finite(seed)) seed <- -1
     if (is.null(n_max) || !is.finite(n_max) || n_max < 10) {
-      status("Power analysis needs Samples of at least 10.")
+      msg <- "Power analysis needs Samples of at least 10."
+      status(msg)
+      power_modal_status_rv(msg)
       return()
     }
     if (is.null(n_reps) || !is.finite(n_reps) || n_reps < 10) {
-      status("Power analysis needs at least 10 replications.")
+      msg <- "Power analysis needs at least 10 replications."
+      status(msg)
+      power_modal_status_rv(msg)
       return()
     }
     if (n_reps > 500) n_reps <- 500
@@ -1904,6 +1976,11 @@ smt_server <- function(input, output, session) {
     if (n_steps > 20) n_steps <- 20
     if (is.null(n_cap) || !is.finite(n_cap) || n_cap < 10) n_cap <- 1000
     if (n_cap > 100000) n_cap <- 100000
+    power_settings_rv(list(
+      reps = as.integer(n_reps),
+      steps = as.integer(n_steps),
+      n_cap = as.integer(n_cap)
+    ))
     st <- ensure_edge_to_port(state())
     st <- merge_edge_priors_from_inputs(st)$state
     st <- flush_sim_params_from_inputs(st)
@@ -1918,19 +1995,23 @@ smt_server <- function(input, output, session) {
     state(st)
     conf_ids <- confirmatory_power_edge_ids(st)
     if (!length(conf_ids)) {
-      status("Power analysis error: add at least one confirmatory structural link.")
+      msg <- "Power analysis error: add at least one confirmatory structural link."
+      status(msg)
+      power_modal_status_rv(msg)
       return()
     }
     zero_ids <- confirmatory_zero_prior_edge_ids(st, conf_ids)
     if (length(zero_ids)) {
       labs <- confirmatory_edge_warning_labels(st, zero_ids)
-      status(paste0(
+      msg <- paste0(
         "Power analysis error: set Expected effect (b ≠ 0) on confirmatory link",
         if (length(zero_ids) > 1L) "s" else "",
         " currently at 0: ",
         paste(labs, collapse = "; "),
         ". Auto-added interaction mains default to 0 until you set them."
-      ))
+      )
+      status(msg)
+      power_modal_status_rv(msg)
       return()
     }
     mode <- if (identical(input$inference_mode, "pvalue")) "pvalue" else "search"
@@ -1938,8 +2019,8 @@ smt_server <- function(input, output, session) {
     if (!criterion %in% c("aic", "bic")) criterion <- "bic"
     alpha <- input$alpha %||% 0.05
     if (!is.finite(alpha)) alpha <- 0.05
-    conf_adjust <- input$conf_p_adjust %||% "none"
-    if (!conf_adjust %in% c("none", "bonferroni", "holm", "BH")) conf_adjust <- "none"
+    conf_adjust <- input$conf_p_adjust %||% "holm"
+    if (!conf_adjust %in% c("none", "bonferroni", "holm", "BH")) conf_adjust <- "holm"
     min_weight <- as.numeric(input$min_weight %||% 0)
     if (!is.finite(min_weight) || min_weight < 0) min_weight <- 0
     if (min_weight > 1) min_weight <- 1
@@ -1952,19 +2033,17 @@ smt_server <- function(input, output, session) {
       st
     )
     session$userData$power_cancel <- FALSE
-    cancel_baseline <- shiny::isolate({
-      v <- input$cancel_power_analysis
-      if (is.null(v) || !is.finite(v)) 0L else as.integer(v)
-    })
     tryCatch({
       shiny::withProgress(
         message = "Running power analysis…",
         value = 0,
         {
-          status(sprintf(
+          run_msg <- sprintf(
             "Running power analysis (low-N grid + %d refine steps · %d reps)…",
             as.integer(n_steps), as.integer(n_reps)
-          ))
+          )
+          status(run_msg)
+          power_modal_status_rv(run_msg)
           pw <- run_confirmatory_power(
             st,
             n_max = as.integer(n_max),
@@ -1988,6 +2067,9 @@ smt_server <- function(input, output, session) {
                 value = done / max(tot, 1L),
                 detail = sprintf("%d / %d", done, tot)
               )
+              power_modal_status_rv(sprintf(
+                "Running… %d / %d", done, tot
+              ))
               if (isTRUE(session$userData$power_cancel)) {
                 smt_cancel_power()
               }
@@ -2017,21 +2099,29 @@ smt_server <- function(input, output, session) {
           } else {
             paste0(" · no N meets ", nstar_rule)
           }
-          status(sprintf(
+          done_msg <- sprintf(
             "Power analysis complete (%d N evaluated · %d steps · %d reps · seed %d%s).",
             nrow(pw$power),
             as.integer(pw$n_steps %||% n_steps),
             as.integer(n_reps),
             as.integer(attr(pw$power, "seed") %||% seed),
             rec_txt
-          ))
+          )
+          status(done_msg)
+          power_modal_status_rv(done_msg)
+          session$onFlushed(function() {
+            session$sendCustomMessage("smt_resize_plots", list())
+          }, once = TRUE)
         }
       )
     }, error = function(e) {
       if (smt_is_power_cancelled(e)) {
         status("Power analysis cancelled.")
+        power_modal_status_rv("Power analysis cancelled.")
       } else {
-        status(paste("Power analysis error:", e$message))
+        msg <- paste("Power analysis error:", e$message)
+        status(msg)
+        power_modal_status_rv(msg)
       }
     })
     session$userData$power_cancel <- FALSE
@@ -2040,6 +2130,7 @@ smt_server <- function(input, output, session) {
   shiny::observeEvent(input$cancel_power_analysis, {
     session$userData$power_cancel <- TRUE
     status("Cancelling power analysis…")
+    power_modal_status_rv("Cancelling power analysis…")
   }, ignoreInit = TRUE)
 
   # Live R command bus: second process calls smt_cmd() → .smt/inbox → here.
@@ -2335,7 +2426,7 @@ smt_server <- function(input, output, session) {
     }
     if (identical(action, "simulate")) {
       n <- as.integer(smt_cmd_arg(args, "n", input$sim_n %||% 200)[[1]])
-      seed <- as.integer(smt_cmd_arg(args, "seed", input$sim_seed %||% 1)[[1]])
+      seed <- as.integer(smt_cmd_arg(args, "seed", input$sim_seed %||% -1)[[1]])
       if (!is.finite(n) || n < 10L) stop("simulate: n must be ≥ 10.", call. = FALSE)
       if (!is.finite(seed)) seed <- 1L
       st <- ensure_edge_to_port(state())
@@ -2409,51 +2500,18 @@ smt_server <- function(input, output, session) {
   })
   shiny::outputOptions(output, "power_has_plot", suspendWhenHidden = FALSE)
 
+  output$power_modal_status <- shiny::renderUI({
+    msg <- power_modal_status_rv()
+    if (is.null(msg) || !nzchar(as.character(msg))) return(NULL)
+    shiny::div(class = "smt-power-modal-status", as.character(msg))
+  })
+
   output$power_recommend_msg <- shiny::renderUI({
-    pw <- power_result_rv()
-    if (is.null(pw) || is.null(pw$power) || !nrow(pw$power)) return(NULL)
-    rec <- pw$recommended_n
-    use_fdr <- isTRUE(attr(pw$power, "require_zero_null"))
-    rule_txt <- if (use_fdr) {
-      "power ≥ 80% and P(0 false detections) ≥ 95%"
-    } else {
-      "power ≥ 80% (false-detection rate ignored for N* under p-values)"
-    }
-    n_cap <- pw$n_cap %||% attr(pw$power, "n_cap")
-    if (!is.null(rec) && length(rec) == 1L && is.finite(rec)) {
-      metrics <- format_power_metrics_at_n(pw$power, pw$fdr, rec)
-      detail <- if (nzchar(metrics)) {
-        paste0(" — ", metrics, ".")
-      } else {
-        ""
-      }
-      shiny::div(
-        class = "smt-power-recommend",
-        shiny::tags$strong(sprintf("Recommended N* = %d", as.integer(rec))),
-        shiny::span(detail)
-      )
-    } else if (isTRUE(pw$n_cap_hit) || isTRUE(attr(pw$power, "n_cap_hit"))) {
-      raw <- pw$recommended_n_raw %||% attr(pw$power, "recommended_n_raw")
-      shiny::div(
-        class = "smt-power-recommend smt-power-recommend-miss",
-        shiny::tags$strong("N* exceeds Max sample."),
-        shiny::span(sprintf(
-          " Curve-fit estimate ≈ %s but search is capped at %s. Raise Max sample or effect sizes for %s.",
-          if (is.finite(raw)) format(as.integer(raw), big.mark = ",") else "?",
-          if (is.finite(n_cap)) format(as.integer(n_cap), big.mark = ",") else "the cap",
-          rule_txt
-        ))
-      )
-    } else {
-      shiny::div(
-        class = "smt-power-recommend smt-power-recommend-miss",
-        shiny::tags$strong("No recommended N."),
-        shiny::span(sprintf(
-          " Raise Max sample, Samples, or effect sizes until the curves reach %s.",
-          rule_txt
-        ))
-      )
-    }
+    smt_power_recommend_ui(power_result_rv(), compact = FALSE)
+  })
+
+  output$power_summary_msg <- shiny::renderUI({
+    smt_power_recommend_ui(power_result_rv(), compact = TRUE)
   })
 
   output$power_plot <- shiny::renderPlot({
@@ -2727,6 +2785,31 @@ smt_server <- function(input, output, session) {
     apply_factor_coding_from_inputs(include_levels = TRUE)
   }, ignoreInit = TRUE)
 
+  node_rename_inspector_ui <- function(st, nid) {
+    if (is.null(nid) || is_interaction_node(st, nid)) return(NULL)
+    lab <- st$nodes$label[match(nid, st$nodes$id)]
+    if (is.na(lab)) lab <- ""
+    shiny::tagList(
+      shiny::h4("Name"),
+      shiny::div(
+        class = "smt-inspector-rename",
+        title = "Display name on the canvas. Does not change the mapped data column.",
+        shiny::textInput(
+          "inspector_node_label",
+          label = NULL,
+          value = as.character(lab),
+          width = "100%",
+          placeholder = "Node name"
+        ),
+        shiny::actionButton(
+          "apply_inspector_node_label",
+          "Rename",
+          class = "smt-btn smt-btn-secondary"
+        )
+      )
+    )
+  }
+
   node_mapping_inspector_ui <- function(st, dat, nid) {
     if (is.null(nid) || is_interaction_node(st, nid)) return(NULL)
     col <- st$nodes$observed_column[match(nid, st$nodes$id)]
@@ -2746,19 +2829,43 @@ smt_server <- function(input, output, session) {
     }
     shiny::tagList(
       shiny::h4("Data mapping"),
-      shiny::selectInput(
-        "inspector_map_column",
-        "Mapped column",
-        choices = cols,
-        selected = selected,
-        width = "100%"
-      ),
-      shiny::helpText(
-        mapped_txt, " Clear to make this node latent. ",
-        "If the column is mapped elsewhere, it moves here."
+      shiny::div(
+        title = paste(
+          mapped_txt, "Clear to make this node latent.",
+          "If the column is mapped elsewhere, it moves here."
+        ),
+        shiny::selectInput(
+          "inspector_map_column",
+          "Mapped column",
+          choices = cols,
+          selected = selected,
+          width = "100%"
+        )
       )
     )
   }
+
+  shiny::observeEvent(input$apply_inspector_node_label, {
+    if (!inspector_writes_allowed()) return()
+    nid <- selected_node_id()
+    if (is.null(nid)) return()
+    st0 <- state()
+    if (is_interaction_node(st0, nid)) return()
+    new_lab <- input$inspector_node_label
+    if (is.null(new_lab)) return()
+    cur <- st0$nodes$label[match(nid, st0$nodes$id)]
+    if (identical(trimws(as.character(new_lab)), trimws(as.character(cur %||% "")))) {
+      return()
+    }
+    tryCatch({
+      st <- set_node_label(st0, nid, new_lab)
+      # Label-only: keep fit results; canvas refresh is enough
+      state(st)
+      status(sprintf("Renamed node to « %s ».", trimws(as.character(new_lab))))
+    }, error = function(e) {
+      status(paste("Rename failed:", e$message))
+    })
+  }, ignoreInit = TRUE)
 
   node_is_unmapped_observed <- function(st, nid) {
     if (is.null(nid) || is_interaction_node(st, nid) || is_latent_node(st, nid)) {
@@ -2937,20 +3044,28 @@ smt_server <- function(input, output, session) {
 
     type_ui <- if (unmapped) {
       shiny::tagList(
-        shiny::radioButtons(
-          "sim_var_kind",
-          "Variable type",
-          choices = c(
-            Continuous = "continuous",
-            Categorical = "categorical",
-            Binary = "binary"
+        shiny::div(
+          title = paste(
+            "Sets the canvas engine (lm vs glm · binomial) and how Simulate draws",
+            "this outcome. Binary uses a logistic / Bernoulli draw (intercept on the",
+            "logit scale); residual SD is ignored."
           ),
-          selected = declared,
-          inline = TRUE
+          shiny::radioButtons(
+            "sim_var_kind",
+            "Variable type",
+            choices = c(
+              Continuous = "continuous",
+              Categorical = "categorical",
+              Binary = "binary"
+            ),
+            selected = declared,
+            inline = TRUE
+          )
         ),
         if (kind %in% c("categorical", "binary")) {
           levs <- node_sim_factor_levels(st, nid, data = NULL)
-          shiny::tagList(
+          shiny::div(
+            title = "Canvas ports update when you Apply (not while typing).",
             shiny::textAreaInput(
               "sim_factor_levels",
               "Levels (one per line; first = reference)",
@@ -2962,41 +3077,52 @@ smt_server <- function(input, output, session) {
               "apply_sim_factor_levels",
               "Apply levels",
               class = "btn-sm btn-default"
-            ),
-            shiny::helpText("Canvas ports update when you Apply (not while typing).")
+            )
           )
-        },
-        shiny::helpText(
-          "Sets the canvas engine (lm vs glm · binomial) and how Simulate draws ",
-          "this outcome. Binary uses a logistic / Bernoulli draw (intercept on the ",
-          "logit scale); residual SD is ignored."
-        )
+        }
       )
     } else {
-      shiny::helpText(sprintf("Type from mapped data: %s.", kind))
+      shiny::div(
+        class = "smt-inspector-type-note",
+        title = sprintf("Type from mapped data: %s.", kind),
+        shiny::span(class = "smt-muted", sprintf("Type: %s", kind))
+      )
     }
 
     cont_params <- if (identical(kind, "binary")) {
-      shiny::tagList(
+      shiny::div(
+        class = "smt-sim-fields",
+        title = paste(
+          "Baseline logit when predictors are at reference / centered 0.",
+          "Simulate draws Bernoulli outcomes; Residual SD and Min/Max are unused."
+        ),
         shiny::numericInput(
           "sim_dv_intercept",
           "Intercept (logit)",
           value = if (is.finite(sp$intercept)) sp$intercept else 0,
           step = 0.1,
           width = "100%"
-        ),
-        shiny::helpText(
-          "Baseline logit when predictors are at reference / centered 0. ",
-          "Simulate draws Bernoulli outcomes; Residual SD and Min/Max are unused."
         )
       )
     } else if (identical(kind, "categorical")) {
-      shiny::helpText(
-        "Categorical outcomes are not simulated yet. Use Binary (logistic) or ",
-        "Continuous, or map a data column and Run."
+      shiny::div(
+        class = "smt-inspector-type-note",
+        title = paste(
+          "Categorical outcomes are not simulated yet. Use Binary (logistic) or",
+          "Continuous, or map a data column and Run."
+        ),
+        shiny::span(
+          class = "smt-muted",
+          "Categorical outcomes: not simulated yet."
+        )
       )
     } else {
-      shiny::tagList(
+      shiny::div(
+        class = "smt-sim-fields",
+        title = paste(
+          "Intercept = baseline when predictors are at reference / centered 0.",
+          "Residual SD adds noise; Min/Max clamp draws. Ignored by frequentist Run."
+        ),
         shiny::numericInput(
           "sim_dv_intercept",
           "Intercept",
@@ -3006,7 +3132,7 @@ smt_server <- function(input, output, session) {
         ),
         shiny::numericInput(
           "sim_resid_sd",
-          "Residual SD (\u03b5)",
+          "SD (\u03b5)",
           value = sp$resid_sd,
           min = 0.01,
           step = 0.1,
@@ -3025,12 +3151,6 @@ smt_server <- function(input, output, session) {
           value = if (is.finite(sp$max)) sp$max else NA,
           step = 0.1,
           width = "100%"
-        ),
-        shiny::helpText(
-          "Intercept is the baseline outcome mean when predictors are at reference ",
-          "(factors) or centered 0 (continuous). Residual SD adds noise on the same ",
-          "scale; outcomes outside Min/Max are clamped. Defaults intercept 0, resid 1. ",
-          "Ignored by frequentist Run."
         )
       )
     }
@@ -3293,6 +3413,7 @@ smt_server <- function(input, output, session) {
               shiny::span(class = "smt-inspector-badge", badge),
               if (!is.null(r2_txt)) shiny::span(class = "smt-inspector-r2", r2_txt)
             ),
+            node_rename_inspector_ui(st, nid),
             map_ui,
             node_sim_resid_ui(st, dv),
             if (can_transform) {
@@ -3380,6 +3501,7 @@ smt_server <- function(input, output, session) {
               class = "smt-inspector-meta",
               shiny::span(class = "smt-inspector-badge", kind_lab)
             ),
+            node_rename_inspector_ui(st, nid),
             map_ui,
             node_sim_exogenous_ui(st, dat, nid),
             factor_coding_inspector_ui(st, dat, factor_nid)
@@ -3396,6 +3518,7 @@ smt_server <- function(input, output, session) {
             class = "smt-inspector-meta",
             shiny::span(class = "smt-inspector-badge", kind_lab)
           ),
+          node_rename_inspector_ui(st, nid),
           map_ui,
           node_sim_exogenous_ui(st, dat, nid)
         )

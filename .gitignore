@@ -8,3 +8,5 @@
 *.tar.gz
 smt-debug.log
 .smt/
+
+Rplots.pdf

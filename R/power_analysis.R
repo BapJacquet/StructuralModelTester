@@ -231,7 +231,7 @@ power_one_replication_count <- function(state, n, seed, conf_ids,
                                         mode = c("pvalue", "search"),
                                         alpha = 0.05,
                                         criterion = c("aic", "bic"),
-                                        conf_adjust = c("none", "bonferroni", "holm", "BH"),
+                                        conf_adjust = c("holm", "none", "bonferroni", "BH"),
                                         min_weight = 0,
                                         latent_score_method = "own") {
   mode <- match.arg(mode)
@@ -819,7 +819,7 @@ run_confirmatory_power <- function(state, n_max = NULL, n_reps = 100L, seed = 1L
                                    mode = c("pvalue", "search"),
                                    alpha = 0.05,
                                    criterion = c("aic", "bic"),
-                                   conf_adjust = c("none", "bonferroni", "holm", "BH"),
+                                   conf_adjust = c("holm", "none", "bonferroni", "BH"),
                                    min_weight = 0,
                                    latent_score_method = "own",
                                    progress = NULL,
@@ -1242,4 +1242,237 @@ power_fdr_plot <- function(fdr_df, recommended_n = NULL) {
 #' @keywords internal
 scales_percent_safe <- function(x) {
   paste0(formatC(100 * x, digits = 0, format = "f"), "%")
+}
+
+#' Recommend / miss message for a power result
+#' @keywords internal
+smt_power_recommend_ui <- function(pw, compact = FALSE) {
+  if (is.null(pw) || is.null(pw$power) || !nrow(pw$power)) return(NULL)
+  rec <- pw$recommended_n
+  use_fdr <- isTRUE(attr(pw$power, "require_zero_null"))
+  rule_txt <- if (use_fdr) {
+    "power ≥ 80% and P(0 false detections) ≥ 95%"
+  } else {
+    "power ≥ 80% (false-detection rate ignored for N* under p-values)"
+  }
+  n_cap <- pw$n_cap %||% attr(pw$power, "n_cap")
+  if (!is.null(rec) && length(rec) == 1L && is.finite(rec)) {
+    metrics <- format_power_metrics_at_n(pw$power, pw$fdr, rec)
+    detail <- if (nzchar(metrics)) paste0(" — ", metrics, ".") else ""
+    if (isTRUE(compact)) {
+      return(shiny::div(
+        class = "smt-power-recommend",
+        shiny::tags$strong(sprintf("N* = %d", as.integer(rec))),
+        shiny::span(if (nzchar(metrics)) paste0(" · ", metrics) else ""),
+        shiny::span(class = "smt-muted", " · open Run power… for plots")
+      ))
+    }
+    return(shiny::div(
+      class = "smt-power-recommend",
+      shiny::tags$strong(sprintf("Recommended N* = %d", as.integer(rec))),
+      shiny::span(detail)
+    ))
+  }
+  if (isTRUE(pw$n_cap_hit) || isTRUE(attr(pw$power, "n_cap_hit"))) {
+    raw <- pw$recommended_n_raw %||% attr(pw$power, "recommended_n_raw")
+    msg <- sprintf(
+      " Curve-fit estimate ≈ %s but search is capped at %s.",
+      if (is.finite(raw)) format(as.integer(raw), big.mark = ",") else "?",
+      if (is.finite(n_cap)) format(as.integer(n_cap), big.mark = ",") else "the cap"
+    )
+    if (isTRUE(compact)) {
+      return(shiny::div(
+        class = "smt-power-recommend smt-power-recommend-miss",
+        shiny::tags$strong("N* exceeds Max sample"),
+        shiny::span(class = "smt-muted", " · open Run power… for details")
+      ))
+    }
+    return(shiny::div(
+      class = "smt-power-recommend smt-power-recommend-miss",
+      shiny::tags$strong("N* exceeds Max sample."),
+      shiny::span(paste0(msg, " Raise Max sample or effect sizes for ", rule_txt, "."))
+    ))
+  }
+  if (isTRUE(compact)) {
+    return(shiny::div(
+      class = "smt-power-recommend smt-power-recommend-miss",
+      shiny::tags$strong("No recommended N"),
+      shiny::span(class = "smt-muted", " · open Run power… for details")
+    ))
+  }
+  shiny::div(
+    class = "smt-power-recommend smt-power-recommend-miss",
+    shiny::tags$strong("No recommended N."),
+    shiny::span(sprintf(
+      " Raise Max sample, Samples, or effect sizes until the curves reach %s.",
+      rule_txt
+    ))
+  )
+}
+
+#' Summary list of confirmatory edges used as power targets
+#' @keywords internal
+smt_power_targets_ui <- function(state) {
+  if (is.null(state)) {
+    return(shiny::div(
+      class = "smt-power-targets smt-power-targets-empty",
+      "No model loaded."
+    ))
+  }
+  state <- ensure_edge_priors(state)
+  conf_ids <- confirmatory_power_edge_ids(state)
+  if (!length(conf_ids)) {
+    return(shiny::div(
+      class = "smt-power-targets smt-power-targets-empty",
+      shiny::tags$strong("No confirmatory structural links."),
+      shiny::span(" Add at least one confirmatory path before running power.")
+    ))
+  }
+  zero_ids <- confirmatory_zero_prior_edge_ids(state, conf_ids)
+  labs <- confirmatory_edge_warning_labels(state, conf_ids)
+  items <- lapply(seq_along(conf_ids), function(i) {
+    eid <- conf_ids[[i]]
+    pr <- edge_prior(state, eid)
+    m <- pr$mean
+    s <- pr$sd
+    is_zero <- eid %in% zero_ids
+    b_txt <- if (is.finite(m) && is.finite(s)) {
+      sprintf("expected b = %.2f \u00b1 %.2f", m, s)
+    } else if (is.finite(m)) {
+      sprintf("expected b = %.2f", m)
+    } else {
+      "expected b unset"
+    }
+    shiny::tags$li(
+      class = if (is_zero) "smt-power-target-zero" else NULL,
+      shiny::span(class = "smt-power-target-lab", labs[[i]]),
+      shiny::span(class = "smt-power-target-b", b_txt),
+      if (is_zero) {
+        shiny::span(class = "smt-power-target-warn", "needs b \u2260 0")
+      }
+    )
+  })
+  shiny::div(
+    class = "smt-power-targets",
+    shiny::div(
+      class = "smt-power-targets-head",
+      shiny::tags$strong(
+        sprintf(
+          "Confirmatory targets (%d)",
+          length(conf_ids)
+        )
+      ),
+      if (length(zero_ids)) {
+        shiny::span(
+          class = "smt-power-targets-warn",
+          sprintf(" · %d with b = 0", length(zero_ids))
+        )
+      }
+    ),
+    shiny::tags$ul(class = "smt-power-targets-list", items)
+  )
+}
+
+#' Power analysis configure / run / results modal
+#' @keywords internal
+smt_power_modal <- function(reps = 100L,
+                            steps = 3L,
+                            n_cap = 1000L,
+                            sim_n = 500L,
+                            targets_ui = NULL) {
+  reps <- as.integer(reps %||% 100L)
+  steps <- as.integer(steps %||% 3L)
+  n_cap <- as.integer(n_cap %||% 1000L)
+  sim_n <- as.integer(sim_n %||% 500L)
+  if (!is.finite(reps) || reps < 10L) reps <- 100L
+  if (!is.finite(steps) || steps < 0L) steps <- 3L
+  if (!is.finite(n_cap) || n_cap < 10L) n_cap <- 1000L
+  if (!is.finite(sim_n) || sim_n < 10L) sim_n <- 500L
+
+  shiny::modalDialog(
+    title = NULL,
+    easyClose = TRUE,
+    fade = TRUE,
+    size = "l",
+    footer = shiny::tagList(
+      shiny::actionButton(
+        "cancel_power_analysis",
+        "Cancel",
+        class = "smt-btn smt-btn-danger",
+        title = "Stop after the current replication"
+      ),
+      shiny::modalButton("Close")
+    ),
+    shiny::div(
+      class = "smt-power-modal",
+      shiny::div(
+        class = "smt-power-modal-hero",
+        shiny::div(class = "smt-welcome-kicker", "Simulation"),
+        shiny::h3("Power analysis"),
+        shiny::p(
+          class = "smt-power-modal-lead",
+          sprintf(
+            "Monte Carlo detection curve for confirmatory links. Uses Samples = %s from the Simulation panel (seed, expected effects, residual SD).",
+            format(sim_n, big.mark = ",")
+          )
+        )
+      ),
+      targets_ui %||% NULL,
+      shiny::div(
+        class = "smt-power-modal-fields",
+        shiny::numericInput(
+          "power_reps",
+          "Replications",
+          value = reps,
+          min = 10,
+          max = 500,
+          step = 10,
+          width = "100%"
+        ),
+        shiny::numericInput(
+          "power_interp_steps",
+          "Interpolation steps",
+          value = steps,
+          min = 0,
+          max = 20,
+          step = 1,
+          width = "100%"
+        ),
+        shiny::numericInput(
+          "power_max_n",
+          "Max sample (N cap)",
+          value = n_cap,
+          min = 10,
+          max = 100000,
+          step = 50,
+          width = "100%"
+        )
+      ),
+      shiny::helpText(
+        "Search evaluates low-N anchors plus min(Samples, Max sample), then curve-fits N* ",
+        "and resamples that point. Evaluations never exceed Max sample."
+      ),
+      shiny::div(
+        class = "smt-btn-row",
+        shiny::actionButton(
+          "run_power_analysis",
+          "Run simulations",
+          class = "smt-btn smt-btn-primary"
+        )
+      ),
+      shiny::uiOutput("power_modal_status"),
+      shiny::uiOutput("power_recommend_msg"),
+      shiny::conditionalPanel(
+        condition = "output.power_has_plot === true",
+        shiny::div(
+          class = "smt-power-plot-wrap",
+          shiny::plotOutput("power_plot", height = "260px")
+        ),
+        shiny::div(
+          class = "smt-power-plot-wrap",
+          shiny::plotOutput("power_fdr_plot", height = "260px")
+        )
+      )
+    )
+  )
 }

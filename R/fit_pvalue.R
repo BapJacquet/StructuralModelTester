@@ -17,7 +17,7 @@
 #' @return A list with updated `state`, `fit`, `estimates`, `fit_measures`, and `syntax`.
 #' @export
 fit_pvalue_model <- function(state, data, alpha = 0.05, mark_nonsig = TRUE,
-                             conf_adjust = c("none", "bonferroni", "holm", "BH"),
+                             conf_adjust = c("holm", "none", "bonferroni", "BH"),
                              uncertainty = c("none", "bootstrap", "plausible"),
                              uncertainty_draws = NULL,
                              uncertainty_progress = NULL,
