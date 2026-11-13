@@ -84,6 +84,47 @@ graph_payload <- function(state, data = NULL) {
           sprintf("R\u00B2 = %.2f", r2)
         }
       }
+      uni_status <- ""
+      uni_label <- ""
+      uni_title <- ""
+      if (latent && !is_ix) {
+        ust <- if ("uni_status" %in% names(nodes)) {
+          as.character(nodes$uni_status[i])
+        } else {
+          NA_character_
+        }
+        ulab <- if ("uni_label" %in% names(nodes)) {
+          as.character(nodes$uni_label[i])
+        } else {
+          NA_character_
+        }
+        uratio <- if ("uni_ratio" %in% names(nodes)) {
+          suppressWarnings(as.numeric(nodes$uni_ratio[i]))
+        } else {
+          NA_real_
+        }
+        upct1 <- if ("uni_pct1" %in% names(nodes)) {
+          suppressWarnings(as.numeric(nodes$uni_pct1[i]))
+        } else {
+          NA_real_
+        }
+        if (!is.na(ust) && nzchar(ust)) {
+          uni_status <- ust
+          uni_label <- if (!is.na(ulab) && nzchar(ulab)) ulab else ust
+          bits <- character()
+          if (is.finite(uratio)) {
+            bits <- c(bits, sprintf("\u03bb\u2081/\u03bb\u2082 = %s", formatC(uratio, digits = 2, format = "f")))
+          }
+          if (is.finite(upct1)) {
+            bits <- c(bits, sprintf("PC1 = %s%%", formatC(100 * upct1, digits = 0, format = "f")))
+          }
+          uni_title <- if (length(bits)) {
+            paste0("Unidimensionality (PCA): ", paste(bits, collapse = "; "))
+          } else {
+            "Unidimensionality (PCA)"
+          }
+        }
+      }
       cm <- if ("cat_mode" %in% names(nodes)) nodes$cat_mode[i] else "split"
       if (is.na(cm) || !nzchar(cm)) cm <- "split"
       design_mode <- ""
@@ -102,6 +143,9 @@ graph_payload <- function(state, data = NULL) {
         unmapped = !latent && !is_ix && !mapped,
         model = if (is.null(eng) || is_ix) "" else dv_model_badge(eng),
         r2 = r2_label,
+        uniStatus = uni_status,
+        uniLabel = uni_label,
+        uniTitle = uni_title,
         varKind = var_kind,
         base = base,
         levels = as.list(levels),
@@ -125,7 +169,7 @@ graph_payload <- function(state, data = NULL) {
         toPort = if (is.na(tp) || !nzchar(tp)) "" else tp,
         toLevel = if (is.na(tl) || !nzchar(tl)) "" else tl,
         label = edges$label[i],
-        color = edge_color(edges[i, ]),
+        color = edge_color(edges[i, ], alpha = state$pvalue_alpha),
         width = edge_width(edges[i, ]),
         dashes = isTRUE(edges$status[i] == "excluded") ||
           (edges$type[i] == "exploratory" && edges$status[i] == "pending"),
@@ -176,12 +220,18 @@ graph_structure_signature <- function(payload) {
   paste(c(sort(nsig), "||", sort(esig)), collapse = "\n")
 }
 
-edge_color <- function(edge) {
+edge_color <- function(edge, alpha = NULL) {
   if (!is.null(edge$status) && identical(edge$status, "excluded")) return("#B0B0B0")
+  # P-value analysis: keep confirmatory links in the model, but mute color when p > α
+  if (!is.null(alpha) && is.finite(alpha) && identical(as.character(edge$type), "confirmatory")) {
+    pv <- suppressWarnings(as.numeric(edge$pvalue))
+    if (length(pv) && is.finite(pv[[1]]) && pv[[1]] > alpha) return("#B0B0B0")
+  }
   if (identical(edge$type, "definitional")) return("#9B8FD4")
-  if (!is.na(edge$estimate)) {
-    if (edge$estimate < 0) return("#C0392B")
-    if (edge$estimate > 0) return("#1F7A4D")
+  est <- suppressWarnings(as.numeric(edge$estimate))
+  if (length(est) && is.finite(est[[1]]) && !is.na(est[[1]])) {
+    if (est[[1]] < 0) return("#C0392B")
+    if (est[[1]] > 0) return("#1F7A4D")
   }
   switch(edge$type,
     fixed = "#3D3D3D",

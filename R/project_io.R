@@ -32,7 +32,8 @@ model_from_json <- function(json) {
   # Ensure columns exist
   need_n <- c(
     "id", "label", "observed_column", "shape", "x", "y",
-    "r_squared", "r_squared_kind", "node_kind", "factor_a", "factor_b", "cat_mode",
+    "r_squared", "r_squared_kind", "uni_status", "uni_label", "uni_ratio", "uni_pct1",
+    "node_kind", "factor_a", "factor_b", "cat_mode",
     "repeated_measures", "cluster_column", "dv_transform",
     "factor_base", "factor_ordered", "factor_levels",
     "sim_mean", "sim_sd", "sim_min", "sim_max", "sim_intercept", "sim_resid_sd",
@@ -43,7 +44,7 @@ model_from_json <- function(json) {
     if (!nm %in% names(nodes)) {
       nodes[[nm]] <- if (nm == "shape") {
         "ellipse"
-      } else if (nm %in% c("x", "y", "r_squared", "sim_min", "sim_max")) {
+      } else if (nm %in% c("x", "y", "r_squared", "uni_ratio", "uni_pct1", "sim_min", "sim_max")) {
         NA_real_
       } else if (nm %in% c("sim_mean", "sim_intercept")) {
         0
@@ -73,6 +74,10 @@ model_from_json <- function(json) {
     nodes$y <- as.numeric(nodes$y)
     nodes$r_squared <- as.numeric(nodes$r_squared)
     nodes$r_squared_kind <- as.character(nodes$r_squared_kind)
+    nodes$uni_status <- as.character(nodes$uni_status)
+    nodes$uni_label <- as.character(nodes$uni_label)
+    nodes$uni_ratio <- as.numeric(nodes$uni_ratio)
+    nodes$uni_pct1 <- as.numeric(nodes$uni_pct1)
     nodes$node_kind <- as.character(nodes$node_kind)
     nodes$factor_a <- as.character(nodes$factor_a)
     nodes$factor_b <- as.character(nodes$factor_b)

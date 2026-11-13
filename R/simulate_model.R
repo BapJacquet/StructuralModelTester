@@ -260,6 +260,88 @@ sim_interaction_predictor <- function(state, dat, ix_id) {
   prod
 }
 
+#' TRUE if node is only (or also) a measurement indicator
+#'
+#' Targets of `measurement` edges are generated from latent scores, not as
+#' independent exogenous draws.
+#' @keywords internal
+is_measurement_indicator_node <- function(state, node_id) {
+  state <- ensure_edge_to_port(state)
+  if (!nrow(state$edges)) return(FALSE)
+  any(state$edges$type == "measurement" & state$edges$to == node_id)
+}
+
+#' Loading used when simulating an indicator from a latent
+#'
+#' Uses the measurement edge Expected effect (`prior_mean`). Unset / zero
+#' loadings default to 1 so indicators are not pure noise out of the box.
+#' @keywords internal
+sim_measurement_loading <- function(state, edge_id) {
+  lam <- edge_prior(state, edge_id)$mean
+  if (!is.finite(lam)) lam <- 0
+  if (abs(as.numeric(lam)) <= 1e-12) 1 else as.numeric(lam)
+}
+
+#' Generate observed indicators from simulated latent scores
+#'
+#' For each measurement edge `latent → indicator`:
+#' `y = λ · η + ε`, with `λ` from the edge prior and `ε ~ N(0, sim_resid_sd)`
+#' on the indicator node (default 1). Several latents loading on the same
+#' indicator are summed.
+#'
+#' @return Named list of columns (same shape as `dat`), with indicator columns
+#'   added or replaced.
+#' @keywords internal
+sim_generate_measurement_indicators <- function(state, dat) {
+  state <- ensure_edge_to_port(state)
+  state <- ensure_edge_priors(state)
+  state <- ensure_node_sim_columns(state)
+  meas <- state$edges[state$edges$type == "measurement", , drop = FALSE]
+  if (!nrow(meas) || !length(dat)) return(dat)
+
+  n_rows <- length(dat[[1]])
+  ind_ids <- unique(as.character(meas$to))
+  for (ind_id in ind_ids) {
+    if (is.na(ind_id) || !nzchar(ind_id)) next
+    if (is_interaction_node(state, ind_id) || is_latent_node(state, ind_id)) next
+    hits <- meas[meas$to == ind_id, , drop = FALSE]
+    eta_sum <- rep(0, n_rows)
+    any_lat <- FALSE
+    for (i in seq_len(nrow(hits))) {
+      lat_id <- hits$from[[i]]
+      if (!is_latent_node(state, lat_id)) next
+      lat_nm <- node_sim_column(state, lat_id)
+      if (!lat_nm %in% names(dat)) {
+        if (exists("smt_debug", mode = "function")) {
+          smt_debug(
+            "sim measurement skip | missing latent col=", lat_nm,
+            " for indicator=", ind_id
+          )
+        }
+        next
+      }
+      lam <- sim_measurement_loading(state, hits$id[[i]])
+      eta_sum <- eta_sum + lam * as.numeric(dat[[lat_nm]])
+      any_lat <- TRUE
+      if (exists("smt_debug", mode = "function")) {
+        smt_debug(
+          "sim measurement | ", lat_nm, " -> ", node_sim_column(state, ind_id),
+          " lambda=", lam
+        )
+      }
+    }
+    if (!any_lat) next
+    sp <- node_sim_params(state, ind_id)
+    resid_sd <- sp$resid_sd
+    if (!is.finite(resid_sd) || resid_sd <= 0) resid_sd <- 1
+    y_draw <- eta_sum + stats::rnorm(n_rows, mean = 0, sd = resid_sd)
+    dat[[node_sim_column(state, ind_id)]] <- sim_clamp_values(
+      y_draw, min = sp$min, max = sp$max
+    )
+  }
+  dat
+}
+
 #' Simulate a path dataset from priors + node sim knobs
 #'
 #' Exogenous continuous nodes: Normal(sim_mean, sim_sd), then clamped to
@@ -273,6 +355,9 @@ sim_interaction_predictor <- function(state, dat, ix_id) {
 #' factor mains, and interaction products coded like the fit (binary 0/1,
 #' continuous centered) — plus N(0, sim_resid_sd) on the outcome scale, then
 #' clamped to the DV's `sim_min` / `sim_max` when set.
+#' Measurement indicators (targets of `measurement` edges) are then drawn as
+#' `y = λ · η + ε` from simulated latent scores (`λ` = Expected effect on the
+#' measurement link; unset/0 defaults to 1). They are not independent exogs.
 #'
 #' When any factor is intra, the result includes a `subject` column.
 #'
@@ -300,6 +385,8 @@ simulate_path_data <- function(state, n = 500L, seed = 1L) {
   exog_ids <- character()
   for (id in state$nodes$id) {
     if (is_interaction_node(state, id)) next
+    # Indicators are generated from latents after the structural path
+    if (is_measurement_indicator_node(state, id)) next
     if (!node_is_structural_exogenous(state, id)) next
     exog_ids <- c(exog_ids, id)
   }
@@ -475,6 +562,9 @@ simulate_path_data <- function(state, n = 500L, seed = 1L) {
       dat[[dv_nm]] <- sim_clamp_values(y_draw, min = sp_dv$min, max = sp_dv$max)
     }
   }
+
+  # Measurement DGP: indicators from latent scores (after structural η exists)
+  dat <- sim_generate_measurement_indicators(state, dat)
 
   if (!length(dat)) {
     stop(

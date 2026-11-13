@@ -140,6 +140,175 @@ normalize_latent_score_method <- function(method, state = NULL) {
   method
 }
 
+#' Cronbach's alpha for a numeric item matrix
+#'
+#' Classical formula on the item covariance matrix (complete cases among the
+#' supplied columns). Needs ≥ 2 items with finite variances; otherwise `NA`.
+#' @keywords internal
+cronbach_alpha <- function(items) {
+  if (is.null(items)) return(NA_real_)
+  if (!is.data.frame(items) && !is.matrix(items)) {
+    items <- as.data.frame(items, stringsAsFactors = FALSE)
+  }
+  items <- as.data.frame(lapply(items, function(x) suppressWarnings(as.numeric(x))),
+                         stringsAsFactors = FALSE)
+  items <- items[stats::complete.cases(items), , drop = FALSE]
+  k <- ncol(items)
+  if (k < 2L || nrow(items) < 2L) return(NA_real_)
+  S <- tryCatch(stats::cov(items), error = function(e) NULL)
+  if (is.null(S) || !is.matrix(S) || nrow(S) != k) return(NA_real_)
+  tot <- sum(S)
+  item_var <- sum(diag(S))
+  if (!is.finite(tot) || !is.finite(item_var) || abs(tot) < .Machine$double.eps) {
+    return(NA_real_)
+  }
+  as.numeric((k / (k - 1)) * (1 - item_var / tot))
+}
+
+#' PCA unidimensionality screen for a numeric item matrix
+#'
+#' Correlation-matrix PCA on complete cases. Returns the first/second
+#' eigenvalue ratio and a coarse status for canvas / Model-fit indicators:
+#' - `"ok"`: λ₁/λ₂ ≥ 3 (essentially unidimensional)
+#' - `"warn"`: 2 ≤ λ₁/λ₂ < 3 (weak / borderline)
+#' - `"fail"`: λ₁/λ₂ < 2 with ≥ 3 items (possible second dimension)
+#' - `NA` status when incomputable (< 2 items, etc.)
+#' @keywords internal
+pca_unidimensionality <- function(items) {
+  empty <- list(
+    status = NA_character_,
+    label = "",
+    ratio = NA_real_,
+    pct1 = NA_real_,
+    n_items = 0L,
+    n = 0L
+  )
+  if (is.null(items)) return(empty)
+  if (!is.data.frame(items) && !is.matrix(items)) {
+    items <- as.data.frame(items, stringsAsFactors = FALSE)
+  }
+  items <- as.data.frame(
+    lapply(items, function(x) suppressWarnings(as.numeric(x))),
+    stringsAsFactors = FALSE
+  )
+  items <- items[stats::complete.cases(items), , drop = FALSE]
+  k <- ncol(items)
+  n <- nrow(items)
+  empty$n_items <- as.integer(k)
+  empty$n <- as.integer(n)
+  if (k < 2L || n < 3L) return(empty)
+
+  R <- tryCatch(stats::cor(items), error = function(e) NULL)
+  if (is.null(R) || !is.matrix(R) || nrow(R) != k) return(empty)
+  if (any(!is.finite(R))) return(empty)
+  ev <- tryCatch(
+    eigen(R, symmetric = TRUE, only.values = TRUE)$values,
+    error = function(e) NULL
+  )
+  if (is.null(ev) || length(ev) < 2L) return(empty)
+  ev <- as.numeric(ev)
+  if (!all(is.finite(ev[1:2])) || ev[[2]] <= .Machine$double.eps) return(empty)
+  ratio <- ev[[1]] / ev[[2]]
+  pct1 <- ev[[1]] / sum(ev)
+  status <- if (ratio >= 3) {
+    "ok"
+  } else if (ratio >= 2) {
+    "warn"
+  } else if (k >= 3L) {
+    "fail"
+  } else {
+    # 2 items with weak correlation — borderline, not a clear second factor
+    "warn"
+  }
+  label <- switch(
+    status,
+    ok = "uni \u2713",
+    warn = "weak 1D",
+    fail = "multi ?",
+    ""
+  )
+  list(
+    status = status,
+    label = label,
+    ratio = as.numeric(ratio),
+    pct1 = as.numeric(pct1),
+    n_items = as.integer(k),
+    n = as.integer(n),
+    lambda1 = as.numeric(ev[[1]]),
+    lambda2 = as.numeric(ev[[2]])
+  )
+}
+
+#' Cronbach's alpha for each latent from its own measurement indicators
+#'
+#' @return Named numeric vector (lavaan latent names). Missing / incomputable → NA.
+#' @keywords internal
+cronbach_alpha_for_latents <- function(state, dat, latent_ids = NULL, meas = NULL) {
+  state <- ensure_node_kind_columns(state)
+  if (is.null(meas)) {
+    meas <- state$edges[state$edges$type == "measurement", , drop = FALSE]
+  }
+  if (is.null(latent_ids)) {
+    latent_ids <- unique(as.character(meas$from))
+  }
+  latent_ids <- unique(as.character(latent_ids))
+  out <- setNames(rep(NA_real_, length(latent_ids)), character(0))
+  if (!length(latent_ids) || is.null(dat) || !NROW(dat) || !nrow(meas)) {
+    return(setNames(numeric(0), character(0)))
+  }
+  alphas <- numeric(length(latent_ids))
+  names(alphas) <- vapply(
+    latent_ids,
+    function(id) lavaan_var_name(state, id),
+    character(1)
+  )
+  for (i in seq_along(latent_ids)) {
+    lat <- latent_ids[[i]]
+    lat_nm <- names(alphas)[[i]]
+    ind_ids <- unique(as.character(meas$to[meas$from == lat]))
+    ind_cols <- vapply(ind_ids, function(id) lavaan_var_name(state, id), character(1))
+    ind_cols <- ind_cols[ind_cols %in% names(dat)]
+    if (length(ind_cols) < 2L) {
+      alphas[[lat_nm]] <- NA_real_
+      next
+    }
+    alphas[[lat_nm]] <- cronbach_alpha(dat[, ind_cols, drop = FALSE])
+  }
+  alphas
+}
+
+#' PCA unidimensionality screen for each latent (own indicators)
+#'
+#' @return Named list keyed by **node id** (for canvas) with slots
+#'   `status`, `label`, `ratio`, `pct1`, `n_items`, plus `lavaan_name`.
+#' @keywords internal
+unidimensionality_for_latents <- function(state, dat, latent_ids = NULL,
+                                          meas = NULL) {
+  state <- ensure_node_kind_columns(state)
+  if (is.null(meas)) {
+    meas <- state$edges[state$edges$type == "measurement", , drop = FALSE]
+  }
+  if (is.null(latent_ids)) {
+    latent_ids <- unique(as.character(meas$from))
+  }
+  latent_ids <- unique(as.character(latent_ids))
+  out <- list()
+  if (!length(latent_ids) || is.null(dat) || !NROW(dat) || !nrow(meas)) {
+    return(out)
+  }
+  for (lat in latent_ids) {
+    ind_ids <- unique(as.character(meas$to[meas$from == lat]))
+    ind_cols <- vapply(ind_ids, function(id) lavaan_var_name(state, id), character(1))
+    ind_cols <- ind_cols[ind_cols %in% names(dat)]
+    slot <- pca_unidimensionality(
+      if (length(ind_cols)) dat[, ind_cols, drop = FALSE] else NULL
+    )
+    slot$lavaan_name <- lavaan_var_name(state, lat)
+    out[[lat]] <- slot
+  }
+  out
+}
+
 #' Structural dependent-variable node ids (targets of non-measurement links)
 #' @keywords internal
 structural_dv_ids <- function(state, edges = state$edges) {
@@ -801,6 +970,10 @@ attach_latent_factor_scores <- function(state, dat, score_method = "own") {
     }
   }
 
+  # Reliability / unidimensionality on raw indicators (before score row filter)
+  cronbach <- cronbach_alpha_for_latents(state, dat, latent_ids, meas = meas)
+  uni <- unidimensionality_for_latents(state, dat, latent_ids, meas = meas)
+
   score_cols <- vapply(
     latent_ids,
     function(id) lavaan_var_name(state, id),
@@ -849,6 +1022,8 @@ attach_latent_factor_scores <- function(state, dat, score_method = "own") {
     measurement_syntax = syntax,
     measurement_score_weights = score_weights,
     measurement_score_fits = score_fits,
+    measurement_cronbach_alpha = cronbach,
+    measurement_unidimensionality = uni,
     latent_score_method = score_method
   )
 }
@@ -910,6 +1085,8 @@ fit_structural_model <- function(state, data, include_edge_ids = NULL,
     path_res$measurement_fit <- attached$measurement_fit
     path_res$measurement_score_weights <- attached$measurement_score_weights
     path_res$measurement_score_fits <- attached$measurement_score_fits
+    path_res$measurement_cronbach_alpha <- attached$measurement_cronbach_alpha
+    path_res$measurement_unidimensionality <- attached$measurement_unidimensionality
     path_res$latent_score_method <- attached$latent_score_method
     path_res$engine <- "path"
     return(path_res)

@@ -45,9 +45,14 @@ fit_pvalue_model <- function(state, data, alpha = 0.05, mark_nonsig = TRUE,
   )
   state2 <- apply_estimates_to_edges(state, fitted$estimates, included_edge_ids = all_display_ids)
   state2 <- apply_r_squared_to_nodes(state2, fitted$r_squared)
+  state2 <- apply_unidimensionality_to_nodes(
+    state2, fitted$measurement_unidimensionality
+  )
   adj <- apply_confirmatory_p_adjust(state2, fitted$estimates, method = conf_adjust)
   state2 <- adj$state
   fitted$estimates <- adj$estimates
+  # Canvas mutes confirmatory links with p > α (gray); exploratory may also be excluded.
+  state2$pvalue_alpha <- as.numeric(alpha)
 
   if (mark_nonsig && nrow(state2$edges)) {
     for (i in seq_len(nrow(state2$edges))) {
@@ -82,6 +87,8 @@ fit_pvalue_model <- function(state, data, alpha = 0.05, mark_nonsig = TRUE,
     measurement_fit = fitted$measurement_fit,
     measurement_score_weights = fitted$measurement_score_weights,
     measurement_score_fits = fitted$measurement_score_fits,
+    measurement_cronbach_alpha = fitted$measurement_cronbach_alpha,
+    measurement_unidimensionality = fitted$measurement_unidimensionality,
     latent_score_method = fitted$latent_score_method %||% latent_score_method
   )
 }
@@ -613,6 +620,7 @@ format_measurement_equations_html <- function(result, state = NULL,
       }
     }
   }
+  cronbach <- result$measurement_cronbach_alpha
   if (!is.null(w_list) && length(w_list)) {
     score_blocks <- vapply(names(w_list), function(lat) {
       ww <- w_list[[lat]]
@@ -630,16 +638,61 @@ format_measurement_equations_html <- function(result, state = NULL,
         body <- paste0(piece, "&middot;", ind_disp)
         parts <- c(parts, if (!length(parts)) body else paste0(" + ", body))
       }
+      a_val <- if (!is.null(cronbach) && lat %in% names(cronbach)) {
+        as.numeric(cronbach[[lat]])
+      } else {
+        NA_real_
+      }
+      a_txt <- if (is.finite(a_val)) {
+        sprintf(" · Cronbach\u2019s \u03b1 = %s", formatC(a_val, digits = 2, format = "f"))
+      } else {
+        ""
+      }
+      uni_slot <- NULL
+      uni_map <- result$measurement_unidimensionality
+      if (is.list(uni_map) && length(uni_map)) {
+        # Keys are node ids; match via lavaan_name or display fallback
+        for (uid in names(uni_map)) {
+          slot <- uni_map[[uid]]
+          if (!is.list(slot)) next
+          lv_nm <- as.character(slot$lavaan_name %||% "")
+          if (identical(lv_nm, lat) || identical(uid, lat)) {
+            uni_slot <- slot
+            break
+          }
+        }
+      }
+      uni_txt <- ""
+      if (!is.null(uni_slot)) {
+        ust <- as.character(uni_slot$status %||% "")
+        ulab <- as.character(uni_slot$label %||% "")
+        uratio <- suppressWarnings(as.numeric(uni_slot$ratio))
+        if (nzchar(ust) && !is.na(ust)) {
+          detail <- if (is.finite(uratio)) {
+            sprintf("\u03bb\u2081/\u03bb\u2082 = %s", formatC(uratio, digits = 2, format = "f"))
+          } else {
+            ""
+          }
+          lab_bit <- if (nzchar(ulab)) ulab else ust
+          uni_txt <- if (nzchar(detail)) {
+            sprintf(" · %s (%s)", lab_bit, detail)
+          } else {
+            sprintf(" · %s", lab_bit)
+          }
+        }
+      }
       sprintf(
         paste0(
           "<div class=\"smt-eq-block\">",
-          "<div class=\"smt-eq-tag\">factor score · %s (%s)</div>",
+          "<div class=\"smt-eq-tag\">factor score · %s (%s)%s%s</div>",
           "<div class=\"smt-eq-line\">",
           "<span class=\"smt-eq-lhs\">%s&#770;</span> = %s",
           "</div></div>"
         ),
         lat_disp,
         score_tag,
+        a_txt,
+        uni_txt,
         lat_disp,
         paste(parts, collapse = "")
       )
@@ -652,14 +705,18 @@ format_measurement_equations_html <- function(result, state = NULL,
     paste0(
       "<div class=\"smt-eq-note\">",
       "Path / plots use joint Thomson/regression scores from the multi-factor CFA ",
-      "(items from other constructs can receive non-zero weight when factors correlate).",
+      "(items from other constructs can receive non-zero weight when factors correlate). ",
+      "Cronbach\u2019s \u03b1 and the PCA unidimensionality screen (\u03bb\u2081/\u03bb\u2082) ",
+      "use each latent\u2019s own indicators only.",
       "</div>"
     )
   } else {
     paste0(
       "<div class=\"smt-eq-note\">",
       "Path / plots score each latent from its own measurement indicators only ",
-      "(items from other constructs are never mixed into the score).",
+      "(items from other constructs are never mixed into the score). ",
+      "Cronbach\u2019s \u03b1 is classical reliability; ",
+      "uni \u2713 / weak 1D / multi ? is a PCA screen (\u03bb\u2081/\u03bb\u2082 \u2265 3 / 2\u20133 / &lt; 2).",
       "</div>"
     )
   }

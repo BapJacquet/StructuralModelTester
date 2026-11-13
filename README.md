@@ -87,7 +87,7 @@ run_app()
 
 ## Quick start
 
-1. Demo columns (`X`, `M`, `Y`, `Z1`, `Z2`) load automatically — or **Open data** (CSV / TSV / Excel / RDS). For SoSci Survey exports, set **Skip rows after header** to `1` on the Data tab to drop the description row.
+1. On launch, a welcome modal offers built-in examples (**Path model**, **Interaction**, **Latent measurement**) or **Start blank**. Nothing is loaded until you choose. Reopen anytime via **Examples** in the top bar — or **Open data** (CSV / TSV / Excel / RDS). For SoSci Survey exports, set **Skip rows after header** to `1` on the Data tab to drop the description row.
 2. In **Variables**, click **＋** to place observed nodes (or **Add node** / **Add latent** / **Interaction**).
 3. On **Model**, drag between ports. Choose link role: Fixed / Confirmatory / Exploratory / Measurement.
 4. Set **Expected `b`** (and uncertainty) on selected structural links for simulation & power.
@@ -96,7 +96,7 @@ run_app()
 
 **Save project** / **Open project** stores the graph (nodes, links, priors, sim knobs) as JSON. Data files are opened separately.
 
-A ready-made interaction demo graph is in [`inst/sample_data/readme-demo-model.json`](inst/sample_data/readme-demo-model.json).
+Built-in example graphs and CSVs live under [`inst/sample_data/`](inst/sample_data/).
 
 ## Project file format
 

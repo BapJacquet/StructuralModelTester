@@ -824,7 +824,80 @@ interaction_categorical_x_layers <- function(y_binary = FALSE,
   )
 }
 
+#' Structural-model simple-slope endpoints at dodged binary-X positions
+#'
+#' Uses the fitted (or prior) equation
+#' `η = α + β_x x + β_z z + β_× x z` with `α` anchored at the reference
+#' cell mean on the plot (`x=0`, `z=0`). Lines follow model slopes and need
+#' not pass through the other cell means when covariates were adjusted.
+#' @keywords internal
+interaction_structural_line_df <- function(x, z01, y,
+                                           beta_x = 0,
+                                           beta_z = 0,
+                                           beta_ix = 0,
+                                           group_levels = NULL,
+                                           link = c("identity", "logit"),
+                                           dodge_width = interaction_cat_dodge_width()) {
+  link <- match.arg(link)
+  if (!is.finite(beta_x)) beta_x <- 0
+  if (!is.finite(beta_z)) beta_z <- 0
+  if (!is.finite(beta_ix)) beta_ix <- 0
+  x <- as.numeric(x)
+  z01 <- as.numeric(z01)
+  y <- as.numeric(y)
+  ok <- is.finite(x) & is.finite(z01) & is.finite(y)
+  if (sum(ok) < 2L) return(NULL)
+  x <- x[ok]
+  z01 <- z01[ok]
+  y <- y[ok]
+  ref0 <- x <= 0.5 & z01 <= 0.5
+  if (sum(ref0) < 1L) return(NULL)
+  y_ref0 <- mean(y[ref0])
+  if (!is.finite(y_ref0)) return(NULL)
+
+  if (is.null(group_levels) || !length(group_levels)) {
+    group_levels <- c("0", "1")
+  }
+  group_levels <- as.character(group_levels)
+  if (!length(group_levels)) return(NULL)
+  g_ref <- group_levels[[1]]
+  g_act <- if (length(group_levels) >= 2L) group_levels[[2]] else group_levels[[1]]
+  offs <- interaction_group_dodge_offsets(group_levels, dodge_width)
+
+  eta0 <- interaction_arrow_to_eta(y_ref0, link)
+  xs <- c(0, 1)
+  # z = 0 (reference moderator)
+  y_ref <- interaction_arrow_from_eta(eta0 + beta_x * xs, link)
+  # z = 1 (active moderator)
+  y_act <- interaction_arrow_from_eta(
+    eta0 + beta_z + (beta_x + beta_ix) * xs,
+    link
+  )
+  off_ref <- unname(offs[[g_ref]])
+  off_act <- unname(offs[[g_act]])
+  if (length(off_ref) != 1L || !is.finite(off_ref)) off_ref <- 0
+  if (length(off_act) != 1L || !is.finite(off_act)) off_act <- 0
+
+  rbind(
+    data.frame(
+      x = xs + off_ref,
+      y = y_ref,
+      z = factor(g_ref, levels = group_levels),
+      stringsAsFactors = FALSE
+    ),
+    data.frame(
+      x = xs + off_act,
+      y = y_act,
+      z = factor(g_act, levels = group_levels),
+      stringsAsFactors = FALSE
+    )
+  )
+}
+
 #' Fitted simple-slope line endpoints at dodged binary-X positions
+#'
+#' Prefer [interaction_structural_line_df()] when structural βs are available.
+#' This per-group `lm`/`glm` fallback is kept for plots without a path model.
 #' @keywords internal
 interaction_binary_x_fit_line_df <- function(plot_df,
                                              y_binary = FALSE,
@@ -1026,7 +1099,8 @@ interaction_correction_arrow_df <- function(x, z01, y,
                                             x_is_binary = FALSE,
                                             link = c("identity", "logit"),
                                             active_group = NULL,
-                                            group_levels = NULL) {
+                                            group_levels = NULL,
+                                            end_at_mean = FALSE) {
   link <- match.arg(link)
   if (!is.finite(beta_ix)) return(NULL)
   if (!is.finite(beta_x)) beta_x <- 0
@@ -1046,29 +1120,21 @@ interaction_correction_arrow_df <- function(x, z01, y,
   active_group <- as.character(active_group)
 
   if (isTRUE(x_is_binary)) {
-    ref <- x <= 0.5 & z01 <= 0.5
-    act0 <- x <= 0.5 & z01 > 0.5
+    ref0 <- x <= 0.5 & z01 <= 0.5
     x_star <- 1
     z_star <- 1
+    x0 <- 0
     prod <- x_star * z_star
     delta <- beta_ix * prod
     if (!is.finite(delta) || abs(delta) < 1e-9) return(NULL)
-    # Ghost must start on the active-group mean dot at x=0 (same summary
-    # point as stat_summary), not a reference-cell + β_z reconstruction.
-    if (sum(act0) >= 1L) {
-      y0 <- mean(y[act0])
-      y_ref <- if (sum(ref) >= 1L) mean(y[ref]) else y0
-    } else if (sum(ref) >= 2L) {
-      y_ref <- mean(y[ref])
-      y0 <- interaction_arrow_from_eta(
-        interaction_arrow_to_eta(y_ref, link) + beta_z * z_star,
-        link
-      )
-    } else {
-      return(NULL)
-    }
-    x0 <- 0
-    eta0 <- interaction_arrow_to_eta(y0, link)
+    # Anchor α at the reference cell; ghost/arrow use structural βs so the
+    # arrow length matches model b (lines need not hit other cell means).
+    if (sum(ref0) < 1L) return(NULL)
+    y_ref <- mean(y[ref0])
+    if (!is.finite(y_ref)) return(NULL)
+    eta_ref <- interaction_arrow_to_eta(y_ref, link)
+    eta0 <- eta_ref + beta_z * z_star
+    y0 <- interaction_arrow_from_eta(eta0, link)
     eta_mains <- eta0 + beta_x * x_star
     eta_full <- eta_mains + delta
     y_mains <- interaction_arrow_from_eta(eta_mains, link)
@@ -1207,6 +1273,68 @@ interaction_correction_arrow_layers <- function(arrow_df,
   )
 }
 
+#' Structural βs for interaction simple-slope / ghost overlays
+#' @return list(beta_ix, beta_x, beta_z, use_fit) or NULL
+#' @keywords internal
+interaction_structural_betas <- function(state, ix_id, to_id, to_level,
+                                         x_id, z_id,
+                                         prior_mean,
+                                         est,
+                                         show_fit = FALSE) {
+  use_fit <- isTRUE(show_fit) && is.finite(est)
+  if (use_fit) {
+    beta_ix <- as.numeric(est)
+    which <- "estimate"
+  } else if (is.finite(prior_mean)) {
+    beta_ix <- as.numeric(prior_mean)
+    which <- "prior"
+  } else {
+    return(NULL)
+  }
+  list(
+    beta_ix = beta_ix,
+    beta_x = main_effect_beta_for_dv(state, x_id, to_id, to_level, which),
+    beta_z = main_effect_beta_for_dv(state, z_id, to_id, to_level, which),
+    use_fit = use_fit
+  )
+}
+
+#' Binary-X interaction lines from the structural model (fallback: per-group lm)
+#' @keywords internal
+interaction_binary_x_overlay_lines <- function(state, ix_id, to_id, to_level,
+                                               x_id, z_id,
+                                               x, z01, y,
+                                               plot_df,
+                                               group_levels,
+                                               prior_mean,
+                                               est,
+                                               show_fit = FALSE,
+                                               y_binary = FALSE,
+                                               rel_kind = "linear") {
+  if (!isTRUE(show_fit)) return(NULL)
+  betas <- interaction_structural_betas(
+    state, ix_id, to_id, to_level, x_id, z_id, prior_mean, est, show_fit
+  )
+  if (!is.null(betas) && isTRUE(betas$use_fit)) {
+    link <- if (isTRUE(y_binary)) "logit" else "identity"
+    df <- interaction_structural_line_df(
+      x, z01, y,
+      beta_x = betas$beta_x,
+      beta_z = betas$beta_z,
+      beta_ix = betas$beta_ix,
+      group_levels = group_levels,
+      link = link
+    )
+    if (!is.null(df) && nrow(df)) return(df)
+  }
+  interaction_binary_x_fit_line_df(
+    plot_df,
+    y_binary = y_binary,
+    rel_kind = rel_kind,
+    group_levels = group_levels
+  )
+}
+
 #' Build prior or fit correction arrows for an interaction plot
 #'
 #' Draws a single correction (fit estimate when available, otherwise prior)
@@ -1242,29 +1370,24 @@ interaction_correction_arrows_for_plot <- function(state, ix_id, to_id, to_level
     }
   }
 
-  use_fit <- isTRUE(show_fit) && is.finite(est)
-  if (use_fit) {
-    beta_ix <- as.numeric(est)
-    beta_x <- main_effect_beta_for_dv(state, x_id, to_id, to_level, "estimate")
-    beta_z <- main_effect_beta_for_dv(state, z_id, to_id, to_level, "estimate")
+  betas <- interaction_structural_betas(
+    state, ix_id, to_id, to_level, x_id, z_id, prior_mean, est, show_fit
+  )
+  if (is.null(betas)) return(list())
+  if (isTRUE(betas$use_fit)) {
     lt <- "solid"
     lw <- 0.9
-  } else if (is.finite(prior_mean)) {
-    beta_ix <- as.numeric(prior_mean)
-    beta_x <- main_effect_beta_for_dv(state, x_id, to_id, to_level, "prior")
-    beta_z <- main_effect_beta_for_dv(state, z_id, to_id, to_level, "prior")
+  } else {
     lt <- "dashed"
     lw <- 0.75
-  } else {
-    return(list())
   }
 
   link <- if (isTRUE(y_binary)) "logit" else "identity"
   ad <- interaction_correction_arrow_df(
     x, z01, y,
-    beta_ix = beta_ix,
-    beta_x = beta_x,
-    beta_z = beta_z,
+    beta_ix = betas$beta_ix,
+    beta_x = betas$beta_x,
+    beta_z = betas$beta_z,
     x_is_binary = x_is_binary,
     link = link,
     active_group = active_group,
@@ -1288,7 +1411,34 @@ interaction_correction_arrows_for_plot <- function(state, ix_id, to_id, to_level
   )
 }
 
-#' Level labels for a binary node matching `as_binary01` coding (0, then 1)
+#' 0/1 coding for a binary node matching path-model treatment coding
+#'
+#' Base / first declared level → 0; the other level → 1. Falls back to
+#' [as_binary01()] only when no node coding is available (alphabetical for
+#' character — which can disagree with the model).
+#' @keywords internal
+binary01_for_node <- function(state, node_id, x) {
+  if (is.null(x)) return(integer())
+  xc <- as.character(x)
+  base <- NA_character_
+  levs <- character()
+  if (!is.null(state) && !is.na(node_id) && nzchar(as.character(node_id))) {
+    meta <- node_factor_coding(state, node_id)
+    if (!is.na(meta$base) && nzchar(as.character(meta$base))) {
+      base <- as.character(meta$base)
+    }
+    if (length(meta$levels)) levs <- as.character(meta$levels)
+  }
+  if ((is.na(base) || !nzchar(base)) && length(levs)) {
+    base <- levs[[1]]
+  }
+  if (!is.na(base) && nzchar(base) && any(xc == base, na.rm = TRUE)) {
+    return(as.integer(xc != base))
+  }
+  as_binary01(x)
+}
+
+#' Level labels for a binary node matching path-model / [binary01_for_node] coding
 #' @keywords internal
 binary_plot_level_labels <- function(state, node_id, x = NULL) {
   levs <- character()
@@ -1426,12 +1576,18 @@ edge_interaction_plot <- function(state, data, ix_id, to_id, est, est_std, etype
   x_is_binary <- FALSE
 
   # Prefer continuous / binary as the x-axis when one side is categorical
+  bin_x_num <- function(id, vec, kind) {
+    if (identical(kind, "binary")) {
+      as.numeric(binary01_for_node(state, id, vec))
+    } else {
+      factor_numeric_for_product(vec, center = FALSE)
+    }
+  }
   if (identical(a_kind, "categorical") || identical(b_kind, "categorical")) {
     # Use the continuous/binary factor as x when possible; otherwise message
     if (identical(a_kind, "categorical") &&
           (identical(b_kind, "continuous") || identical(b_kind, "binary"))) {
-      # already set x from b in the else branch? re-resolve:
-      x <- factor_numeric_for_product(df$b, center = FALSE)
+      x <- bin_x_num(fb, df$b, b_kind)
       z_raw <- df$a
       x_lab <- node_plot_label(state, fb)
       z_lab <- node_plot_label(state, fa)
@@ -1442,13 +1598,13 @@ edge_interaction_plot <- function(state, data, ix_id, to_id, est, est_std, etype
         keep_lv <- as.character(df$a) == fac_w$level_a |
           as.character(df$a) == variable_coding(df$a)$base
         df <- df[keep_lv, , drop = FALSE]
-        x <- factor_numeric_for_product(df$b, center = FALSE)
+        x <- bin_x_num(fb, df$b, b_kind)
         z_raw <- df$a
         z_lab <- paste0(node_plot_label(state, fa), "[", fac_w$level_a, "]")
       }
     } else if (identical(b_kind, "categorical") &&
                  (identical(a_kind, "continuous") || identical(a_kind, "binary"))) {
-      x <- factor_numeric_for_product(df$a, center = FALSE)
+      x <- bin_x_num(fa, df$a, a_kind)
       z_raw <- df$b
       x_lab <- node_plot_label(state, fa)
       z_lab <- node_plot_label(state, fb)
@@ -1459,7 +1615,7 @@ edge_interaction_plot <- function(state, data, ix_id, to_id, est, est_std, etype
         keep_lv <- as.character(df$b) == fac_w$level_b |
           as.character(df$b) == variable_coding(df$b)$base
         df <- df[keep_lv, , drop = FALSE]
-        x <- factor_numeric_for_product(df$a, center = FALSE)
+        x <- bin_x_num(fa, df$a, a_kind)
         z_raw <- df$b
         z_lab <- paste0(node_plot_label(state, fb), "[", fac_w$level_b, "]")
       }
@@ -1474,7 +1630,7 @@ edge_interaction_plot <- function(state, data, ix_id, to_id, est, est_std, etype
     }
   } else if (identical(a_kind, "continuous") ||
                (identical(a_kind, "binary") && !identical(b_kind, "continuous"))) {
-    x <- factor_numeric_for_product(df$a, center = FALSE)
+    x <- bin_x_num(fa, df$a, a_kind)
     z_raw <- df$b
     x_lab <- node_plot_label(state, fa)
     z_lab <- node_plot_label(state, fb)
@@ -1482,7 +1638,7 @@ edge_interaction_plot <- function(state, data, ix_id, to_id, est, est_std, etype
     z_id <- fb
     x_is_binary <- identical(a_kind, "binary")
   } else {
-    x <- factor_numeric_for_product(df$b, center = FALSE)
+    x <- bin_x_num(fb, df$b, b_kind)
     z_raw <- df$a
     x_lab <- node_plot_label(state, fb)
     z_lab <- node_plot_label(state, fa)
@@ -1540,11 +1696,16 @@ edge_interaction_plot <- function(state, data, ix_id, to_id, est, est_std, etype
     z_levs <- levels(z_fac)
     if (isTRUE(show_fit)) {
       if (isTRUE(x_is_binary)) {
-        fit_df <- interaction_binary_x_fit_line_df(
-          plot_df,
+        z01_cat <- as.numeric(z_fac != levels(z_fac)[[1]])
+        fit_df <- interaction_binary_x_overlay_lines(
+          state, ix_id, to_id, to_level,
+          x_id = x_id, z_id = z_id,
+          x = x, z01 = z01_cat, y = df$y,
+          plot_df = plot_df,
+          group_levels = z_levs,
+          prior_mean = prior_mean, est = est, show_fit = show_fit,
           y_binary = identical(y_kind, "binary"),
-          rel_kind = rel_kind,
-          group_levels = z_levs
+          rel_kind = rel_kind
         )
         for (ly in interaction_binary_x_fit_layers(fit_df)) p <- p + ly
       } else {
@@ -1602,7 +1763,7 @@ edge_interaction_plot <- function(state, data, ix_id, to_id, est, est_std, etype
   if (identical(z_kind, "binary")) {
     z_src <- if (identical(z_id, fa)) df$a else if (identical(z_id, fb)) df$b else z_raw
     z_labs <- binary_plot_level_labels(state, z_id, z_src)
-    z01_bin <- as_binary01(z_raw)
+    z01_bin <- binary01_for_node(state, z_id, z_raw)
     z_fac <- factor(z01_bin, levels = c(0, 1), labels = z_labs)
   } else {
     z_num <- as.numeric(z_raw)
@@ -1671,13 +1832,23 @@ edge_interaction_plot <- function(state, data, ix_id, to_id, est, est_std, etype
   }
 
   z_levs <- levels(z_fac)
+  z01_plot <- if (!is.null(z01_bin)) {
+    as.numeric(z01_bin)
+  } else {
+    # Continuous moderator split into low/high: treat high (+1 SD) as 1
+    as.numeric(grepl("\\+|high", as.character(z_fac), ignore.case = TRUE))
+  }
   if (isTRUE(show_fit)) {
     if (isTRUE(x_is_binary)) {
-      fit_df <- interaction_binary_x_fit_line_df(
-        plot_df,
+      fit_df <- interaction_binary_x_overlay_lines(
+        state, ix_id, to_id, to_level,
+        x_id = x_id, z_id = z_id,
+        x = x, z01 = z01_plot, y = df$y,
+        plot_df = plot_df,
+        group_levels = z_levs,
+        prior_mean = prior_mean, est = est, show_fit = show_fit,
         y_binary = identical(y_kind, "binary"),
-        rel_kind = rel_kind,
-        group_levels = z_levs
+        rel_kind = rel_kind
       )
       for (ly in interaction_binary_x_fit_layers(fit_df)) p <- p + ly
     } else {
@@ -1712,13 +1883,6 @@ edge_interaction_plot <- function(state, data, ix_id, to_id, est, est_std, etype
         linewidth = 1
       )
     }
-  }
-
-  z01_plot <- if (!is.null(z01_bin)) {
-    as.numeric(z01_bin)
-  } else {
-    # Continuous moderator split into low/high: treat high (+1 SD) as 1
-    as.numeric(grepl("\\+|high", as.character(z_fac), ignore.case = TRUE))
   }
   active_z <- if (!is.null(z01_bin) && length(z_levs) >= 2L) {
     z_levs[[2]]

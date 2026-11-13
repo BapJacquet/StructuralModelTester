@@ -230,6 +230,11 @@ fit_aic_bic_search <- function(state, data, criterion = c("aic", "bic"), max_exp
   included_display <- unique(c(included, def_ids))
   state_best <- apply_estimates_to_edges(state, best$estimates, included_edge_ids = included_display)
   state_best <- apply_r_squared_to_nodes(state_best, best$r_squared)
+  state_best <- apply_unidimensionality_to_nodes(
+    state_best, best$measurement_unidimensionality
+  )
+  # Gray muting of nonsig confirmatory is p-value-analysis only
+  state_best$pvalue_alpha <- NULL
   state_best <- apply_weight_labels_to_edges(state_best, wsums)
   state_best <- mark_edges_below_weight(
     state_best, wsums,
@@ -242,6 +247,10 @@ fit_aic_bic_search <- function(state, data, criterion = c("aic", "bic"), max_exp
     min_weight = if (mark_low_weight) min_weight else 0
   )
   state_avg <- apply_r_squared_to_nodes(state_avg, averaged_r2)
+  state_avg <- apply_unidimensionality_to_nodes(
+    state_avg, best$measurement_unidimensionality
+  )
+  state_avg$pvalue_alpha <- NULL
 
   list(
     state = state_best,
@@ -275,6 +284,8 @@ fit_aic_bic_search <- function(state, data, criterion = c("aic", "bic"), max_exp
     measurement_fit = best$measurement_fit,
     measurement_score_weights = best$measurement_score_weights,
     measurement_score_fits = best$measurement_score_fits,
+    measurement_cronbach_alpha = best$measurement_cronbach_alpha,
+    measurement_unidimensionality = best$measurement_unidimensionality,
     latent_score_method = best$latent_score_method %||% latent_score_method
   )
 }

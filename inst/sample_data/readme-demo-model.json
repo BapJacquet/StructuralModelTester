@@ -4,6 +4,7 @@
     {
       "id": "Age",
       "label": "Age",
+      "observed_column": "Age",
       "shape": "box",
       "x": 80,
       "y": 60,
@@ -14,12 +15,16 @@
       "factor_ordered": false,
       "sim_mean": 40,
       "sim_sd": 12,
+      "sim_intercept": 0,
       "sim_resid_sd": 1,
-      "sim_var_kind": "continuous"
+      "sim_var_kind": "continuous",
+      "sim_design_mode": "inter",
+      "sim_alloc_mode": "probability"
     },
     {
       "id": "Gender",
       "label": "Gender",
+      "observed_column": "Gender",
       "shape": "box",
       "x": 80,
       "y": 180,
@@ -32,12 +37,16 @@
       "factor_levels": "Male\nFemale",
       "sim_mean": 0,
       "sim_sd": 1,
+      "sim_intercept": 0,
       "sim_resid_sd": 1,
-      "sim_var_kind": "binary"
+      "sim_var_kind": "binary",
+      "sim_design_mode": "inter",
+      "sim_alloc_mode": "probability"
     },
     {
       "id": "Method",
       "label": "Method",
+      "observed_column": "Method",
       "shape": "box",
       "x": 80,
       "y": 300,
@@ -50,12 +59,16 @@
       "factor_levels": "T\nI",
       "sim_mean": 0,
       "sim_sd": 1,
+      "sim_intercept": 0,
       "sim_resid_sd": 1,
-      "sim_var_kind": "binary"
+      "sim_var_kind": "binary",
+      "sim_design_mode": "inter",
+      "sim_alloc_mode": "probability"
     },
     {
       "id": "Score",
       "label": "Score",
+      "observed_column": "Score",
       "shape": "box",
       "x": 420,
       "y": 180,
@@ -66,8 +79,11 @@
       "factor_ordered": false,
       "sim_mean": 0,
       "sim_sd": 1,
+      "sim_intercept": 0,
       "sim_resid_sd": 8,
-      "sim_var_kind": "continuous"
+      "sim_var_kind": "continuous",
+      "sim_design_mode": "inter",
+      "sim_alloc_mode": "probability"
     },
     {
       "id": "ix",
@@ -84,8 +100,11 @@
       "factor_ordered": false,
       "sim_mean": 0,
       "sim_sd": 1,
+      "sim_intercept": 0,
       "sim_resid_sd": 1,
-      "sim_var_kind": "continuous"
+      "sim_var_kind": "continuous",
+      "sim_design_mode": "inter",
+      "sim_alloc_mode": "probability"
     }
   ],
   "edges": [

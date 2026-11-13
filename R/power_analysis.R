@@ -112,6 +112,9 @@ power_n_grid <- function(n_max, n_points = 7L) {
 }
 
 #' Confirmatory analyzable edge ids used as the power target
+#'
+#' Measurement links are never power targets (they only feed the sim DGP /
+#' CFA stage). Only structural confirmatory paths are counted.
 #' @keywords internal
 confirmatory_power_edge_ids <- function(state) {
   analyzable_edge_ids(

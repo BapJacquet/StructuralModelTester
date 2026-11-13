@@ -13,6 +13,10 @@ empty_model_state <- function() {
       y = numeric(),
       r_squared = numeric(),
       r_squared_kind = character(),
+      uni_status = character(),
+      uni_label = character(),
+      uni_ratio = numeric(),
+      uni_pct1 = numeric(),
       node_kind = character(),
       factor_a = character(),
       factor_b = character(),
@@ -576,6 +580,10 @@ add_node <- function(state, label, observed_column = NA_character_,
     y = 80 + (n %/% 4) * 100,
     r_squared = NA_real_,
     r_squared_kind = NA_character_,
+    uni_status = NA_character_,
+    uni_label = NA_character_,
+    uni_ratio = NA_real_,
+    uni_pct1 = NA_real_,
     node_kind = kind,
     factor_a = NA_character_,
     factor_b = NA_character_,
@@ -625,6 +633,10 @@ add_interaction_node <- function(state) {
     y = 80 + (n %/% 4) * 100,
     r_squared = NA_real_,
     r_squared_kind = NA_character_,
+    uni_status = NA_character_,
+    uni_label = NA_character_,
+    uni_ratio = NA_real_,
+    uni_pct1 = NA_real_,
     node_kind = "interaction",
     factor_a = NA_character_,
     factor_b = NA_character_,
@@ -806,6 +818,8 @@ add_edge <- function(state, from, to,
   if (!is.na(to_level) && nzchar(to_level)) {
     lab <- paste0(lab, "\u2192", to_level)
   }
+  # Measurement Expected effect = loading λ (default 1 for a usable sim DGP)
+  prior_mean0 <- if (identical(type, "measurement")) 1 else 0
   new_row <- data.frame(
     id = eid,
     from = from,
@@ -822,7 +836,7 @@ add_edge <- function(state, from, to,
     estimate_std = NA_real_,
     label = lab,
     prior_family = "normal",
-    prior_mean = 0,
+    prior_mean = prior_mean0,
     prior_sd = 1,
     stringsAsFactors = FALSE
   )
@@ -1733,15 +1747,68 @@ apply_r_squared_to_nodes <- function(state, r2_map) {
   state
 }
 
+#' Ensure latent unidimensionality columns exist on nodes
+#' @keywords internal
+ensure_node_uni_columns <- function(state) {
+  if (!"uni_status" %in% names(state$nodes)) {
+    state$nodes$uni_status <- NA_character_
+  }
+  if (!"uni_label" %in% names(state$nodes)) {
+    state$nodes$uni_label <- NA_character_
+  }
+  if (!"uni_ratio" %in% names(state$nodes)) {
+    state$nodes$uni_ratio <- NA_real_
+  }
+  if (!"uni_pct1" %in% names(state$nodes)) {
+    state$nodes$uni_pct1 <- NA_real_
+  }
+  state
+}
+
+#' Apply PCA unidimensionality diagnostics onto latent nodes
+#'
+#' @param uni_map Named list keyed by node id (from `unidimensionality_for_latents`).
+#' @keywords internal
+apply_unidimensionality_to_nodes <- function(state, uni_map) {
+  state <- ensure_node_uni_columns(state)
+  state$nodes$uni_status <- NA_character_
+  state$nodes$uni_label <- NA_character_
+  state$nodes$uni_ratio <- NA_real_
+  state$nodes$uni_pct1 <- NA_real_
+  if (is.null(uni_map) || !length(uni_map) || !nrow(state$nodes)) return(state)
+  for (nid in names(uni_map)) {
+    idx <- match(nid, state$nodes$id)
+    if (is.na(idx)) next
+    slot <- uni_map[[nid]]
+    if (is.null(slot) || !is.list(slot)) next
+    st <- as.character(slot$status %||% NA_character_)
+    if (!nzchar(st) || is.na(st)) next
+    state$nodes$uni_status[idx] <- st
+    lab <- as.character(slot$label %||% "")
+    state$nodes$uni_label[idx] <- if (nzchar(lab)) lab else NA_character_
+    ratio <- suppressWarnings(as.numeric(slot$ratio))
+    pct1 <- suppressWarnings(as.numeric(slot$pct1))
+    state$nodes$uni_ratio[idx] <- if (is.finite(ratio)) ratio else NA_real_
+    state$nodes$uni_pct1[idx] <- if (is.finite(pct1)) pct1 else NA_real_
+  }
+  state
+}
+
 #' Reset fit results on edges
 #' @keywords internal
 clear_fit_results <- function(state) {
   state <- ensure_node_r2_columns(state)
+  state <- ensure_node_uni_columns(state)
   state <- ensure_edge_to_port(state)
   state <- refresh_interaction_nodes(state)
+  state$pvalue_alpha <- NULL
   if (nrow(state$nodes)) {
     state$nodes$r_squared <- NA_real_
     state$nodes$r_squared_kind <- NA_character_
+    state$nodes$uni_status <- NA_character_
+    state$nodes$uni_label <- NA_character_
+    state$nodes$uni_ratio <- NA_real_
+    state$nodes$uni_pct1 <- NA_real_
   }
   if (!nrow(state$edges)) return(state)
   if (!"level" %in% names(state$edges)) state$edges$level <- NA_character_

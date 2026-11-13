@@ -90,6 +90,11 @@ smt_ui <- function() {
           shiny::fileInput("project_file", label = NULL, buttonLabel = "Open project",
                            accept = ".json", placeholder = "Project JSON"),
           shiny::downloadButton("save_project", "Save project", class = "smt-btn smt-btn-ghost"),
+          shiny::actionButton(
+            "show_examples", "Examples",
+            class = "smt-btn smt-btn-ghost",
+            title = "Open built-in starting examples"
+          ),
           shiny::actionButton("run_analysis", "Run", class = "smt-btn smt-btn-primary")
         )
       ),
@@ -452,11 +457,13 @@ smt_ui <- function() {
                     title = paste(
                       "Normal prior on the unstandardized coefficient b",
                       "(continuous: slope on the predictor's units; factors: contrast vs base).",
-                      "Used for simulation; ignored by frequentist Run."
+                      "On measurement links this is the loading λ used to simulate indicators",
+                      "(default 1; unset/0 also treated as 1 in Simulate).",
+                      "Used for simulation / power; ignored by frequentist Run."
                     ),
                     shiny::numericInput(
                       "prior_mean_selected",
-                      "Expected b",
+                      "Expected b / λ",
                       value = 0,
                       step = 0.1,
                       width = "110px"
@@ -516,15 +523,18 @@ smt_ui <- function() {
             ),
             shiny::h4("Path coefficients"),
             DT::DTOutput("coef_table"),
-            shiny::h4("Best vs confirmatory"),
-            shiny::helpText(
-              "Confirmatory = best ∪ all confirmatory paths. ",
-              "Confirmatory only = all confirmatory, no exploratory. ",
-              "Null = no free paths; full = every free path."
+            shiny::conditionalPanel(
+              condition = "input.inference_mode == 'search'",
+              shiny::h4("Best vs confirmatory"),
+              shiny::helpText(
+                "Confirmatory = best ∪ all confirmatory paths. ",
+                "Confirmatory only = all confirmatory, no exploratory. ",
+                "Null = no free paths; full = every free path."
+              ),
+              DT::DTOutput("best_vs_conf_table"),
+              shiny::h4("All models"),
+              DT::DTOutput("comparison_table")
             ),
-            DT::DTOutput("best_vs_conf_table"),
-            shiny::h4("All models"),
-            DT::DTOutput("comparison_table"),
             shiny::h4("Model syntax"),
             shiny::verbatimTextOutput("syntax_out")
           )
@@ -551,14 +561,6 @@ smt_server <- function(input, output, session) {
   last_result <- shiny::reactiveVal(NULL)
   status <- shiny::reactiveVal("Load data, build a model, then Run.")
   skip_prepare_mode_write <- shiny::reactiveVal(FALSE)
-
-  sample_path <- system.file("sample_data", "demo.csv", package = "StructuralModelTester")
-  if (!nzchar(sample_path) || !file.exists(sample_path)) {
-    dev_root <- tryCatch(get_dev_pkg_root(), error = function(e) "")
-    if (nzchar(dev_root)) {
-      sample_path <- file.path(dev_root, "inst", "sample_data", "demo.csv")
-    }
-  }
 
   set_raw_data <- function(dat, reset_prepare = TRUE) {
     data_rv(dat)
@@ -632,13 +634,102 @@ smt_server <- function(input, output, session) {
     invisible(TRUE)
   }
 
-  # Load demo data on startup if present
-  shiny::observe({
-    if (file.exists(sample_path) && is.null(data_rv())) {
-      dat <- read_data_file(sample_path, "demo.csv")
-      set_raw_data(dat, reset_prepare = TRUE)
-      status("Demo data loaded. Map columns to nodes or open your own file.")
+  # Welcome modal: no data until the user picks an example (or starts blank).
+  session$onFlushed(function() {
+    shiny::showModal(smt_examples_modal())
+  }, once = TRUE)
+
+  shiny::observeEvent(input$show_examples, {
+    shiny::showModal(smt_examples_modal())
+  }, ignoreInit = TRUE)
+
+  load_builtin_example <- function(id) {
+    ex <- smt_example_resolved(id)
+    if (is.null(ex)) {
+      status(sprintf("Unknown example '%s'.", as.character(id)))
+      return(invisible(FALSE))
     }
+    if (!nzchar(ex$model_path) && !nzchar(ex$data_path)) {
+      status(sprintf("Example '%s' files are missing from sample_data.", ex$id))
+      return(invisible(FALSE))
+    }
+
+    # Model first (clears prior graph), then data.
+    if (nzchar(ex$model_path)) {
+      txt <- paste(readLines(ex$model_path, warn = FALSE, encoding = "UTF-8"), collapse = "\n")
+      st <- model_from_json(txt)
+      prep <- attr(st, "prepare")
+      if (is.null(prep)) prep <- prepare_from_project_json(txt)
+      attr(st, "prepare") <- NULL
+      state(st)
+      prepare_rv(ensure_prepare_state(prep))
+      skip_prepare_mode_write(TRUE)
+      shiny::updateRadioButtons(session, "prepare_mode", selected = prep$mode %||% "steps")
+      shiny::updateTextAreaInput(session, "prepare_script", value = prep$script %||% "")
+    } else {
+      state(empty_model_state())
+      prepare_rv(empty_prepare_state())
+    }
+
+    if (nzchar(ex$data_path)) {
+      dat <- read_data_file(ex$data_path, basename(ex$data_path))
+      set_raw_data(dat, reset_prepare = is.null(ex$model_path) || !nzchar(ex$model_path))
+      last_data_file(list(datapath = ex$data_path, name = basename(ex$data_path)))
+      # Re-apply prepare recipe from the project if present
+      prep <- ensure_prepare_state(prepare_rv())
+      if (!identical(prep$mode, "steps") || nrow(prep$steps) || nzchar(prep$script %||% "")) {
+        res <- try_apply_prepare(dat, prep)
+        prepare_rv(res$prepare)
+        if (is.na(res$error) || !nzchar(res$error)) {
+          analysis_rv(res$data)
+        }
+      }
+    } else {
+      set_raw_data(NULL, reset_prepare = TRUE)
+      last_data_file(NULL)
+    }
+
+    last_result(NULL)
+    results_are_simulated(FALSE)
+    power_result_rv(NULL)
+    sim_data_rv(NULL)
+    shiny::updateRadioButtons(session, "center_view", selected = "model")
+    status(sprintf(
+      "Loaded example “%s”%s%s.",
+      ex$title,
+      if (nzchar(ex$data_path)) sprintf(" · %s", basename(ex$data_path)) else "",
+      if (nzchar(ex$model_path)) " · model" else ""
+    ))
+    shiny::removeModal()
+    invisible(TRUE)
+  }
+
+  shiny::observeEvent(input$smt_example_blank, {
+    state(empty_model_state())
+    set_raw_data(NULL, reset_prepare = TRUE)
+    last_data_file(NULL)
+    last_result(NULL)
+    results_are_simulated(FALSE)
+    power_result_rv(NULL)
+    sim_data_rv(NULL)
+    prepare_rv(empty_prepare_state())
+    status("Blank session — open data or build a model, then Run / Simulate.")
+    shiny::removeModal()
+  }, ignoreInit = TRUE)
+
+  lapply(smt_examples_catalog(), function(ex) {
+    local({
+      eid <- ex$id
+      shiny::observeEvent(input[[paste0("smt_example_", eid)]], {
+        tryCatch(
+          load_builtin_example(eid),
+          error = function(e) {
+            status(paste("Example load failed:", conditionMessage(e)))
+            shiny::removeModal()
+          }
+        )
+      }, ignoreInit = TRUE)
+    })
   })
 
   load_uploaded_data <- function(f, announce = TRUE) {

@@ -261,6 +261,9 @@ apply_best_estimates_from_result <- function(result, state_template) {
     r2 <- r_squared_from_fitted(result, state_template)
   }
   st <- apply_r_squared_to_nodes(st, r2)
+  st <- apply_unidimensionality_to_nodes(
+    st, result$measurement_unidimensionality
+  )
   st <- apply_weight_labels_to_edges(st, result$edge_weights %||% list())
   mark_edges_below_weight(
     st,

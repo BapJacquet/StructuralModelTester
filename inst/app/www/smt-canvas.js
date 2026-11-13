@@ -339,6 +339,9 @@
 
     el.className = "smt-node" + (n.latent ? " latent" : " observed");
     if (!n.latent && n.unmapped) el.classList.add("smt-unmapped");
+    if (n.latent && n.uniStatus) {
+      el.classList.add("smt-uni-" + String(n.uniStatus));
+    }
 
     var levels = normalizeLevels(n.levels);
     // Split/omnibus is categorical-only (binary uses a single treatment-coded port)
@@ -374,6 +377,13 @@
 
     var subs = [];
     if (n.latent) subs.push({ text: "latent", cls: "smt-node-sub-latent" });
+    if (n.latent && n.uniLabel) {
+      subs.push({
+        text: n.uniLabel,
+        cls: "smt-node-sub-uni smt-node-sub-uni-" + String(n.uniStatus || ""),
+        title: n.uniTitle || ""
+      });
+    }
     // Unmapped mark is the title-row icon only (no redundant "unmapped" subtitle)
     if (isCat && n.base) {
       subs.push({ text: "base: " + n.base, cls: "smt-node-sub-base" });
@@ -398,6 +408,7 @@
       var sub = document.createElement("div");
       sub.className = "smt-node-sub " + item.cls;
       sub.textContent = item.text;
+      if (item.title) sub.title = item.title;
       title.appendChild(sub);
     });
 
