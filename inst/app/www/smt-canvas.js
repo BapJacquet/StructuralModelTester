@@ -585,9 +585,30 @@
     if (!silent) emitSelection();
   }
 
+  /** True when the event is in the scrollbar gutter (not the content box). */
+  function isScrollbarMousedown(ev, el) {
+    if (!el || !ev) return false;
+    var rect = el.getBoundingClientRect();
+    var x = ev.clientX - rect.left;
+    var y = ev.clientY - rect.top;
+    // Past the client area → vertical / horizontal scrollbar track or thumb
+    return x >= el.clientWidth || y >= el.clientHeight;
+  }
+
   function bindCanvasEvents() {
     wrap.addEventListener("mousedown", function (ev) {
       if (ev.button !== 0) return;
+      // Scrollbar clicks target the wrap element in many browsers and would
+      // otherwise clear the selection → remount the Results panel.
+      if (isScrollbarMousedown(ev, wrap)) {
+        emitDebug("mousedownScrollbar", {
+          x: ev.clientX,
+          y: ev.clientY,
+          clientW: wrap.clientWidth,
+          clientH: wrap.clientHeight
+        });
+        return;
+      }
       var target = ev.target;
       var tag = (target && target.tagName) || "?";
       var cls = (target && target.getAttribute && target.getAttribute("class")) || "";

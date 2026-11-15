@@ -225,6 +225,34 @@ graph_structure_signature <- function(payload) {
   paste(c(sort(nsig), "||", sort(esig)), collapse = "\n")
 }
 
+#' Signature of model content that Results / Inspector care about (ignore x/y)
+#'
+#' Layout-only node moves still update `state()`, but Results UI should not
+#' remount (MathJax / DT) when only canvas positions change.
+#' @keywords internal
+results_ui_signature <- function(state) {
+  if (is.null(state)) return("")
+  nodes <- state$nodes
+  if (is.data.frame(nodes) && nrow(nodes)) {
+    drop <- intersect(c("x", "y"), names(nodes))
+    if (length(drop)) {
+      nodes <- nodes[, setdiff(names(nodes), drop), drop = FALSE]
+    }
+  }
+  as.character(jsonlite::toJSON(
+    list(
+      nodes = nodes,
+      edges = state$edges,
+      pvalue_alpha = state$pvalue_alpha,
+      next_node = state$next_node,
+      next_edge = state$next_edge
+    ),
+    dataframe = "columns",
+    auto_unbox = TRUE,
+    null = "null"
+  ))
+}
+
 edge_color <- function(edge, alpha = NULL) {
   if (!is.null(edge$status) && identical(edge$status, "excluded")) return("#B0B0B0")
   # P-value analysis: keep confirmatory links in the model, but mute color when p > α

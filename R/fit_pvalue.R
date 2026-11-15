@@ -303,7 +303,69 @@ resolve_interaction_node_id <- function(state, name) {
   NA_character_
 }
 
-#' Abbreviated A×B HTML for an interaction term
+#' Escape plain text for use inside LaTeX math
+#' @keywords internal
+latex_escape_math <- function(x) {
+  x <- as.character(x %||% "")
+  x <- gsub("\\", "\\textbackslash{}", x, fixed = TRUE)
+  x <- gsub("([&#$%_{}])", "\\\\\\1", x)
+  x <- gsub("~", "\\textasciitilde{}", x, fixed = TRUE)
+  x <- gsub("^", "\\textasciicircum{}", x, fixed = TRUE)
+  x
+}
+
+#' Identifier in math mode (single letter italic; else \\mathrm)
+#' @keywords internal
+latex_var <- function(name) {
+  name <- as.character(name %||% "")
+  if (!nzchar(name)) return("")
+  esc <- latex_escape_math(name)
+  if (nchar(name, type = "chars") == 1L && grepl("^[A-Za-z]$", name)) {
+    return(esc)
+  }
+  sprintf("\\mathrm{%s}", esc)
+}
+
+#' LHS label → LaTeX (preserves log/sqrt / [level] wrappers)
+#' @keywords internal
+latex_lhs_display <- function(yname) {
+  y <- as.character(yname %||% "")
+  if (!nzchar(y)) return("")
+  if (grepl("\u00D7", y, fixed = TRUE)) {
+    parts <- strsplit(y, "\u00D7", fixed = TRUE)[[1]]
+    return(paste(
+      vapply(parts, latex_lhs_display, character(1)),
+      collapse = " \\times "
+    ))
+  }
+  m <- regexec("^(log10|log1p|log|sqrt)\\((.*)\\)$", y, perl = TRUE)
+  hit <- regmatches(y, m)[[1]]
+  if (length(hit) >= 3L) {
+    inner <- latex_lhs_display(hit[[3]])
+    return(switch(
+      hit[[2]],
+      log10 = sprintf("\\log_{10}(%s)", inner),
+      log1p = sprintf("\\operatorname{log1p}(%s)", inner),
+      log = sprintf("\\log(%s)", inner),
+      sqrt = sprintf("\\sqrt{%s}", inner),
+      sprintf("\\mathrm{%s}(%s)", latex_escape_math(hit[[2]]), inner)
+    ))
+  }
+  if (grepl("\\[[^\\]]+\\]$", y, perl = TRUE)) {
+    core <- sub("\\[[^\\]]*\\]$", "", y, perl = TRUE)
+    lv <- sub("^.*\\[([^\\]]*)\\]$", "\\1", y, perl = TRUE)
+    return(sprintf("%s[\\mathrm{%s}]", latex_var(core), latex_escape_math(lv)))
+  }
+  latex_var(y)
+}
+
+#' Wrap a math string for MathJax (inline)
+#' @keywords internal
+smt_eq_math_line <- function(tex) {
+  sprintf("<div class=\"smt-eq-line\">\\(%s\\)</div>", tex)
+}
+
+#' Abbreviated A×B plain label for tables (not MathJax)
 #' @keywords internal
 pretty_interaction_term_html <- function(state, ix_id, level = NULL,
                                          abbrev_map = NULL) {
@@ -332,96 +394,98 @@ pretty_interaction_term_html <- function(state, ix_id, level = NULL,
         lv_b <- paste(parts[-1], collapse = "\u00D7")
       }
     } else if (is.na(lv_a) && is.na(lv_b)) {
-      # Single level tag with no wiring levels: keep on the product as [lv]
-      return(sprintf(
-        "%s\u00D7%s[%s]",
-        htmltools::htmlEscape(a_abbr),
-        htmltools::htmlEscape(b_abbr),
-        htmltools::htmlEscape(lv)
-      ))
+      return(sprintf("%s\u00D7%s[%s]", a_abbr, b_abbr, lv))
     }
   }
   fmt_side <- function(abbr, lv) {
     if (!is.null(lv) && !is.na(lv) && nzchar(as.character(lv))) {
-      sprintf(
-        "%s[%s]",
-        htmltools::htmlEscape(abbr),
-        htmltools::htmlEscape(as.character(lv))
-      )
+      sprintf("%s[%s]", abbr, as.character(lv))
     } else {
-      htmltools::htmlEscape(abbr)
+      abbr
     }
   }
   paste0(fmt_side(a_abbr, lv_a), "\u00D7", fmt_side(b_abbr, lv_b))
 }
 
-#' Pretty predictor name as HTML (ecole__B → ecole[B]; x_p2 → x<sup>2</sup>)
+#' Abbreviated A×B as LaTeX
 #' @keywords internal
-pretty_term_html <- function(name, level = NULL, abbrev_map = NULL,
-                             state = NULL) {
+pretty_interaction_term_tex <- function(state, ix_id, level = NULL,
+                                        abbrev_map = NULL) {
+  plain <- pretty_interaction_term_html(
+    state, ix_id, level = level, abbrev_map = abbrev_map
+  )
+  # plain is A×B or A[lv]×B[lv]
+  parts <- strsplit(plain, "\u00D7", fixed = TRUE)[[1]]
+  if (length(parts) < 2L) return(latex_lhs_display(plain))
+  paste(
+    vapply(parts, latex_lhs_display, character(1)),
+    collapse = " \\times "
+  )
+}
+
+#' Pretty predictor name as LaTeX (ecole__B → ecole[B]; x_p2 → x^{2})
+#' @keywords internal
+pretty_term_tex <- function(name, level = NULL, abbrev_map = NULL,
+                            state = NULL) {
   if (identical(name, "(Intercept)")) return(NULL)
   ix_id <- resolve_interaction_node_id(state, name)
   if (!is.na(ix_id)) {
-    return(pretty_interaction_term_html(
+    return(pretty_interaction_term_tex(
       state, ix_id, level = level, abbrev_map = abbrev_map
     ))
   }
   base_disp <- abbreviate_term_base(name, abbrev_map)
   if (!is.null(level) && is_poly_level(level)) {
     deg <- sub("^\\^", "", as.character(level))
-    return(sprintf(
-      "%s<sup>%s</sup>",
-      htmltools::htmlEscape(base_disp),
-      htmltools::htmlEscape(deg)
-    ))
+    return(sprintf("%s^{%s}", latex_var(base_disp), latex_escape_math(deg)))
   }
   if (grepl("_p[0-9]+$", name)) {
     deg <- sub("^.*_p", "", name)
-    return(sprintf(
-      "%s<sup>%s</sup>",
-      htmltools::htmlEscape(base_disp),
-      htmltools::htmlEscape(deg)
-    ))
+    return(sprintf("%s^{%s}", latex_var(base_disp), latex_escape_math(deg)))
   }
   if (grepl("__", name, fixed = TRUE)) {
     parts <- strsplit(name, "__", fixed = TRUE)[[1]]
     return(sprintf(
-      "%s[%s]",
-      htmltools::htmlEscape(base_disp),
-      htmltools::htmlEscape(paste(parts[-1], collapse = "__"))
+      "%s[\\mathrm{%s}]",
+      latex_var(base_disp),
+      latex_escape_math(paste(parts[-1], collapse = "__"))
     ))
   }
   if (!is.null(level) && !is.na(level) && nzchar(as.character(level))) {
     return(sprintf(
-      "%s[%s]",
-      htmltools::htmlEscape(base_disp),
-      htmltools::htmlEscape(as.character(level))
+      "%s[\\mathrm{%s}]",
+      latex_var(base_disp),
+      latex_escape_math(as.character(level))
     ))
   }
-  htmltools::htmlEscape(base_disp)
+  latex_var(base_disp)
 }
 
-#' Format one coefficient with ±SE as superscript
+#' Format one coefficient with ±SE as LaTeX superscript
 #' @keywords internal
-format_est_se_html <- function(est, se, digits = 2) {
+format_est_se_tex <- function(est, se, digits = 2) {
   est_txt <- formatC(est, digits = digits, format = "f")
   if (!is.finite(se)) return(est_txt)
   sprintf(
-    "%s<sup class=\"smt-ci\">&plusmn;%s</sup>",
+    "%s^{\\pm %s}",
     est_txt,
     formatC(se, digits = digits, format = "f")
   )
 }
 
+# Back-compat aliases used by older call sites / averaged equations
+#' @keywords internal
+format_est_se_html <- format_est_se_tex
+#' @keywords internal
+pretty_term_html <- pretty_term_tex
+
 #' @keywords internal
 format_est_ci_html <- function(est, lo, hi, digits = 2) {
-  # Legacy name: CI args ignored; prefer format_est_se_html.
-  # Kept so older call sites that pass (est, lo, hi) still compile if missed.
   se <- if (is.finite(lo) && is.finite(hi)) (hi - lo) / (2 * 1.96) else NA_real_
-  format_est_se_html(est, se, digits = digits)
+  format_est_se_tex(est, se, digits = digits)
 }
 
-#' Linear predictor HTML from coefficients + SEs
+#' Linear predictor LaTeX from coefficients + SEs
 #' @keywords internal
 format_linear_predictor_html <- function(cf, se = NULL, digits = 2,
                                          abbrev_map = NULL, state = NULL) {
@@ -434,9 +498,9 @@ format_linear_predictor_html <- function(cf, se = NULL, digits = 2,
     } else {
       NA_real_
     }
-    piece <- format_est_se_html(est, se_i, digits = digits)
-    term <- pretty_term_html(nm, abbrev_map = abbrev_map, state = state)
-    body <- if (is.null(term)) piece else paste0(piece, "&middot;", term)
+    piece <- format_est_se_tex(est, se_i, digits = digits)
+    term <- pretty_term_tex(nm, abbrev_map = abbrev_map, state = state)
+    body <- if (is.null(term)) piece else paste0(piece, " \\cdot ", term)
     if (i == 1L) {
       parts <- c(parts, body)
     } else {
@@ -446,12 +510,11 @@ format_linear_predictor_html <- function(cf, se = NULL, digits = 2,
   paste(parts, collapse = "")
 }
 
-#' Linear predictor HTML from estimate rows (includes poly levels)
+#' Linear predictor LaTeX from estimate rows (includes poly levels)
 #' @keywords internal
 format_eta_from_estimates <- function(est_rows, digits = 2, abbrev_map = NULL,
                                       state = NULL) {
   if (is.null(est_rows) || !nrow(est_rows)) return("")
-  # Skip omnibus rows (no single coefficient in the linear predictor)
   if ("kind" %in% names(est_rows)) {
     est_rows <- est_rows[est_rows$kind != "omnibus", , drop = FALSE]
   }
@@ -461,51 +524,442 @@ format_eta_from_estimates <- function(est_rows, digits = 2, abbrev_map = NULL,
   for (i in seq_len(nrow(est_rows))) {
     est <- as.numeric(est_rows$est[i])
     se <- as.numeric(est_rows$se[i])
-    piece <- format_est_se_html(est, se, digits = digits)
+    piece <- format_est_se_tex(est, se, digits = digits)
     lv <- if ("level" %in% names(est_rows)) est_rows$level[i] else NA_character_
-    term <- pretty_term_html(
+    term <- pretty_term_tex(
       est_rows$rhs[i], level = lv, abbrev_map = abbrev_map, state = state
     )
-    body <- if (is.null(term)) piece else paste0(piece, "&middot;", term)
+    body <- if (is.null(term)) piece else paste0(piece, " \\cdot ", term)
     parts <- c(parts, if (!length(parts)) body else paste0(" + ", body))
   }
   paste(parts, collapse = "")
 }
 
-#' Link / expectation wrapper for an outcome equation
-#' @return list(lhs_html, wrap_left, wrap_right, tag, note)
+#' Random-effects formula fragment from a merMod fit (for equation tags)
+#' @keywords internal
+mer_re_tag <- function(fit, fallback = "(1|cluster)") {
+  fml <- paste(deparse(stats::formula(fit)), collapse = "")
+  m <- gregexpr("\\([^()]*\\|[^()]*\\)", fml, perl = TRUE)
+  parts <- regmatches(fml, m)[[1]]
+  if (!length(parts)) return(fallback)
+  # Compact spaces around | for stable tags
+  parts <- gsub("\\s*\\|\\s*", "|", gsub("\\s+", " ", parts))
+  paste(parts, collapse = " + ")
+}
+
+#' Whether a merMod RE term includes slopes (not intercept-only)
+#' @keywords internal
+mer_has_random_slopes <- function(fit) {
+  re <- mer_re_tag(fit, "")
+  if (!nzchar(re)) return(FALSE)
+  lhs <- sub("\\|.*$", "", re)
+  lhs <- gsub("[()]", "", lhs)
+  !grepl("^\\s*1\\s*$", lhs)
+}
+
+#' Compact a coef name for RE↔fixed matching (`Condition__Treat` ↔ `ConditionTreat`)
+#' @keywords internal
+coef_name_compact <- function(nm) {
+  gsub("__", "", as.character(nm), fixed = TRUE)
+}
+
+#' Map a fixed-effect coef name to its random-effect \(u_{kj}\) symbol
+#' @keywords internal
+match_re_u_symbol <- function(fixed_nm, u_map) {
+  if (is.null(u_map) || !length(u_map)) return(NULL)
+  fixed_nm <- as.character(fixed_nm)
+  if (fixed_nm %in% names(u_map)) return(unname(u_map[[fixed_nm]]))
+  compact <- coef_name_compact(fixed_nm)
+  nms <- names(u_map)
+  hit <- which(coef_name_compact(nms) == compact)
+  if (length(hit)) return(unname(u_map[[hit[[1]]]]))
+  NULL
+}
+
+#' Wrap a fixed estimate with optional random term: `(β + u_{kj})`
+#' @keywords internal
+format_coef_with_re <- function(est_tex, u_sym = NULL) {
+  if (is.null(u_sym) || !nzchar(as.character(u_sym))) return(est_tex)
+  sprintf("(%s + %s)", est_tex, u_sym)
+}
+
+#' Random-effect \(u\) map + distribution TeX from a merMod fit (first group)
+#'
+#' @return list(group, u_map, dist_tex, n_terms) or NULL.
+#'   `u_map` is named by lme4 RE coef names → `u_{0j}`, `u_{1j}`, …
+#' @keywords internal
+mer_re_equation_info <- function(fit, digits = 2) {
+  if (is.null(fit) || !inherits(fit, "merMod")) return(NULL)
+  vc <- tryCatch(lme4::VarCorr(fit), error = function(e) NULL)
+  if (is.null(vc) || !length(vc)) return(NULL)
+  grp <- names(vc)[[1]]
+  mat <- vc[[1]]
+  sds <- attr(mat, "stddev")
+  if (is.null(sds) || !length(sds)) return(NULL)
+  cors <- attr(mat, "correlation")
+  nms <- names(sds)
+  if (is.null(nms)) nms <- paste0("RE", seq_along(sds))
+
+  u_syms <- vapply(seq_along(sds), function(i) {
+    sprintf("u_{%dj}", i - 1L)
+  }, character(1))
+  u_map <- stats::setNames(u_syms, nms)
+
+  singular <- isTRUE(tryCatch(
+    lme4::isSingular(fit, tol = 1e-4),
+    error = function(e) FALSE
+  ))
+
+  sd_txt <- formatC(as.numeric(sds), digits = digits, format = "f")
+  if (length(sds) == 1L) {
+    dist_tex <- sprintf(
+      "%s \\sim \\mathcal{N}(0, %s)",
+      u_syms[[1]],
+      sd_txt[[1]]
+    )
+  } else {
+    u_vec <- paste0(
+      "\\begin{pmatrix}",
+      paste(u_syms, collapse = "\\\\"),
+      "\\end{pmatrix}"
+    )
+    sd_vec <- paste(sd_txt, collapse = ",\\,")
+    cor_bits <- character()
+    if (is.matrix(cors) && nrow(cors) >= 2L) {
+      for (i in seq_len(nrow(cors) - 1L)) {
+        for (j in (i + 1L):ncol(cors)) {
+          rij <- cors[i, j]
+          if (!is.finite(rij)) next
+          # |ρ|≈1 or singular fit → color as boundary (not a trustworthy estimate)
+          boundary <- isTRUE(singular) || abs(rij) >= 1 - 1e-3
+          rho_txt <- sprintf(
+            "\\rho_{%d%d}=%s",
+            i - 1L, j - 1L,
+            formatC(rij, digits = digits, format = "f")
+          )
+          if (boundary) {
+            # Match --smt-danger; MathJax \\color keeps the value readable without a text tag
+            rho_txt <- sprintf("\\color{#b33b3b}{%s}", rho_txt)
+          }
+          cor_bits <- c(cor_bits, rho_txt)
+        }
+      }
+    }
+    cor_txt <- if (length(cor_bits)) {
+      paste0(",\\; ", paste(cor_bits, collapse = ",\\; "))
+    } else {
+      ""
+    }
+    dist_tex <- sprintf(
+      "%s \\sim \\mathcal{N}(0,\\,\\Sigma_u),\\quad \\mathrm{sd}(u)=(%s)%s",
+      u_vec,
+      sd_vec,
+      cor_txt
+    )
+  }
+  grp_tex <- latex_var(grp)
+  dist_tex <- paste0(dist_tex, sprintf(",\\; j\\sim %s", grp_tex))
+
+  list(
+    group = as.character(grp),
+    u_map = u_map,
+    dist_tex = dist_tex,
+    n_terms = length(sds),
+    singular = singular
+  )
+}
+
+#' Build one LaTeX fragment per predictor (fixed ± SE, optional + u)
+#' @return character vector of term fragments (no leading +/-)
+#' @keywords internal
+format_eta_term_lines <- function(cf, se = NULL, digits = 2,
+                                  abbrev_map = NULL, state = NULL,
+                                  u_map = NULL) {
+  lines <- character()
+  used_u <- character()
+  for (i in seq_along(cf)) {
+    nm <- names(cf)[[i]]
+    est <- unname(cf[[i]])
+    se_i <- if (!is.null(se) && nm %in% names(se)) {
+      unname(se[[nm]])
+    } else {
+      NA_real_
+    }
+    piece <- format_est_se_tex(est, se_i, digits = digits)
+    u_sym <- match_re_u_symbol(nm, u_map)
+    if (!is.null(u_sym)) used_u <- c(used_u, u_sym)
+    coef_tex <- format_coef_with_re(piece, u_sym)
+    term <- pretty_term_tex(nm, abbrev_map = abbrev_map, state = state)
+    if (is.null(term)) {
+      lines <- c(lines, coef_tex)
+    } else {
+      lines <- c(lines, paste0(coef_tex, " \\cdot ", term))
+    }
+  }
+  # Orphan RE slopes with no matching fixed coef (should be rare)
+  if (!is.null(u_map) && length(u_map)) {
+    for (i in seq_along(u_map)) {
+      u_sym <- unname(u_map[[i]])
+      if (u_sym %in% used_u) next
+      nm <- names(u_map)[[i]]
+      if (identical(nm, "(Intercept)")) {
+        lines <- c(lines, u_sym)
+      } else {
+        lines <- c(lines, paste0(u_sym, "\\,", latex_var(nm)))
+      }
+    }
+  }
+  lines
+}
+
+#' Term lines from estimate rows (+ optional intercept), with RE merge
+#' @keywords internal
+format_eta_term_lines_from_estimates <- function(est_rows, intercept_tex = NULL,
+                                                 digits = 2, abbrev_map = NULL,
+                                                 state = NULL, u_map = NULL) {
+  lines <- character()
+  used_u <- character()
+  if (!is.null(intercept_tex) && nzchar(intercept_tex)) {
+    u0 <- match_re_u_symbol("(Intercept)", u_map)
+    if (!is.null(u0)) used_u <- c(used_u, u0)
+    lines <- c(lines, format_coef_with_re(intercept_tex, u0))
+  }
+  if (is.null(est_rows) || !nrow(est_rows)) {
+    # still attach unused RE below
+  } else {
+    if ("kind" %in% names(est_rows)) {
+      est_rows <- est_rows[est_rows$kind != "omnibus", , drop = FALSE]
+    }
+    est_rows <- est_rows[is.finite(as.numeric(est_rows$est)), , drop = FALSE]
+    for (i in seq_len(nrow(est_rows))) {
+      est <- as.numeric(est_rows$est[i])
+      se <- as.numeric(est_rows$se[i])
+      piece <- format_est_se_tex(est, se, digits = digits)
+      lv <- if ("level" %in% names(est_rows)) est_rows$level[i] else NA_character_
+      rhs <- as.character(est_rows$rhs[i])
+      # Match RE against dummy / factor-level name when present
+      fixed_key <- if (!is.na(lv) && nzchar(as.character(lv)) &&
+                         !is_poly_level(lv)) {
+        dummy_col_name(rhs, lv)
+      } else {
+        rhs
+      }
+      u_sym <- match_re_u_symbol(fixed_key, u_map)
+      if (is.null(u_sym)) u_sym <- match_re_u_symbol(rhs, u_map)
+      if (!is.null(u_sym)) used_u <- c(used_u, u_sym)
+      coef_tex <- format_coef_with_re(piece, u_sym)
+      term <- pretty_term_tex(
+        rhs, level = lv, abbrev_map = abbrev_map, state = state
+      )
+      if (is.null(term)) {
+        lines <- c(lines, coef_tex)
+      } else {
+        lines <- c(lines, paste0(coef_tex, " \\cdot ", term))
+      }
+    }
+  }
+  if (!is.null(u_map) && length(u_map)) {
+    for (i in seq_along(u_map)) {
+      u_sym <- unname(u_map[[i]])
+      if (u_sym %in% used_u) next
+      nm <- names(u_map)[[i]]
+      if (identical(nm, "(Intercept)")) {
+        lines <- c(lines, u_sym)
+      } else {
+        lines <- c(lines, paste0(u_sym, "\\,", latex_var(nm)))
+      }
+    }
+  }
+  lines
+}
+
+#' Fitted residual SD for equation display (NA if unavailable / not gaussian)
+#' @keywords internal
+fit_residual_sigma <- function(fit, yname = NULL) {
+  if (is.null(fit)) return(NA_real_)
+  if (inherits(fit, "glmerMod")) return(NA_real_)
+  if (inherits(fit, "glm")) {
+    fam <- tryCatch(stats::family(fit), error = function(e) NULL)
+    # Residual SD only for identity-link continuous GLMs
+    if (is.null(fam) || !identical(fam$link, "identity") ||
+          identical(fam$family, "binomial")) {
+      return(NA_real_)
+    }
+  }
+  if (inherits(fit, "lavaan")) {
+    yname <- as.character(yname %||% "")
+    if (!nzchar(yname)) return(NA_real_)
+    pe <- tryCatch(
+      as.data.frame(lavaan::parameterEstimates(fit, se = FALSE)),
+      error = function(e) NULL
+    )
+    if (is.null(pe) || !nrow(pe)) return(NA_real_)
+    hit <- pe$op == "~~" & pe$lhs == yname & pe$rhs == yname
+    if (!any(hit)) return(NA_real_)
+    v <- as.numeric(pe$est[which(hit)[[1]]])
+    if (!is.finite(v) || v < 0) return(NA_real_)
+    return(sqrt(v))
+  }
+  s <- tryCatch(stats::sigma(fit), error = function(e) NA_real_)
+  if (!is.finite(s) || s < 0) return(NA_real_)
+  as.numeric(s)
+}
+
+#' LaTeX residual clause: ` + \varepsilon,\quad\varepsilon\sim\mathcal{N}(0,s)`
+#' @keywords internal
+generative_eps_tex <- function(sigma = NA_real_, digits = 2) {
+  if (is.finite(sigma) && sigma >= 0) {
+    s_txt <- formatC(sigma, digits = digits, format = "f")
+    return(sprintf(
+      " + \\varepsilon,\\quad \\varepsilon\\sim\\mathcal{N}(0, %s)",
+      s_txt
+    ))
+  }
+  " + \\varepsilon"
+}
+
+#' Assemble outcome equation TeX from wrapper + predictor term line(s)
+#'
+#' When `eta` is a character vector (one entry per predictor), builds an
+#' `aligned` block with fixed+random merged on each line.
+#' @keywords internal
+smt_eq_outcome_tex <- function(wrap, eta) {
+  eta_lines <- as.character(eta %||% "")
+  eta_lines <- eta_lines[nzchar(eta_lines)]
+  eps <- if (isTRUE(wrap$generative)) {
+    generative_eps_tex(wrap$sigma %||% NA_real_)
+  } else {
+    ""
+  }
+  # Strip leading " + " from generative_eps_tex when used as its own align row
+  eps_row <- if (nzchar(eps)) sub("^ \\+ ", "", eps) else ""
+
+  if (length(eta_lines) <= 1L) {
+    eta_one <- if (length(eta_lines)) eta_lines[[1]] else "0"
+    body <- paste0(
+      wrap$lhs %||% "",
+      " = ",
+      wrap$wrap_left %||% "",
+      eta_one,
+      wrap$wrap_right %||% ""
+    )
+    if (nzchar(eps)) body <- paste0(body, eps)
+    return(body)
+  }
+
+  # Multi-line: one predictor per row; ε on its own final row when generative
+  rows <- character()
+  for (i in seq_along(eta_lines)) {
+    pref <- if (i == 1L) "" else "+ "
+    if (i == 1L) {
+      rows <- c(rows, sprintf(
+        "%s &= %s%s%s",
+        wrap$lhs %||% "",
+        wrap$wrap_left %||% "",
+        eta_lines[[i]],
+        if (!nzchar(eps_row) && !nzchar(wrap$wrap_right %||% "")) {
+          wrap$wrap_right %||% ""
+        } else {
+          ""
+        }
+      ))
+    } else {
+      rows <- c(rows, sprintf("&\\quad %s%s", pref, eta_lines[[i]]))
+    }
+  }
+  if (nzchar(wrap$wrap_right %||% "") && !nzchar(eps_row)) {
+    rows[[length(rows)]] <- paste0(rows[[length(rows)]], wrap$wrap_right)
+  } else if (nzchar(wrap$wrap_right %||% "") && nzchar(eps_row)) {
+    # close link wrapper after last predictor, before residual row
+    rows[[length(rows)]] <- paste0(rows[[length(rows)]], wrap$wrap_right)
+  }
+  if (nzchar(eps_row)) {
+    rows <- c(rows, sprintf("&\\quad + %s", eps_row))
+  }
+  paste0("\\begin{aligned}", paste(rows, collapse = " \\\\"), "\\end{aligned}")
+}
+
+#' MathJax display for aligned / long outcome equations
+#' @keywords internal
+smt_eq_math_display <- function(tex) {
+  sprintf("<div class=\"smt-eq-line\">\\[%s\\]</div>", tex)
+}
+
+#' One or more MathJax lines for an outcome equation (mean + optional RE dist)
+#' @keywords internal
+smt_eq_outcome_html <- function(wrap, eta) {
+  tex <- smt_eq_outcome_tex(wrap, eta)
+  use_display <- grepl("\\\\begin\\{aligned\\}", tex, perl = TRUE)
+  lines <- if (use_display) smt_eq_math_display(tex) else smt_eq_math_line(tex)
+  re_dist <- wrap$re_dist %||% ""
+  if (nzchar(re_dist)) {
+    lines <- paste0(lines, smt_eq_math_line(re_dist))
+  }
+  lines
+}
+
+#' Attach merMod RE fragments onto an equation wrapper list
+#' @keywords internal
+equation_wrapper_add_re <- function(wrap, fit) {
+  info <- mer_re_equation_info(fit)
+  if (is.null(info)) return(wrap)
+  wrap$re_u_map <- info$u_map
+  wrap$re_dist <- info$dist_tex
+  wrap$re_group <- info$group
+  wrap$re_terms <- NULL
+  wrap
+}
+
+#' Link / expectation / generative wrapper for an outcome equation (LaTeX)
+#' @return list(lhs, wrap_left, wrap_right, tag, note, generative, sigma)
 #' @keywords internal
 equation_link_wrapper <- function(fit, yname) {
-  y_esc <- htmltools::htmlEscape(yname)
+  y_tex <- latex_lhs_display(yname)
   if (inherits(fit, "glmerMod")) {
     fam <- tryCatch(stats::family(fit), error = function(e) NULL)
     link <- if (!is.null(fam)) fam$link else "logit"
-    re <- "(1|cluster)"
+    re <- mer_re_tag(fit)
     if (identical(link, "logit")) {
-      return(list(
+      wrap <- list(
         tag = paste("glmer · binomial · logit ·", re),
-        lhs = sprintf("P(%s = 1)", y_esc),
-        wrap_left = "logit<sup class=\"smt-link-fn\">&minus;1</sup>(",
+        lhs = sprintf("\\mathrm{P}(%s = 1)", y_tex),
+        wrap_left = "\\mathrm{logit}^{-1}(",
         wrap_right = ")",
-        note = "Random intercept only; logit<sup>&minus;1</sup> = logistic (expit)"
-      ))
+        note = "\\(\\mathrm{logit}^{-1}\\) = logistic (expit); \\(j\\) indexes the clustering factor",
+        generative = FALSE,
+        sigma = NA_real_,
+        re_terms = NULL,
+        re_dist = NULL
+      )
+      return(equation_wrapper_add_re(wrap, fit))
     }
-    return(list(
+    wrap <- list(
       tag = paste0("glmer · binomial · ", link, " · ", re),
-      lhs = sprintf("P(%s = 1)", y_esc),
+      lhs = sprintf("\\mathrm{P}(%s = 1)", y_tex),
       wrap_left = "",
       wrap_right = "",
-      note = "Random intercept only"
-    ))
+      note = "\\(j\\) indexes the clustering factor",
+      generative = FALSE,
+      sigma = NA_real_,
+      re_terms = NULL,
+      re_dist = NULL
+    )
+    return(equation_wrapper_add_re(wrap, fit))
   }
   if (inherits(fit, "lmerMod") || (inherits(fit, "merMod") && !inherits(fit, "glmerMod"))) {
-    return(list(
-      tag = "lmer · gaussian · (1|cluster)",
-      lhs = sprintf("E(%s)", y_esc),
+    re <- mer_re_tag(fit)
+    wrap <- list(
+      tag = paste("lmer · gaussian ·", re),
+      lhs = y_tex,
       wrap_left = "",
       wrap_right = "",
-      note = "Random intercept only"
-    ))
+      note = "\\(j\\) indexes the clustering factor; random effects shown with fitted SDs",
+      generative = TRUE,
+      sigma = fit_residual_sigma(fit),
+      re_terms = NULL,
+      re_dist = NULL
+    )
+    return(equation_wrapper_add_re(wrap, fit))
   }
   if (inherits(fit, "glm")) {
     fam <- tryCatch(stats::family(fit), error = function(e) NULL)
@@ -514,55 +968,71 @@ equation_link_wrapper <- function(fit, yname) {
     if (identical(fam_name, "binomial") && identical(link, "logit")) {
       return(list(
         tag = "glm · binomial · logit",
-        lhs = sprintf("P(%s = 1)", y_esc),
-        wrap_left = "logit<sup class=\"smt-link-fn\">&minus;1</sup>(",
+        lhs = sprintf("\\mathrm{P}(%s = 1)", y_tex),
+        wrap_left = "\\mathrm{logit}^{-1}(",
         wrap_right = ")",
-        note = "logit<sup>&minus;1</sup> = logistic (expit)"
+        note = "\\(\\mathrm{logit}^{-1}\\) = logistic (expit)",
+        generative = FALSE,
+        sigma = NA_real_
       ))
     }
     if (identical(fam_name, "binomial") && identical(link, "probit")) {
       return(list(
         tag = "glm · binomial · probit",
-        lhs = sprintf("P(%s = 1)", y_esc),
-        wrap_left = "&Phi;(",
+        lhs = sprintf("\\mathrm{P}(%s = 1)", y_tex),
+        wrap_left = "\\Phi(",
         wrap_right = ")",
-        note = "&Phi; = standard normal CDF"
+        note = "\\(\\Phi\\) = standard normal CDF",
+        generative = FALSE,
+        sigma = NA_real_
       ))
     }
     if (identical(link, "identity")) {
       return(list(
         tag = sprintf("glm · %s · identity", fam_name),
-        lhs = sprintf("E(%s)", y_esc),
+        lhs = y_tex,
         wrap_left = "",
         wrap_right = "",
-        note = NULL
+        note = NULL,
+        generative = TRUE,
+        sigma = fit_residual_sigma(fit)
       ))
     }
-    # generic inverse-link F(·)
     return(list(
       tag = sprintf("glm · %s · %s", fam_name, link),
-      lhs = sprintf("E(%s)", y_esc),
-      wrap_left = sprintf("g<sup class=\"smt-link-fn\">&minus;1</sup><sub class=\"smt-link-fn\">%s</sub>(",
-                          htmltools::htmlEscape(link)),
+      lhs = sprintf("\\mathrm{E}(%s)", y_tex),
+      wrap_left = sprintf(
+        "g^{-1}_{\\mathrm{%s}}(",
+        latex_escape_math(link)
+      ),
       wrap_right = ")",
-      note = sprintf("g<sup>&minus;1</sup> = inverse %s link", htmltools::htmlEscape(link))
+      note = sprintf(
+        "\\(g^{-1}\\) = inverse %s link",
+        htmltools::htmlEscape(link)
+      ),
+      generative = FALSE,
+      sigma = NA_real_
     ))
   }
   if (inherits(fit, "lm")) {
     return(list(
       tag = "lm · gaussian · identity",
-      lhs = sprintf("E(%s)", y_esc),
+      lhs = y_tex,
       wrap_left = "",
       wrap_right = "",
-      note = NULL
+      note = NULL,
+      generative = TRUE,
+      sigma = fit_residual_sigma(fit)
     ))
   }
   list(
     tag = "model",
-    lhs = y_esc,
+    lhs = y_tex,
     wrap_left = "",
     wrap_right = "",
-    note = NULL
+    note = NULL,
+    generative = FALSE,
+    sigma = NA_real_
   )
 }
 
@@ -626,16 +1096,15 @@ format_measurement_equations_html <- function(result, state = NULL,
       ww <- w_list[[lat]]
       ww <- ww[is.finite(ww)]
       if (!length(ww)) return(NA_character_)
-      lat_disp <- htmltools::htmlEscape(
-        display_name_from_lavaan(state, lat, abbrev_map)
-      )
+      lat_disp <- display_name_from_lavaan(state, lat, abbrev_map)
+      lat_tex <- latex_var(lat_disp)
       parts <- character()
       for (j in seq_along(ww)) {
-        ind_disp <- htmltools::htmlEscape(
+        ind_tex <- latex_var(
           display_name_from_lavaan(state, names(ww)[[j]], abbrev_map)
         )
         piece <- formatC(unname(ww[[j]]), digits = 2, format = "f")
-        body <- paste0(piece, "&middot;", ind_disp)
+        body <- paste0(piece, " \\cdot ", ind_tex)
         parts <- c(parts, if (!length(parts)) body else paste0(" + ", body))
       }
       a_val <- if (!is.null(cronbach) && lat %in% names(cronbach)) {
@@ -644,14 +1113,16 @@ format_measurement_equations_html <- function(result, state = NULL,
         NA_real_
       }
       a_txt <- if (is.finite(a_val)) {
-        sprintf(" · Cronbach\u2019s \u03b1 = %s", formatC(a_val, digits = 2, format = "f"))
+        sprintf(
+          " · Cronbach\u2019s \\(\\alpha = %s\\)",
+          formatC(a_val, digits = 2, format = "f")
+        )
       } else {
         ""
       }
       uni_slot <- NULL
       uni_map <- result$measurement_unidimensionality
       if (is.list(uni_map) && length(uni_map)) {
-        # Keys are node ids; match via lavaan_name or display fallback
         for (uid in names(uni_map)) {
           slot <- uni_map[[uid]]
           if (!is.list(slot)) next
@@ -669,7 +1140,10 @@ format_measurement_equations_html <- function(result, state = NULL,
         uratio <- suppressWarnings(as.numeric(uni_slot$ratio))
         if (nzchar(ust) && !is.na(ust)) {
           detail <- if (is.finite(uratio)) {
-            sprintf("\u03bb\u2081/\u03bb\u2082 = %s", formatC(uratio, digits = 2, format = "f"))
+            sprintf(
+              "\\(\\lambda_1/\\lambda_2 = %s\\)",
+              formatC(uratio, digits = 2, format = "f")
+            )
           } else {
             ""
           }
@@ -685,16 +1159,18 @@ format_measurement_equations_html <- function(result, state = NULL,
         paste0(
           "<div class=\"smt-eq-block\">",
           "<div class=\"smt-eq-tag\">factor score · %s (%s)%s%s</div>",
-          "<div class=\"smt-eq-line\">",
-          "<span class=\"smt-eq-lhs\">%s&#770;</span> = %s",
-          "</div></div>"
+          "%s",
+          "</div>"
         ),
-        lat_disp,
+        htmltools::htmlEscape(lat_disp),
         score_tag,
         a_txt,
         uni_txt,
-        lat_disp,
-        paste(parts, collapse = "")
+        smt_eq_math_line(sprintf(
+          "\\widehat{%s} = %s",
+          lat_tex,
+          paste(parts, collapse = "")
+        ))
       )
     }, character(1))
     score_blocks <- score_blocks[!is.na(score_blocks)]
@@ -706,8 +1182,8 @@ format_measurement_equations_html <- function(result, state = NULL,
       "<div class=\"smt-eq-note\">",
       "Path / plots use joint Thomson/regression scores from the multi-factor CFA ",
       "(items from other constructs can receive non-zero weight when factors correlate). ",
-      "Cronbach\u2019s \u03b1 and the PCA unidimensionality screen (\u03bb\u2081/\u03bb\u2082) ",
-      "use each latent\u2019s own indicators only.",
+      "Cronbach\u2019s \\(\\alpha\\) and the PCA unidimensionality screen ",
+      "(\\( \\lambda_1/\\lambda_2 \\)) use each latent\u2019s own indicators only.",
       "</div>"
     )
   } else {
@@ -715,8 +1191,9 @@ format_measurement_equations_html <- function(result, state = NULL,
       "<div class=\"smt-eq-note\">",
       "Path / plots score each latent from its own measurement indicators only ",
       "(items from other constructs are never mixed into the score). ",
-      "Cronbach\u2019s \u03b1 is classical reliability; ",
-      "uni \u2713 / weak 1D / multi ? is a PCA screen (\u03bb\u2081/\u03bb\u2082 \u2265 3 / 2\u20133 / &lt; 2).",
+      "Cronbach\u2019s \\(\\alpha\\) is classical reliability; ",
+      "uni \u2713 / weak 1D / multi ? is a PCA screen ",
+      "(\\( \\lambda_1/\\lambda_2 \\ge 3 \\) / 2\u20133 / &lt; 2).",
       "</div>"
     )
   }
@@ -740,7 +1217,7 @@ format_best_equations_html <- function(result, state = NULL) {
   meas_html <- format_measurement_equations_html(result, state, abbrev_map)
   caption <- paste0(
     "<div class=\"smt-eq-caption\">Best model ",
-    "(estimate<sup class=\"smt-ci\">&plusmn;SE</sup>)</div>"
+    "(estimate\\(^{\\pm\\mathrm{SE}}\\))</div>"
   )
 
   # Path lm/glm: one fit object per DV
@@ -773,50 +1250,49 @@ format_best_equations_html <- function(result, state = NULL) {
       y_disp <- abbreviate_lhs_display(yname, abbrev_map)
       wrap <- equation_link_wrapper(fit, y_disp)
       if (!is.null(wrap$note)) notes <<- c(notes, wrap$note)
+      u_map <- wrap$re_u_map
 
       # Prefer estimate rows (explicit poly levels) + intercept from fit
-      eta <- NULL
+      eta_lines <- NULL
       if (!is.null(est_all) && nrow(est_all)) {
         rows <- est_all[est_all$op == "~" & est_all$lhs == yname, , drop = FALSE]
-        if (nrow(rows)) {
-          parts <- character()
+        if (nrow(rows) || "(Intercept)" %in% names(cf)) {
+          intercept_tex <- NULL
           if ("(Intercept)" %in% names(cf)) {
-            se0 <- tryCatch(
-              sqrt(diag(stats::vcov(fit)))[["(Intercept)"]],
-              error = function(e) NA_real_
-            )
+            se0 <- tryCatch({
+              V <- as.matrix(stats::vcov(fit))
+              sqrt(diag(V))[["(Intercept)"]]
+            }, error = function(e) NA_real_)
             b0 <- unname(cf[["(Intercept)"]])
-            parts <- c(parts, format_est_se_html(b0, se0))
+            intercept_tex <- format_est_se_html(b0, se0)
           }
-          pred <- format_eta_from_estimates(
-            rows, abbrev_map = abbrev_map, state = state
+          eta_lines <- format_eta_term_lines_from_estimates(
+            rows,
+            intercept_tex = intercept_tex,
+            abbrev_map = abbrev_map,
+            state = state,
+            u_map = u_map
           )
-          if (nzchar(pred)) parts <- c(parts, pred)
-          if (length(parts)) eta <- paste(parts, collapse = " + ")
         }
       }
-      if (is.null(eta)) {
-        se_vec <- tryCatch(
-          sqrt(diag(stats::vcov(fit))),
-          error = function(e) setNames(rep(NA_real_, length(cf)), names(cf))
-        )
-        eta <- format_linear_predictor_html(
-          cf, se_vec, abbrev_map = abbrev_map, state = state
+      if (is.null(eta_lines) || !length(eta_lines)) {
+        se_vec <- tryCatch({
+          V <- as.matrix(stats::vcov(fit))
+          stats::setNames(sqrt(diag(V)), colnames(V))
+        }, error = function(e) setNames(rep(NA_real_, length(cf)), names(cf)))
+        eta_lines <- format_eta_term_lines(
+          cf, se_vec, abbrev_map = abbrev_map, state = state, u_map = u_map
         )
       }
       sprintf(
         paste0(
           "<div class=\"smt-eq-block\">",
           "<div class=\"smt-eq-tag\">%s</div>",
-          "<div class=\"smt-eq-line\">",
-          "<span class=\"smt-eq-lhs\">%s</span> = %s%s%s",
-          "</div></div>"
+          "%s",
+          "</div>"
         ),
         htmltools::htmlEscape(wrap$tag),
-        wrap$lhs,
-        wrap$wrap_left,
-        eta,
-        wrap$wrap_right
+        smt_eq_outcome_html(wrap, eta_lines)
       )
     })
     blocks <- Filter(Negate(is.null), blocks)
@@ -851,31 +1327,36 @@ format_best_equations_html <- function(result, state = NULL) {
       eta <- format_eta_from_estimates(
         rows, abbrev_map = abbrev_map, state = state
       )
-      y_disp <- htmltools::htmlEscape(abbreviate_lhs_display(y, abbrev_map))
+      y_tex <- latex_lhs_display(abbreviate_lhs_display(y, abbrev_map))
       is_ord <- y %in% ordered
       if (is_ord) {
         sprintf(
           paste0(
             "<div class=\"smt-eq-block\">",
             "<div class=\"smt-eq-tag\">lavaan · ordered · probit/WLSMV</div>",
-            "<div class=\"smt-eq-line\">",
-            "<span class=\"smt-eq-lhs\">P(%s*)</span> = &Phi;(%s)",
-            "</div></div>"
+            "%s",
+            "</div>"
           ),
-          y_disp,
-          eta
+          smt_eq_math_line(sprintf(
+            "\\mathrm{P}(%s^{*}) = \\Phi(%s)", y_tex, eta
+          ))
         )
       } else {
+        wrap_lav <- list(
+          lhs = y_tex,
+          wrap_left = "",
+          wrap_right = "",
+          generative = TRUE,
+          sigma = fit_residual_sigma(fit, yname = y)
+        )
         sprintf(
           paste0(
             "<div class=\"smt-eq-block\">",
             "<div class=\"smt-eq-tag\">lavaan · continuous · identity</div>",
-            "<div class=\"smt-eq-line\">",
-            "<span class=\"smt-eq-lhs\">E(%s)</span> = %s",
-            "</div></div>"
+            "%s",
+            "</div>"
           ),
-          y_disp,
-          eta
+          smt_eq_math_line(smt_eq_outcome_tex(wrap_lav, eta))
         )
       }
     })
@@ -922,31 +1403,36 @@ format_best_equations_html <- function(result, state = NULL) {
     eta <- format_linear_predictor_html(
       cf, se_vec, abbrev_map = abbrev_map, state = state
     )
-    y_disp <- htmltools::htmlEscape(abbreviate_lhs_display(y, abbrev_map))
+    y_tex <- latex_lhs_display(abbreviate_lhs_display(y, abbrev_map))
     is_ord <- y %in% ordered
     if (is_ord) {
       sprintf(
         paste0(
           "<div class=\"smt-eq-block\">",
           "<div class=\"smt-eq-tag\">lavaan · ordered · probit/WLSMV</div>",
-          "<div class=\"smt-eq-line\">",
-          "<span class=\"smt-eq-lhs\">P(%s*)</span> = &Phi;(%s)",
-          "</div></div>"
+          "%s",
+          "</div>"
         ),
-        y_disp,
-        eta
+        smt_eq_math_line(sprintf(
+          "\\mathrm{P}(%s^{*}) = \\Phi(%s)", y_tex, eta
+        ))
       )
     } else {
+      wrap_lav <- list(
+        lhs = y_tex,
+        wrap_left = "",
+        wrap_right = "",
+        generative = TRUE,
+        sigma = fit_residual_sigma(fit, yname = y)
+      )
       sprintf(
         paste0(
           "<div class=\"smt-eq-block\">",
           "<div class=\"smt-eq-tag\">lavaan · continuous · identity</div>",
-          "<div class=\"smt-eq-line\">",
-          "<span class=\"smt-eq-lhs\">E(%s)</span> = %s",
-          "</div></div>"
+          "%s",
+          "</div>"
         ),
-        y_disp,
-        eta
+        smt_eq_math_line(smt_eq_outcome_tex(wrap_lav, eta))
       )
     }
   })
@@ -1099,9 +1585,24 @@ indirect_effects_table <- function(state) {
   do.call(rbind, rows)
 }
 
-#' Path coefficient table for results pane
+#' Column name for confirmatory-adjusted p-values in results tables
 #' @keywords internal
-estimates_table <- function(state, estimates = NULL) {
+conf_pvalue_column_name <- function(method = "none") {
+  switch(
+    as.character(method %||% "none"),
+    holm = "pHolm",
+    bonferroni = "pBonf",
+    BH = "pBH",
+    "p"
+  )
+}
+
+#' Path coefficient table for results pane
+#'
+#' @param conf_adjust Multiplicity method used for confirmatory edges; names the
+#'   p-column `p`, `pHolm`, `pBonf`, or `pBH`.
+#' @keywords internal
+estimates_table <- function(state, estimates = NULL, conf_adjust = "none") {
   empty <- data.frame(
     From = character(), Level = character(), To = character(),
     Type = character(), Status = character(),
@@ -1170,7 +1671,16 @@ estimates_table <- function(state, estimates = NULL) {
   }
 
   indir <- indirect_effects_table(state)
-  if (!nrow(main)) return(indir)
-  if (!nrow(indir)) return(main)
-  rbind(main, indir)
+  out <- if (!nrow(main)) {
+    indir
+  } else if (!nrow(indir)) {
+    main
+  } else {
+    rbind(main, indir)
+  }
+  pcol <- conf_pvalue_column_name(conf_adjust)
+  if (!identical(pcol, "p") && "p" %in% names(out)) {
+    names(out)[names(out) == "p"] <- pcol
+  }
+  out
 }

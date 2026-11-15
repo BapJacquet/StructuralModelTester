@@ -42,6 +42,7 @@ smt_www_asset_query <- function(filename) {
 smt_ui <- function() {
   shiny::fluidPage(
     title = "Structural Model Tester",
+    shiny::withMathJax(),
     shiny::tags$head(
       shiny::tags$link(
         rel = "stylesheet", type = "text/css",
@@ -73,11 +74,7 @@ smt_ui <- function() {
               choiceValues = list("data", "prepare", "model"),
               selected = "model", inline = TRUE
             ),
-            shiny::span(
-              class = "smt-version",
-              title = "StructuralModelTester package version",
-              paste0("v", smt_package_version())
-            )
+            shiny::uiOutput("smt_version_badge", inline = TRUE)
           )
         ),
         shiny::div(
@@ -596,7 +593,8 @@ smt_server <- function(input, output, session) {
       steps = ps$steps %||% 3L,
       n_cap = ps$n_cap %||% 1000L,
       sim_n = as.integer(sim_n),
-      targets_ui = smt_power_targets_ui(st)
+      targets_ui = smt_power_targets_ui(st),
+      dv_resid_ui = smt_power_dv_resid_ui(state = st)
     ))
     session$onFlushed(function() {
       session$sendCustomMessage("smt_resize_plots", list())
@@ -688,9 +686,60 @@ smt_server <- function(input, output, session) {
   }
 
   # Welcome modal: no data until the user picks an example (or starts blank).
+  # Also probe git / GitHub for a newer revision (fails soft when offline).
+  update_info <- shiny::reactiveVal(NULL)
   session$onFlushed(function() {
     shiny::showModal(smt_examples_modal())
+    info <- tryCatch(
+      smt_update_check(timeout_sec = 8),
+      error = function(e) NULL
+    )
+    if (is.null(info)) return()
+    update_info(info)
+    if (isTRUE(info$update_available)) {
+      shiny::showNotification(
+        shiny::tagList(
+          shiny::strong("Update available"),
+          shiny::br(),
+          shiny::span(info$message %||% "")
+        ),
+        duration = NULL,
+        type = "warning",
+        id = "smt_update_available"
+      )
+      if (exists("smt_debug", mode = "function")) {
+        smt_debug(
+          "update_check | available=TRUE source=", info$source %||% "?",
+          " behind=", info$behind %||% 0L,
+          " local=", info$local_version %||% "?",
+          " remote=", info$remote_version %||% "?"
+        )
+      }
+    } else if (exists("smt_debug", mode = "function")) {
+      smt_debug(
+        "update_check | available=FALSE source=", info$source %||% "?",
+        " msg=", info$message %||% ""
+      )
+    }
   }, once = TRUE)
+
+  output$smt_version_badge <- shiny::renderUI({
+    info <- update_info()
+    v <- smt_package_version()
+    if (isTRUE(info$update_available)) {
+      shiny::span(
+        class = "smt-version smt-version-update",
+        title = info$message %||% "A newer revision is available",
+        paste0("v", v, " · update")
+      )
+    } else {
+      shiny::span(
+        class = "smt-version",
+        title = "StructuralModelTester package version",
+        paste0("v", v)
+      )
+    }
+  })
 
   shiny::observeEvent(input$show_examples, {
     shiny::showModal(smt_examples_modal())
@@ -1332,6 +1381,7 @@ smt_server <- function(input, output, session) {
       "dv_transform",
       "dv_repeated_measures",
       "dv_cluster_column",
+      "dv_rm_slopes",
       "cat_factor_base",
       "cat_factor_ordered",
       "cat_factor_levels",
@@ -1361,11 +1411,23 @@ smt_server <- function(input, output, session) {
   edge_plot_tick <- shiny::reactiveVal(0L)
   resid_plot_tick <- shiny::reactiveVal(0L)
 
+  # Advances only when model content (not node x/y) changes — keeps Results
+  # from remounting on canvas layout / scrollbar-driven position writes.
+  results_content_sig <- shiny::reactiveVal("")
+  shiny::observe({
+    st <- state()
+    sig <- results_ui_signature(st)
+    if (!identical(sig, shiny::isolate(results_content_sig()))) {
+      results_content_sig(sig)
+    }
+  })
+
   selected_structural_edge_id <- shiny::reactive({
     sel <- input$graph_selected
     eid <- if (!is.null(sel$edges) && length(sel$edges)) as.character(sel$edges[[1]]) else NULL
     if (is.null(eid) || !nzchar(eid)) return(NULL)
-    prior_ids <- structural_prior_edges(state())$id
+    invisible(results_content_sig())
+    prior_ids <- structural_prior_edges(shiny::isolate(state()))$id
     if (!eid %in% prior_ids) return(NULL)
     eid
   })
@@ -1471,10 +1533,15 @@ smt_server <- function(input, output, session) {
       shiny::req(mv$id)
       st <- apply_node_position(st, mv$id, mv$x, mv$y)
     }
-    begin_inspector_suppress()
-    freeze_inspector_inputs()
+    # Layout-only: keep Results mounted (no inspector freeze / remount).
     skip_graph_render(TRUE)
     state(st)
+    smt_debug(
+      "R smt_node_moved layout-only | n_pos=",
+      if (!is.null(mv$positions)) length(mv$positions) else 1L,
+      " results_sig_unchanged=",
+      identical(results_ui_signature(st), shiny::isolate(results_content_sig()))
+    )
   }, ignoreInit = TRUE)
 
   # Push graph to HTML editor when model structure / results / data change.
@@ -2643,18 +2710,21 @@ smt_server <- function(input, output, session) {
   selected_dv_id <- shiny::reactive({
     nid <- selected_node_id()
     if (is.null(nid)) return(NULL)
-    st <- state()
+    invisible(results_content_sig())
+    st <- shiny::isolate(state())
     dvs <- structural_dv_ids(st)
     if (!nid %in% dvs) return(NULL)
     nid
   })
 
   output$right_panel_title <- shiny::renderText({
+    invisible(results_content_sig())
+    st <- shiny::isolate(state())
     dv <- selected_dv_id()
     if (!is.null(dv)) {
-      paste0("Inspector · ", node_display_name(state(), dv))
+      paste0("Inspector · ", node_display_name(st, dv))
     } else if (!is.null(selected_node_id())) {
-      paste0("Inspector · ", node_display_name(state(), selected_node_id()))
+      paste0("Inspector · ", node_display_name(st, selected_node_id()))
     } else {
       "Results"
     }
@@ -2667,6 +2737,7 @@ smt_server <- function(input, output, session) {
     if (is.null(dv)) return()
     en <- isTRUE(input$dv_repeated_measures)
     cl <- input$dv_cluster_column %||% NA_character_
+    slopes <- en && isTRUE(input$dv_rm_slopes)
     if (en && (is.null(cl) || is.na(cl) || !nzchar(cl))) {
       dat <- analysis_rv()
       if (!is.null(dat) && length(names(dat))) cl <- names(dat)[[1]]
@@ -2676,8 +2747,13 @@ smt_server <- function(input, output, session) {
       as.character(cur$cluster %||% NA_character_),
       as.character(cl %||% NA_character_)
     )
-    if (identical(isTRUE(cur$enabled), en) && same_cl) return()
-    st <- set_node_repeated_measures(state(), dv, enabled = en, cluster_column = cl)
+    if (identical(isTRUE(cur$enabled), en) && same_cl &&
+          identical(isTRUE(cur$slopes), slopes)) {
+      return()
+    }
+    st <- set_node_repeated_measures(
+      state(), dv, enabled = en, cluster_column = cl, slopes = slopes
+    )
     state(clear_fit_results(st))
     if (!is.null(last_result())) last_result(NULL)
   }, ignoreInit = TRUE)
@@ -2689,14 +2765,35 @@ smt_server <- function(input, output, session) {
     if (is.null(dv)) return()
     if (!isTRUE(input$dv_repeated_measures)) return()
     cl <- input$dv_cluster_column %||% NA_character_
+    slopes <- isTRUE(input$dv_rm_slopes)
     cur <- node_repeated_measures(state(), dv)
-    if (identical(as.character(cur$cluster %||% NA_character_), as.character(cl))) {
+    if (identical(as.character(cur$cluster %||% NA_character_), as.character(cl)) &&
+          identical(isTRUE(cur$slopes), slopes)) {
       return()
     }
-    st <- set_node_repeated_measures(state(), dv, enabled = TRUE, cluster_column = cl)
+    st <- set_node_repeated_measures(
+      state(), dv, enabled = TRUE, cluster_column = cl, slopes = slopes
+    )
     state(clear_fit_results(st))
     if (!is.null(last_result())) last_result(NULL)
   }, ignoreInit = TRUE, ignoreNULL = TRUE)
+
+  shiny::observeEvent(input$dv_rm_slopes, {
+    if (!inspector_writes_allowed()) return()
+    if (is.null(input$dv_rm_slopes)) return()
+    dv <- selected_dv_id()
+    if (is.null(dv)) return()
+    if (!isTRUE(input$dv_repeated_measures)) return()
+    cl <- input$dv_cluster_column %||% NA_character_
+    slopes <- isTRUE(input$dv_rm_slopes)
+    cur <- node_repeated_measures(state(), dv)
+    if (identical(isTRUE(cur$slopes), slopes)) return()
+    st <- set_node_repeated_measures(
+      state(), dv, enabled = TRUE, cluster_column = cl, slopes = slopes
+    )
+    state(clear_fit_results(st))
+    if (!is.null(last_result())) last_result(NULL)
+  }, ignoreInit = TRUE)
 
   shiny::observeEvent(input$dv_transform, {
     if (!inspector_writes_allowed()) return()
@@ -2718,7 +2815,8 @@ smt_server <- function(input, output, session) {
   selected_factor_node_id <- shiny::reactive({
     nid <- selected_node_id()
     if (is.null(nid)) return(NULL)
-    st <- state()
+    invisible(results_content_sig())
+    st <- shiny::isolate(state())
     if (is_interaction_node(st, nid) || is_latent_node(st, nid)) return(NULL)
     dat <- analysis_rv()
     col <- st$nodes$observed_column[match(nid, st$nodes$id)]
@@ -3364,7 +3462,8 @@ smt_server <- function(input, output, session) {
   }
 
   output$inspector_panel <- shiny::renderUI({
-    st <- state()
+    invisible(results_content_sig())
+    st <- shiny::isolate(state())
     dat <- analysis_rv()
     nid <- selected_node_id()
     dv <- selected_dv_id()
@@ -3389,6 +3488,27 @@ smt_server <- function(input, output, session) {
         rm <- node_repeated_measures(st, dv)
         y_tr <- node_dv_transform(st, dv)
         cluster_choices <- if (!is.null(dat)) names(dat) else character()
+        cluster_sel <- if (!is.na(rm$cluster) && nzchar(rm$cluster) &&
+                             rm$cluster %in% cluster_choices) {
+          rm$cluster
+        } else if (length(cluster_choices)) {
+          cluster_choices[[1]]
+        } else {
+          NA_character_
+        }
+        slope_preds <- st$edges[
+          st$edges$to == dv & st$edges$type != "measurement",
+          ,
+          drop = FALSE
+        ]
+        slope_terms <- if (!is.null(dat) && !is.na(cluster_sel) &&
+                             nzchar(cluster_sel) && cluster_sel %in% names(dat) &&
+                             nrow(slope_preds)) {
+          dv_random_slope_terms(st, dv, dat, cluster_sel, slope_preds)
+        } else {
+          character()
+        }
+        slopes_eligible <- length(slope_terms) > 0L
         latents <- model_uses_latents(st)
         col <- st$nodes$observed_column[match(dv, st$nodes$id)]
         y_kind <- if (!is.null(dat) && !is.na(col) && nzchar(col) && col %in% names(dat)) {
@@ -3405,7 +3525,7 @@ smt_server <- function(input, output, session) {
           eq_html <- format_best_equations_html(res_one, st)
         }
 
-        return(shiny::tagList(
+        return(shiny::withMathJax(shiny::tagList(
           shiny::div(
             class = "smt-inspector",
             shiny::div(
@@ -3459,17 +3579,29 @@ smt_server <- function(input, output, session) {
                   "dv_cluster_column",
                   "Clustering variable",
                   choices = cluster_choices,
-                  selected = if (!is.na(rm$cluster) && nzchar(rm$cluster) &&
-                                   rm$cluster %in% cluster_choices) {
-                    rm$cluster
-                  } else if (length(cluster_choices)) {
-                    cluster_choices[[1]]
-                  } else {
-                    NULL
-                  },
+                  selected = if (!is.na(cluster_sel)) cluster_sel else NULL,
                   width = "100%"
                 ),
-                shiny::helpText("Fits lmer / glmer with (1 | cluster). No random slopes yet.")
+                shiny::div(
+                  style = if (!slopes_eligible) "opacity:0.65;pointer-events:none;",
+                  shiny::checkboxInput(
+                    "dv_rm_slopes",
+                    "Random slopes for within predictors",
+                    value = isTRUE(rm$slopes) && slopes_eligible
+                  )
+                ),
+                if (slopes_eligible) {
+                  shiny::helpText(
+                    "Eligible within factors (median ≥2 trials per cluster×level): ",
+                    paste(slope_terms, collapse = ", "),
+                    ". Formula uses (1 + Factor | cluster)."
+                  )
+                } else {
+                  shiny::helpText(
+                    "Random slopes need a categorical/binary within predictor with ",
+                    "median ≥2 trials per cluster×level. Otherwise fits (1 | cluster)."
+                  )
+                }
               )
             ),
             if (!is.null(factor_nid) && identical(factor_nid, dv)) {
@@ -3482,7 +3614,7 @@ smt_server <- function(input, output, session) {
               shiny::helpText("Run the analysis to see this DV's fitted equation.")
             }
           )
-        ))
+        )))
       }
 
       if (!is.null(factor_nid)) {
@@ -3541,8 +3673,8 @@ smt_server <- function(input, output, session) {
       ))
     }
 
-    # Default: global model-fit equations
-    shiny::tagList(
+    # Default: global model-fit equations (MathJax for LaTeX)
+    shiny::withMathJax(shiny::tagList(
       shiny::h4("Model fit"),
       if (is.null(res)) {
         shiny::helpText("Run the analysis to see fitted equations.")
@@ -3551,7 +3683,7 @@ smt_server <- function(input, output, session) {
       } else {
         format_best_equations_html(res, st)
       }
-    )
+    ))
   })
 
   output$dv_resid_has_plot <- shiny::reactive({
@@ -3662,10 +3794,15 @@ smt_server <- function(input, output, session) {
   shiny::outputOptions(output, "dv_resid_plot", suspendWhenHidden = FALSE)
 
   output$coef_table <- DT::renderDT({
+    invisible(results_content_sig())
     res <- last_result()
     # When averaging, coefficients live on state edges already
     est <- if (!is.null(res) && !isTRUE(res$model_averaged)) res$estimates else NULL
-    tab <- estimates_table(state(), estimates = est)
+    tab <- estimates_table(
+      shiny::isolate(state()),
+      estimates = est,
+      conf_adjust = res$conf_adjust %||% "none"
+    )
     dv <- selected_dv_id()
     if (!is.null(dv) && nrow(tab)) {
       dv_lab <- node_display_name(state(), dv)

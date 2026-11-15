@@ -34,7 +34,7 @@ model_from_json <- function(json) {
     "id", "label", "observed_column", "shape", "x", "y",
     "r_squared", "r_squared_kind", "uni_status", "uni_label", "uni_ratio", "uni_pct1",
     "node_kind", "factor_a", "factor_b", "cat_mode",
-    "repeated_measures", "cluster_column", "dv_transform",
+    "repeated_measures", "cluster_column", "rm_slopes", "dv_transform",
     "factor_base", "factor_ordered", "factor_levels",
     "sim_mean", "sim_sd", "sim_min", "sim_max", "sim_intercept", "sim_resid_sd",
     "sim_var_kind", "sim_level_props", "sim_level_counts", "sim_design_mode",
@@ -58,7 +58,7 @@ model_from_json <- function(json) {
         "inter"
       } else if (nm == "sim_alloc_mode") {
         "probability"
-      } else if (nm %in% c("repeated_measures", "factor_ordered")) {
+      } else if (nm %in% c("repeated_measures", "rm_slopes", "factor_ordered")) {
         FALSE
       } else if (nm == "dv_transform") {
         "none"
@@ -88,6 +88,10 @@ model_from_json <- function(json) {
     miss_rm <- is.na(nodes$repeated_measures)
     if (any(miss_rm)) nodes$repeated_measures[miss_rm] <- FALSE
     nodes$cluster_column <- as.character(nodes$cluster_column)
+    nodes$rm_slopes <- as.logical(nodes$rm_slopes)
+    miss_sl <- is.na(nodes$rm_slopes)
+    if (any(miss_sl)) nodes$rm_slopes[miss_sl] <- FALSE
+    nodes$rm_slopes <- nodes$rm_slopes & nodes$repeated_measures
     nodes$dv_transform <- as.character(nodes$dv_transform)
     miss_tr <- is.na(nodes$dv_transform) | !nzchar(nodes$dv_transform)
     if (any(miss_tr)) nodes$dv_transform[miss_tr] <- "none"

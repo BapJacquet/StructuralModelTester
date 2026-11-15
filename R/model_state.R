@@ -23,6 +23,7 @@ empty_model_state <- function() {
       cat_mode = character(),
       repeated_measures = logical(),
       cluster_column = character(),
+      rm_slopes = logical(),
       dv_transform = character(),
       factor_base = character(),
       factor_ordered = logical(),
@@ -590,6 +591,7 @@ add_node <- function(state, label, observed_column = NA_character_,
     cat_mode = "split",
     repeated_measures = FALSE,
     cluster_column = NA_character_,
+    rm_slopes = FALSE,
     dv_transform = "none",
     factor_base = NA_character_,
     factor_ordered = FALSE,
@@ -643,6 +645,7 @@ add_interaction_node <- function(state) {
     cat_mode = "split",
     repeated_measures = FALSE,
     cluster_column = NA_character_,
+    rm_slopes = FALSE,
     dv_transform = "none",
     factor_base = NA_character_,
     factor_ordered = FALSE,
@@ -1478,26 +1481,37 @@ ensure_node_rm_columns <- function(state) {
   if (!"cluster_column" %in% names(state$nodes)) {
     state$nodes$cluster_column <- NA_character_
   }
+  if (!"rm_slopes" %in% names(state$nodes)) {
+    state$nodes$rm_slopes <- FALSE
+  }
+  miss_sl <- is.na(state$nodes$rm_slopes)
+  if (any(miss_sl)) state$nodes$rm_slopes[miss_sl] <- FALSE
   state
 }
 
 #' Repeated-measures settings for a DV node
-#' @return list(enabled, cluster)
+#' @return list(enabled, cluster, slopes)
 #' @keywords internal
 node_repeated_measures <- function(state, node_id) {
   state <- ensure_node_rm_columns(state)
   idx <- match(node_id, state$nodes$id)
-  if (is.na(idx)) return(list(enabled = FALSE, cluster = NA_character_))
+  if (is.na(idx)) {
+    return(list(enabled = FALSE, cluster = NA_character_, slopes = FALSE))
+  }
   en <- isTRUE(state$nodes$repeated_measures[idx])
   cl <- state$nodes$cluster_column[idx]
   if (is.null(cl) || is.na(cl) || !nzchar(cl)) cl <- NA_character_
-  list(enabled = en, cluster = as.character(cl))
+  slopes <- isTRUE(en) && isTRUE(state$nodes$rm_slopes[idx])
+  list(enabled = en, cluster = as.character(cl), slopes = slopes)
 }
 
 #' Set repeated-measures flag and optional cluster column on a node
+#'
+#' @param slopes Logical, or `NULL` to keep the current `rm_slopes` when enabling.
 #' @keywords internal
 set_node_repeated_measures <- function(state, node_id, enabled = FALSE,
-                                       cluster_column = NA_character_) {
+                                       cluster_column = NA_character_,
+                                       slopes = NULL) {
   state <- ensure_node_rm_columns(state)
   idx <- match(node_id, state$nodes$id)
   if (is.na(idx)) return(state)
@@ -1508,8 +1522,12 @@ set_node_repeated_measures <- function(state, node_id, enabled = FALSE,
     } else {
       state$nodes$cluster_column[idx] <- as.character(cluster_column)
     }
+    if (!is.null(slopes)) {
+      state$nodes$rm_slopes[idx] <- isTRUE(slopes)
+    }
   } else {
     state$nodes$cluster_column[idx] <- NA_character_
+    state$nodes$rm_slopes[idx] <- FALSE
   }
   state
 }

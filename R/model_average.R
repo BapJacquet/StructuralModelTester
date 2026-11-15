@@ -298,28 +298,35 @@ format_averaged_equations_html <- function(result, state) {
       node_dv_transform(state, dv)
     )
     y_disp <- abbreviate_lhs_display(yname, abbrev_map)
-    # Infer link from engine badge / last fit if available
-    wrap_tag <- "model-averaged (full)"
-    lhs <- sprintf("E(%s)", htmltools::htmlEscape(y_disp))
-    wrap_l <- ""
-    wrap_r <- ""
+    wrap <- list(
+      tag = "model-averaged (full)",
+      lhs = sprintf("\\mathrm{E}(%s)", latex_lhs_display(y_disp)),
+      wrap_left = "",
+      wrap_right = "",
+      generative = FALSE,
+      sigma = NA_real_,
+      note = NULL
+    )
     if (identical(result$engine, "path") && is.list(result$fit) && !inherits(result$fit, "lavaan")) {
       fit0 <- result$fit[[dv]]
       if (!is.null(fit0)) {
-        w <- equation_link_wrapper(fit0, y_disp)
-        wrap_tag <- paste(w$tag, "· averaged")
-        lhs <- w$lhs
-        wrap_l <- w$wrap_left
-        wrap_r <- w$wrap_right
+        wrap <- equation_link_wrapper(fit0, y_disp)
+        wrap$tag <- paste(wrap$tag, "· averaged")
       }
     }
 
-    # Intercept: average if available
-    parts <- character()
+    u_map <- wrap$re_u_map
+    term_lines <- character()
     y_key <- lavaan_var_name(state, dv)
     if (!is.null(result$averaged_intercepts) && y_key %in% names(result$averaged_intercepts)) {
       ai <- result$averaged_intercepts[[y_key]]
-      parts <- c(parts, format_est_se_html(ai$est, ai$se))
+      term_lines <- c(
+        term_lines,
+        format_coef_with_re(
+          format_est_se_tex(ai$est, ai$se),
+          match_re_u_symbol("(Intercept)", u_map)
+        )
+      )
     }
 
     for (i in eidx) {
@@ -329,16 +336,26 @@ format_averaged_equations_html <- function(result, state) {
       est <- avg$estimate[hit]
       se <- avg$se[hit]
       pred <- edge_predictor_label(state, eid, abbrev_map = abbrev_map)
-      parts <- c(parts, paste0(
-        format_est_se_html(est, se),
-        "&middot;",
-        htmltools::htmlEscape(pred)
+      from_id <- edges$from[i]
+      from_nm <- lavaan_var_name(state, from_id)
+      lv <- if ("level" %in% names(edges)) edges$level[i] else NA_character_
+      fixed_key <- if (!is.na(lv) && nzchar(as.character(lv)) &&
+                         !is_poly_level(lv)) {
+        dummy_col_name(from_nm, lv)
+      } else {
+        from_nm
+      }
+      term_lines <- c(term_lines, paste0(
+        format_coef_with_re(
+          format_est_se_tex(est, se),
+          match_re_u_symbol(fixed_key, u_map)
+        ),
+        " \\cdot ",
+        latex_lhs_display(pred)
       ))
 
-      # Polynomial powers (from best-model estimates; not yet fully averaged)
       est_src <- result$best_estimates %||% result$estimates
       if (!is.null(est_src) && nrow(est_src) && "level" %in% names(est_src)) {
-        from_nm <- lavaan_var_name(state, edges$from[i])
         to_nm <- lavaan_var_name(state, dv)
         to_lhs <- dv_transform_lhs(to_nm, node_dv_transform(state, dv))
         poly_hit <- est_src$lhs == to_lhs & est_src$op == "~" &
@@ -347,27 +364,24 @@ format_averaged_equations_html <- function(result, state) {
         if (any(poly_hit)) {
           prows <- est_src[poly_hit, , drop = FALSE]
           prows <- prows[order(prows$level), , drop = FALSE]
-          parts <- c(parts, format_eta_from_estimates(
+          # Poly terms: fixed only (no RE match for powers)
+          poly_bits <- format_eta_from_estimates(
             prows, abbrev_map = abbrev_map, state = state
-          ))
+          )
+          if (nzchar(poly_bits)) term_lines <- c(term_lines, poly_bits)
         }
       }
     }
-    if (!length(parts)) return(NULL)
-    eta <- paste(parts, collapse = " + ")
+    if (!length(term_lines)) return(NULL)
     sprintf(
       paste0(
         "<div class=\"smt-eq-block\">",
         "<div class=\"smt-eq-tag\">%s</div>",
-        "<div class=\"smt-eq-line\">",
-        "<span class=\"smt-eq-lhs\">%s</span> = %s%s%s",
-        "</div></div>"
+        "%s",
+        "</div>"
       ),
-      htmltools::htmlEscape(wrap_tag),
-      lhs,
-      wrap_l,
-      eta,
-      wrap_r
+      htmltools::htmlEscape(wrap$tag),
+      smt_eq_outcome_html(wrap, term_lines)
     )
   })
   blocks <- Filter(Negate(is.null), blocks)
@@ -377,7 +391,8 @@ format_averaged_equations_html <- function(result, state) {
     meas_html %||% "",
     if (length(blocks)) {
       paste0(
-        "<div class=\"smt-eq-caption\">Model-averaged (full; absent = 0) &middot; estimate<sup class=\"smt-ci\">&plusmn;SE</sup></div>",
+        "<div class=\"smt-eq-caption\">Model-averaged (full; absent = 0) · ",
+        "estimate\\(^{\\pm\\mathrm{SE}}\\)</div>",
         paste(blocks, collapse = ""),
         "<div class=\"smt-eq-note\">Full model averaging: coefficients are 0 in models that omit the predictor.</div>"
       )

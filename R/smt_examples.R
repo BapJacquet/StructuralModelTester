@@ -39,12 +39,28 @@ smt_examples_catalog <- function() {
       model = "path_demo_model.json"
     ),
     list(
+      id = "causal",
+      title = "Causal chain",
+      blurb = "X → A → B → C → Y with skip paths and exploratory distractors (true zeros).",
+      tags = c("causal", "mediation", "exploratory"),
+      data = "chain_skip_demo.csv",
+      model = "chain_skip_demo_model.json"
+    ),
+    list(
       id = "interaction",
       title = "Interaction",
       blurb = "Gender × Method on Score, with Age as a confirmatory covariate.",
       tags = c("interaction", "binary factors"),
       data = "interaction_demo.csv",
       model = "interaction_demo_model.json"
+    ),
+    list(
+      id = "repeated",
+      title = "Repeated measures",
+      blurb = "Within-subject Condition (5 trials each) → Score with lmer (1+Condition|subject), plus Age.",
+      tags = c("lmer", "intra", "random slopes", "exact counts"),
+      data = "repeated_demo.csv",
+      model = "repeated_demo_model.json"
     ),
     list(
       id = "measurement",

@@ -1618,16 +1618,89 @@ dv_cluster_column <- function(state, dv_id, dat) {
   cl
 }
 
-#' Fit one path equation (lm/glm or lmer/glmer random intercept)
+#' Whether a within-cluster factor has enough trials for random slopes
+#'
+#' Requires within-cluster variation and median rows per `(cluster × level) ≥ min_trials`.
+#' @keywords internal
+factor_slope_cell_ok <- function(x, cluster, min_trials = 2) {
+  ok <- !is.na(x) & !is.na(cluster) & nzchar(as.character(x)) &
+    nzchar(as.character(cluster))
+  if (!any(ok)) return(FALSE)
+  x <- as.character(x[ok])
+  cl <- as.character(cluster[ok])
+  nlev <- tapply(x, cl, function(z) length(unique(z)))
+  if (!any(as.integer(nlev) > 1L, na.rm = TRUE)) return(FALSE)
+  cell_n <- as.numeric(table(cl, x))
+  cell_n <- cell_n[cell_n > 0]
+  if (!length(cell_n)) return(FALSE)
+  stats::median(cell_n) >= min_trials
+}
+
+#' Predictor column names eligible for per-level cluster random slopes
+#'
+#' Categorical/binary predictors that are Intra by design or vary within
+#' cluster, with median ≥2 trials per `(cluster × level)`.
+#' @keywords internal
+dv_random_slope_terms <- function(state, dv, dat, cluster, pred_edges,
+                                  min_trials = 2) {
+  if (is.null(dat) || is.null(cluster) || !nzchar(as.character(cluster)) ||
+        !cluster %in% names(dat) || is.null(pred_edges) || !nrow(pred_edges)) {
+    return(character())
+  }
+  from_ids <- unique(as.character(pred_edges$from))
+  out <- character()
+  for (from_id in from_ids) {
+    if (is_interaction_node(state, from_id)) next
+    xn <- tryCatch(lavaan_var_name(state, from_id), error = function(e) NA_character_)
+    if (is.na(xn) || !nzchar(xn) || !xn %in% names(dat)) next
+    kind <- classify_variable(dat[[xn]])
+    coding <- tryCatch(
+      variable_coding_for_node(state, from_id, dat),
+      error = function(e) NULL
+    )
+    if (!is.null(coding) && identical(coding$kind, "categorical")) {
+      kind <- "categorical"
+    }
+    if (!kind %in% c("categorical", "binary")) next
+    # Intra design or observed within-cluster variation, with ≥min_trials/cell
+    if (!factor_slope_cell_ok(dat[[xn]], dat[[cluster]], min_trials)) next
+    if (!xn %in% out) out <- c(out, xn)
+  }
+  out
+}
+
+#' Build lmer/glmer random-effects term string
+#' @keywords internal
+rm_re_term <- function(cluster, slope_terms = NULL) {
+  slope_terms <- unique(as.character(slope_terms %||% character()))
+  slope_terms <- slope_terms[nzchar(slope_terms)]
+  if (!length(slope_terms)) {
+    return(paste0("(1|", cluster, ")"))
+  }
+  paste0("(1 + ", paste(slope_terms, collapse = " + "), "|", cluster, ")")
+}
+
+#' Ensure slope factor columns exist on local data (from original dat)
+#' @keywords internal
+attach_slope_factors <- function(local_dat, dat, slope_terms) {
+  slope_terms <- unique(as.character(slope_terms %||% character()))
+  for (nm in slope_terms) {
+    if (!nm %in% names(dat)) next
+    local_dat[[nm]] <- as.factor(dat[[nm]])
+  }
+  local_dat
+}
+
+#' Fit one path equation (lm/glm or lmer/glmer random intercept / slopes)
 #' @keywords internal
 fit_one_path_equation <- function(yname, y_kind, rhs_terms, local_dat,
-                                  cluster = NULL) {
+                                  cluster = NULL, slope_terms = NULL) {
   rhs <- if (!length(rhs_terms)) "1" else paste(rhs_terms, collapse = " + ")
   binary <- identical(y_kind, "binary")
   if (!is.null(cluster)) {
     # Ensure grouping factor
     local_dat[[cluster]] <- as.factor(local_dat[[cluster]])
-    re <- paste0("(1|", cluster, ")")
+    re <- rm_re_term(cluster, slope_terms)
     fml <- stats::as.formula(paste(yname, "~", rhs, "+", re))
     if (binary) {
       fit <- lme4::glmer(fml, data = local_dat, family = stats::binomial())
@@ -1691,6 +1764,7 @@ fit_path_equations <- function(state, dat, edges, dv_ids = NULL) {
       struct[0, , drop = FALSE]
     }
     cluster <- dv_cluster_column(state, dv, dat)
+    rm_info <- node_repeated_measures(state, dv)
     yname <- lavaan_var_name(state, dv)
     if (!yname %in% names(dat)) {
       stop("Dependent variable '", yname, "' not found in analysis data.", call. = FALSE)
@@ -1734,6 +1808,11 @@ fit_path_equations <- function(state, dat, edges, dv_ids = NULL) {
       }
       fit_key <- if (is.na(tl) || !nzchar(tl)) dv else paste0(dv, "::", tl)
 
+      slope_terms <- character()
+      if (!is.null(cluster) && isTRUE(rm_info$slopes) && nrow(preds)) {
+        slope_terms <- dv_random_slope_terms(state, dv, dat, cluster, preds)
+      }
+
       if (!nrow(preds)) {
         # Intercept-only (null / reduced) — not used for categorical slices
         if (identical(y_kind0, "categorical")) next
@@ -1751,7 +1830,9 @@ fit_path_equations <- function(state, dat, edges, dv_ids = NULL) {
             lhs_disp <- dv_transform_lhs(yname, y_tr)
           }
         }
-        fitted_one <- fit_one_path_equation(yname, y_kind, character(), local_dat, cluster)
+        fitted_one <- fit_one_path_equation(
+          yname, y_kind, character(), local_dat, cluster
+        )
         syn <- fitted_one$syntax
         if (!identical(lhs_disp, yname)) {
           syn <- sub(
@@ -1773,8 +1854,10 @@ fit_path_equations <- function(state, dat, edges, dv_ids = NULL) {
         stop("No predictors for dependent variable '", built$lhs_name, "'.", call. = FALSE)
       }
 
+      local_fit_dat <- attach_slope_factors(built$data, dat, slope_terms)
       fitted_one <- fit_one_path_equation(
-        built$yname, built$y_kind, built$term_names, built$data, cluster
+        built$yname, built$y_kind, built$term_names, local_fit_dat,
+        cluster, slope_terms = slope_terms
       )
       # Tag syntax with response level / transform when display lhs differs
       syn <- fitted_one$syntax
