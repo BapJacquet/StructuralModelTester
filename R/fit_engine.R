@@ -380,6 +380,7 @@ empty_estimates <- function() {
     rope_pct = numeric(),
     rope_decision = character(),
     log_bf10 = numeric(),
+    kl_prior_post = numeric(),
     term = character(),
     stringsAsFactors = FALSE
   )
@@ -395,6 +396,7 @@ estimate_row <- function(lhs, op, rhs, est, se, pvalue,
                          pd = NA_real_, rope_low = NA_real_, rope_high = NA_real_,
                          rope_pct = NA_real_, rope_decision = NA_character_,
                          log_bf10 = NA_real_,
+                         kl_prior_post = NA_real_,
                          term = NA_character_) {
   ci_low <- as.numeric(ci_low)
   ci_high <- as.numeric(ci_high)
@@ -432,6 +434,7 @@ estimate_row <- function(lhs, op, rhs, est, se, pvalue,
     rope_pct = as.numeric(rope_pct),
     rope_decision = rope_decision,
     log_bf10 = as.numeric(log_bf10),
+    kl_prior_post = as.numeric(kl_prior_post),
     term = as.character(term %||% NA_character_),
     stringsAsFactors = FALSE
   )
@@ -544,6 +547,7 @@ path_coef_bayes_fields <- function(ct, term) {
     rope_pct = NA_real_,
     rope_decision = NA_character_,
     log_bf10 = NA_real_,
+    kl_prior_post = NA_real_,
     includes_zero = NA
   )
   if (is.null(ct) || !term %in% rownames(ct)) return(empty)
@@ -561,6 +565,7 @@ path_coef_bayes_fields <- function(ct, term) {
       if (length(rd) != 1L || is.null(rd) || is.na(rd)) NA_character_ else as.character(rd)
     },
     log_bf10 = as.numeric(pull("log_bf10")),
+    kl_prior_post = as.numeric(pull("kl_prior_post")),
     includes_zero = as.logical(pull("includes_zero"))
   )
 }
@@ -596,6 +601,7 @@ brms_coef_table <- function(fit, ci = 0.95, rope_k = 0.1, term_priors = NULL) {
     rope_pct = NA_real_,
     rope_decision = NA_character_,
     log_bf10 = NA_real_,
+    kl_prior_post = NA_real_,
     includes_zero = NA,
     row.names = nms,
     stringsAsFactors = FALSE
@@ -627,6 +633,7 @@ brms_coef_table <- function(fit, ci = 0.95, rope_k = 0.1, term_priors = NULL) {
     fx[nm, "rope_pct"] <- sm$rope_pct
     fx[nm, "rope_decision"] <- sm$rope_decision
     fx[nm, "log_bf10"] <- sm$log_bf10
+    fx[nm, "kl_prior_post"] <- sm$kl_prior_post
     fx[nm, "includes_zero"] <- sm$includes_null
   }
   fx
@@ -2218,6 +2225,7 @@ append_path_job_estimates <- function(est_rows, job, fit) {
       rope_pct = bay$rope_pct,
       rope_decision = bay$rope_decision,
       log_bf10 = bay$log_bf10,
+      kl_prior_post = bay$kl_prior_post,
       term = tn
     )
   }

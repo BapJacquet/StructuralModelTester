@@ -1879,6 +1879,15 @@ estimates_table <- function(state, estimates = NULL, conf_adjust = "none") {
             sprintf("%+.2f", b)
           }, character(1))
         }
+        if ("kl_prior_post" %in% names(est)) {
+          # KL(posterior || prior) in nats: prior→posterior information gain
+          main[["KL"]] <- vapply(est$kl_prior_post, function(k) {
+            if (!is.finite(k)) return("")
+            if (k >= 100) sprintf("%.0f", k)
+            else if (k >= 10) sprintf("%.1f", k)
+            else sprintf("%.2f", k)
+          }, character(1))
+        }
       }
       if (!bayes_ci || any(is.finite(raw_p))) {
         main$p <- vapply(raw_p, format_pvalue, character(1), digits = 3)

@@ -77,7 +77,8 @@ bayes_density_panel <- function(kind = c("prior", "posterior"),
                                 prior_mean = 0, prior_sd = 1,
                                 draws = NULL, rope = c(-0.1, 0.1),
                                 hdi = NULL, pd = NA_real_, rope_pct = NA_real_,
-                                log_bf10 = NA_real_, ci = 0.95, xlim = NULL) {
+                                log_bf10 = NA_real_, kl_prior_post = NA_real_,
+                                ci = 0.95, xlim = NULL) {
   kind <- match.arg(kind)
   rope <- as.numeric(rope)
   if (length(rope) < 2L || !all(is.finite(rope))) rope <- c(-0.1, 0.1)
@@ -123,7 +124,17 @@ bayes_density_panel <- function(kind = c("prior", "posterior"),
     } else {
       NULL
     }
-    cap <- paste(c(sprintf("Posterior · %s · %s", pd_txt, rp_txt), bf_txt), collapse = " · ")
+    kl_txt <- if (is.finite(kl_prior_post)) {
+      if (kl_prior_post >= 100) sprintf("KL=%.0f", kl_prior_post)
+      else if (kl_prior_post >= 10) sprintf("KL=%.1f", kl_prior_post)
+      else sprintf("KL=%.2f", kl_prior_post)
+    } else {
+      NULL
+    }
+    cap <- paste(
+      c(sprintf("Posterior · %s · %s", pd_txt, rp_txt), bf_txt, kl_txt),
+      collapse = " · "
+    )
   }
 
   # Split the density so ROPE mass and non-ROPE mass get different fills.
@@ -214,6 +225,7 @@ compose_edge_bayes_plot <- function(effect_plot, info) {
     pd = info$summary$pd,
     rope_pct = info$summary$rope_pct,
     log_bf10 = info$summary$log_bf10,
+    kl_prior_post = info$summary$kl_prior_post,
     ci = info$ci,
     xlim = xlim
   )

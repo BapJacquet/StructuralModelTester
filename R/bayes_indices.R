@@ -135,6 +135,40 @@ bf10_point_null_of <- function(x, prior_mean = 0, prior_sd = 1, null = 0) {
   exp(lb)
 }
 
+#' Prior→posterior information gain (KL divergence, nats)
+#'
+#' \(D_{\mathrm{KL}}(\pi(\theta\mid data)\,\|\,\pi(\theta))
+#' = \mathbb{E}_{\mathrm{post}}[\log \pi(\theta\mid data) - \log \pi(\theta)]\).
+#' Zero when the data leave beliefs unchanged; larger when the posterior shifts
+#' and/or concentrates relative to the Expected normal prior.
+#' @keywords internal
+kl_prior_post_of <- function(x, prior_mean = 0, prior_sd = 1) {
+  x <- as.numeric(x)
+  x <- x[is.finite(x)]
+  if (length(x) < 2L) return(NA_real_)
+  mu <- as.numeric(prior_mean)
+  sd <- as.numeric(prior_sd)
+  if (!is.finite(mu)) mu <- 0
+  if (!is.finite(sd) || sd <= 0) sd <- 1
+  # Monte Carlo KL using a kernel density for the posterior
+  d <- tryCatch(
+    stats::density(x, n = 512L, from = min(x), to = max(x)),
+    error = function(e) NULL
+  )
+  if (is.null(d)) return(NA_real_)
+  f_post <- stats::approx(d$x, d$y, xout = x, rule = 2)$y
+  f_post <- pmax(as.numeric(f_post), .Machine$double.xmin)
+  f_prior <- stats::dnorm(x, mean = mu, sd = sd)
+  f_prior <- pmax(as.numeric(f_prior), .Machine$double.xmin)
+  kl <- mean(log(f_post) - log(f_prior))
+  if (!is.finite(kl) || kl < 0) {
+    # Tiny negatives are numerical artifacts when post ≈ prior
+    if (is.finite(kl) && kl > -1e-6) return(0)
+    return(NA_real_)
+  }
+  as.numeric(kl)
+}
+
 #' HDI + ROPE decision (Kruschke)
 #'
 #' @return `"reject"`, `"accept"`, or `"undecided"`
@@ -191,7 +225,7 @@ brms_rope_by_term <- function(state, preds, term_meta, rope_k = 0.1) {
   out
 }
 
-#' Summaries for one coefficient: mean, SD, HDI, pd, ROPE, log BF10
+#' Summaries for one coefficient: mean, SD, HDI, pd, ROPE, log BF10, KL
 #' @keywords internal
 bayes_term_summary <- function(draws, rope = c(-0.1, 0.1), ci = 0.95,
                                prior_mean = 0, prior_sd = 1) {
@@ -204,6 +238,7 @@ bayes_term_summary <- function(draws, rope = c(-0.1, 0.1), ci = 0.95,
     rope_high = as.numeric(rope[[2]] %||% NA_real_),
     rope_pct = NA_real_, rope_decision = NA_character_,
     log_bf10 = NA_real_,
+    kl_prior_post = NA_real_,
     includes_null = NA
   )
   if (!length(draws)) return(empty)
@@ -220,6 +255,9 @@ bayes_term_summary <- function(draws, rope = c(-0.1, 0.1), ci = 0.95,
     rope_pct = rope_pct_of(draws, rope),
     rope_decision = decision,
     log_bf10 = log_bf10_point_null_of(
+      draws, prior_mean = prior_mean, prior_sd = prior_sd
+    ),
+    kl_prior_post = kl_prior_post_of(
       draws, prior_mean = prior_mean, prior_sd = prior_sd
     ),
     includes_null = !identical(decision, "reject")

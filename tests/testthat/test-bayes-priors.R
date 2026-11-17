@@ -71,6 +71,17 @@ test_that("HDI, pd, ROPE, and log BF10 replace p on the canvas and in the table"
     prior_mean = 0, prior_sd = 1
   )
   expect_lt(bf_in, 0)
+  # KL: concentrated away from a wide prior → information gain > 0
+  kl_gain <- StructuralModelTester:::kl_prior_post_of(
+    rnorm(4000, mean = 0.5, sd = 0.1),
+    prior_mean = 0, prior_sd = 1
+  )
+  expect_gt(kl_gain, 0)
+  kl_same <- StructuralModelTester:::kl_prior_post_of(
+    rnorm(4000, mean = 0, sd = 1),
+    prior_mean = 0, prior_sd = 1
+  )
+  expect_lt(kl_same, 0.2)
 
   st <- StructuralModelTester:::empty_model_state()
   st <- StructuralModelTester:::add_node(st, "X", observed_column = "X")
@@ -82,7 +93,8 @@ test_that("HDI, pd, ROPE, and log BF10 replace p on the canvas and in the table"
     "Y", "~", "X", 0.4, 0.05, NA_real_,
     ci_low = 0.2, ci_high = 0.6, ci_level = 0.95,
     pd = 0.99, rope_low = -0.1, rope_high = 0.1,
-    rope_pct = 0, rope_decision = "reject", log_bf10 = log(12.5)
+    rope_pct = 0, rope_decision = "reject",
+    log_bf10 = log(12.5), kl_prior_post = 1.25
   )
   st2 <- StructuralModelTester:::apply_estimates_to_edges(st, est)
   expect_false(grepl("p=", st2$edges$label[[1]], fixed = TRUE))
@@ -108,9 +120,11 @@ test_that("HDI, pd, ROPE, and log BF10 replace p on the canvas and in the table"
   expect_true("SD" %in% names(tab))
   expect_true("pd" %in% names(tab))
   expect_true("log BF10" %in% names(tab))
+  expect_true("KL" %in% names(tab))
   expect_false("p" %in% names(tab))
   expect_equal(tab[["95% HDI"]][[1]], "[0.200, 0.600]")
   expect_equal(tab[["log BF10"]][[1]], sprintf("%+.2f", log(12.5)))
+  expect_equal(tab[["KL"]][[1]], "1.25")
 })
 
 test_that("brms fit uses the link prior and HDI + ROPE", {
@@ -153,6 +167,7 @@ test_that("brms fit uses the link prior and HDI + ROPE", {
   expect_true(is.finite(row$pd) && row$pd > 0.5)
   expect_true(as.character(row$rope_decision[[1]]) %in% c("reject", "undecided", "accept"))
   expect_true(is.finite(row$log_bf10) || is.infinite(row$log_bf10))
+  expect_true(is.finite(row$kl_prior_post) && row$kl_prior_post >= 0)
   expect_true(is.na(row$pvalue))
   expect_false(grepl("p=", res$state$edges$label[[1]], fixed = TRUE))
   expect_match(res$state$edges$label[[1]], "\\[")
@@ -163,6 +178,7 @@ test_that("brms fit uses the link prior and HDI + ROPE", {
   expect_false(is.null(info))
   expect_gt(length(info$draws), 10L)
   expect_true(is.finite(info$summary$log_bf10) || is.infinite(info$summary$log_bf10))
+  expect_true(is.finite(info$summary$kl_prior_post) && info$summary$kl_prior_post >= 0)
   p_eff <- ggplot2::ggplot() + ggplot2::theme_void()
   combo <- StructuralModelTester:::compose_edge_bayes_plot(p_eff, info)
   expect_true(inherits(combo, "patchwork") || inherits(combo, "ggplot"))
