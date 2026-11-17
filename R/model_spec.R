@@ -331,14 +331,32 @@ prepare_analysis_data <- function(state, data) {
       from_id <- struct$from[i]
       xn <- lavaan_var_name(state, from_id)
       if (!xn %in% names(out)) next
-      # Skip categorical / binary (poly only for continuous-like columns)
-      if (!is_interaction_node(state, from_id)) {
-        kind <- classify_variable(out[[xn]])
-        if (!identical(kind, "continuous")) next
-      }
       rk <- struct$rel_kind[i]
       deg <- rel_kind_degree(rk)
       if (deg < 2L) next
+      if (!is_interaction_node(state, from_id)) {
+        kind <- classify_variable(out[[xn]])
+        if (identical(kind, "categorical")) {
+          meta <- node_factor_coding(state, from_id)
+          if (!isTRUE(meta$ordered)) next
+          coding <- variable_coding_for_node(state, from_id, out)
+          # Same ordinal order as Simulate / fit_engine (not base-first)
+          levs <- meta$levels
+          if (!length(levs)) levs <- coding$all_levels
+          if (!length(levs)) next
+          x_num <- ordered_level_scores(
+            out[[xn]],
+            levels_order = levs,
+            base = meta$base
+          )
+          expanded <- expand_continuous_predictor(
+            out, xn, x_num, max_degree = deg
+          )
+          out <- expanded$data
+          next
+        }
+        if (!identical(kind, "continuous")) next
+      }
       expanded <- expand_continuous_predictor(out, xn, out[[xn]], max_degree = deg)
       out <- expanded$data
     }

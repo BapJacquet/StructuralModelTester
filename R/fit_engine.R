@@ -109,6 +109,34 @@ dummy_col_name <- function(var, level) {
   paste0(sanitize_id(var), "__", sanitize_id(level))
 }
 
+#' Integer scores 1..K for an ordered factor (level order)
+#'
+#' Used when an ordered categorical predictor has a polynomial `rel_kind`
+#' (quadratic / cubic): SMT expands linear + centered powers of these scores.
+#'
+#' Scores follow `levels_order` as the ordinal sequence (e.g. None < Low <
+#' High). Unlike treatment coding, the reference `base` is **not** moved to
+#' position 1 — that would scramble polynomial scores.
+#' @keywords internal
+ordered_level_scores <- function(x, levels_order = NULL, base = NULL) {
+  observed <- data_levels_chr(x)
+  if (length(observed) < 2L) {
+    return(suppressWarnings(as.numeric(x)))
+  }
+  levs <- merge_level_order(levels_order, observed)
+  if (!length(levs)) {
+    # No declared order: fall back to base-first coerce (legacy)
+    f <- coerce_with_factor_coding(
+      x,
+      base = base,
+      levels_order = levels_order,
+      ordered = TRUE
+    )
+    return(as.numeric(f))
+  }
+  as.numeric(factor(as.character(x), levels = levs, ordered = TRUE))
+}
+
 #' True if the model involves latent / measurement structure
 #' @keywords internal
 model_uses_latents <- function(state, edges = state$edges) {
@@ -342,6 +370,17 @@ empty_estimates <- function() {
     df = numeric(),
     level = character(),
     kind = character(),
+    ci_low = numeric(),
+    ci_high = numeric(),
+    ci_level = numeric(),
+    includes_zero = logical(),
+    pd = numeric(),
+    rope_low = numeric(),
+    rope_high = numeric(),
+    rope_pct = numeric(),
+    rope_decision = character(),
+    log_bf10 = numeric(),
+    term = character(),
     stringsAsFactors = FALSE
   )
 }
@@ -350,7 +389,28 @@ empty_estimates <- function() {
 #' @keywords internal
 estimate_row <- function(lhs, op, rhs, est, se, pvalue,
                          est_std = NA_real_,
-                         df = NA_real_, level = NA_character_, kind = "effect") {
+                         df = NA_real_, level = NA_character_, kind = "effect",
+                         ci_low = NA_real_, ci_high = NA_real_,
+                         ci_level = NA_real_, includes_zero = NA,
+                         pd = NA_real_, rope_low = NA_real_, rope_high = NA_real_,
+                         rope_pct = NA_real_, rope_decision = NA_character_,
+                         log_bf10 = NA_real_,
+                         term = NA_character_) {
+  ci_low <- as.numeric(ci_low)
+  ci_high <- as.numeric(ci_high)
+  includes_zero <- as.logical(includes_zero)
+  rope_decision <- as.character(rope_decision %||% NA_character_)
+  if (length(includes_zero) != 1L || is.na(includes_zero)) {
+    if (!is.na(rope_decision) && nzchar(rope_decision)) {
+      includes_zero <- !identical(rope_decision, "reject")
+    } else {
+      includes_zero <- if (is.finite(ci_low) && is.finite(ci_high)) {
+        ci_low <= 0 && ci_high >= 0
+      } else {
+        NA
+      }
+    }
+  }
   data.frame(
     lhs = lhs,
     op = op,
@@ -362,6 +422,17 @@ estimate_row <- function(lhs, op, rhs, est, se, pvalue,
     df = as.numeric(df),
     level = as.character(level),
     kind = as.character(kind),
+    ci_low = ci_low,
+    ci_high = ci_high,
+    ci_level = as.numeric(ci_level),
+    includes_zero = includes_zero,
+    pd = as.numeric(pd),
+    rope_low = as.numeric(rope_low),
+    rope_high = as.numeric(rope_high),
+    rope_pct = as.numeric(rope_pct),
+    rope_decision = rope_decision,
+    log_bf10 = as.numeric(log_bf10),
+    term = as.character(term %||% NA_character_),
     stringsAsFactors = FALSE
   )
 }
@@ -369,16 +440,46 @@ estimate_row <- function(lhs, op, rhs, est, se, pvalue,
 #' Fixed-effect coefficients (works for lm/glm and merMod)
 #' @keywords internal
 path_fixed_coefs <- function(fit) {
+  if (inherits(fit, "brmsfit")) {
+    fx <- brms::fixef(fit)
+    est <- as.numeric(fx[, "Estimate"])
+    nms <- rownames(fx)
+    nms[nms == "Intercept"] <- "(Intercept)"
+    names(est) <- nms
+    return(est)
+  }
   if (inherits(fit, "merMod")) {
     return(lme4::fixef(fit))
   }
   stats::coef(fit)
 }
 
+#' Covariance of fixed effects, with brms intercept renamed to `(Intercept)`
+#' @keywords internal
+path_vcov <- function(fit) {
+  V <- tryCatch(as.matrix(stats::vcov(fit)), error = function(e) NULL)
+  if (is.null(V) || !nrow(V)) return(NULL)
+  if (inherits(fit, "brmsfit")) {
+    nms <- colnames(V)
+    nms[nms == "Intercept"] <- "(Intercept)"
+    colnames(V) <- nms
+    rownames(V) <- nms
+  }
+  V
+}
+
 #' Coefficient table for path engines (Estimate / SE / p)
 #' @return matrix/data.frame with rownames = term names
 #' @keywords internal
 path_coef_table <- function(fit) {
+  if (inherits(fit, "brmsfit")) {
+    return(brms_coef_table(
+      fit,
+      ci = fit$smt_ci %||% 0.95,
+      rope_k = fit$smt_rope_k %||% 0.1,
+      term_priors = fit$smt_term_priors
+    ))
+  }
   ct <- tryCatch(stats::coef(summary(fit)), error = function(e) NULL)
   if (is.null(ct)) return(NULL)
   as.data.frame(ct)
@@ -402,6 +503,98 @@ path_coef_pvalue <- function(ct, term) {
     }
   }
   NA_real_
+}
+
+#' HDI bounds stored on a brms coefficient table
+#' @keywords internal
+path_coef_bounds <- function(ct, term) {
+  if (is.null(ct) || !term %in% rownames(ct)) return(c(NA_real_, NA_real_))
+  if (!all(c("ci_low", "ci_high") %in% names(ct))) return(c(NA_real_, NA_real_))
+  c(as.numeric(ct[term, "ci_low"]), as.numeric(ct[term, "ci_high"]))
+}
+
+#' pd / ROPE fields stored on a brms coefficient table
+#' @keywords internal
+path_coef_bayes_fields <- function(ct, term) {
+  empty <- list(
+    pd = NA_real_,
+    rope_low = NA_real_,
+    rope_high = NA_real_,
+    rope_pct = NA_real_,
+    rope_decision = NA_character_,
+    log_bf10 = NA_real_,
+    includes_zero = NA
+  )
+  if (is.null(ct) || !term %in% rownames(ct)) return(empty)
+  pull <- function(nm) {
+    if (!nm %in% names(ct)) return(NA)
+    ct[term, nm][[1]]
+  }
+  list(
+    pd = as.numeric(pull("pd")),
+    rope_low = as.numeric(pull("rope_low")),
+    rope_high = as.numeric(pull("rope_high")),
+    rope_pct = as.numeric(pull("rope_pct")),
+    rope_decision = {
+      rd <- pull("rope_decision")
+      if (length(rd) != 1L || is.null(rd) || is.na(rd)) NA_character_ else as.character(rd)
+    },
+    log_bf10 = as.numeric(pull("log_bf10")),
+    includes_zero = as.logical(pull("includes_zero"))
+  )
+}
+
+#' Posterior mean, SD, HDI, pd, and ROPE for brms population-level coefficients
+#' @keywords internal
+brms_coef_table <- function(fit, ci = 0.95, rope_k = 0.1, term_priors = NULL) {
+  ci <- as.numeric(ci %||% 0.95)
+  if (!is.finite(ci) || ci <= 0 || ci >= 1) ci <- 0.95
+  rope_k <- as.numeric(rope_k %||% 0.1)
+  if (!is.finite(rope_k) || rope_k <= 0) rope_k <- 0.1
+  fx <- as.data.frame(brms::fixef(fit))
+  nms <- rownames(fx)
+  nms[nms == "Intercept"] <- "(Intercept)"
+  rownames(fx) <- nms
+  term_priors <- term_priors %||% list()
+  fx$ci_low <- NA_real_
+  fx$ci_high <- NA_real_
+  fx$pd <- NA_real_
+  fx$rope_low <- NA_real_
+  fx$rope_high <- NA_real_
+  fx$rope_pct <- NA_real_
+  fx$rope_decision <- NA_character_
+  fx$log_bf10 <- NA_real_
+  fx$includes_zero <- NA
+  for (nm in nms) {
+    draws <- brms_term_draws(fit, nm)
+    prior_mean <- if (!is.null(term_priors[[nm]]$mean)) {
+      as.numeric(term_priors[[nm]]$mean)
+    } else {
+      0
+    }
+    prior_sd <- if (!is.null(term_priors[[nm]]$sd)) {
+      as.numeric(term_priors[[nm]]$sd)
+    } else {
+      1
+    }
+    rope <- rope_bounds_from_prior(prior_sd, rope_k)
+    sm <- bayes_term_summary(
+      draws, rope = rope, ci = ci,
+      prior_mean = prior_mean, prior_sd = prior_sd
+    )
+    fx[nm, "Estimate"] <- sm$est
+    fx[nm, "Est.Error"] <- sm$se
+    fx[nm, "ci_low"] <- sm$hdi_low
+    fx[nm, "ci_high"] <- sm$hdi_high
+    fx[nm, "pd"] <- sm$pd
+    fx[nm, "rope_low"] <- sm$rope_low
+    fx[nm, "rope_high"] <- sm$rope_high
+    fx[nm, "rope_pct"] <- sm$rope_pct
+    fx[nm, "rope_decision"] <- sm$rope_decision
+    fx[nm, "log_bf10"] <- sm$log_bf10
+    fx[nm, "includes_zero"] <- sm$includes_null
+  }
+  fx
 }
 
 #' Standardized coefficients for lm / glm terms (excl. intercept)
@@ -460,7 +653,7 @@ joint_wald_test <- function(fit, term_names) {
   empty <- list(df = NA_real_, pvalue = NA_real_, statistic = NA_real_)
   if (!length(term_names)) return(empty)
   cf <- path_fixed_coefs(fit)
-  V <- tryCatch(as.matrix(stats::vcov(fit)), error = function(e) NULL)
+  V <- path_vcov(fit)
   if (is.null(V)) return(empty)
   idx <- match(term_names, names(cf))
   keep <- !is.na(idx) & is.finite(cf[idx])
@@ -1040,7 +1233,10 @@ attach_latent_factor_scores <- function(state, dat, score_method = "own") {
 #'
 #' @keywords internal
 fit_structural_model <- function(state, data, include_edge_ids = NULL,
-                                 latent_score_method = "own") {
+                                 latent_score_method = "own",
+                                 backend = c("freq", "brms"),
+                                 brms_args = NULL) {
+  backend <- match.arg(backend)
   if (is.null(include_edge_ids)) include_edge_ids <- state$edges$id
   edges <- state$edges[state$edges$id %in% include_edge_ids, , drop = FALSE]
   # DVs from the full graph so null / reduced candidates still get intercept-only equations
@@ -1060,7 +1256,8 @@ fit_structural_model <- function(state, data, include_edge_ids = NULL,
       stop("No structural dependent variables to fit.", call. = FALSE)
     }
     path_res <- fit_path_equations(
-      attached$state, dat_path, struct_edges, dv_ids = dv_ids
+      attached$state, dat_path, struct_edges, dv_ids = dv_ids,
+      backend = backend, brms_args = brms_args
     )
     # Keep measurement loadings on the canvas; structural coeffs from path stage
     est <- path_res$estimates
@@ -1073,8 +1270,9 @@ fit_structural_model <- function(state, data, include_edge_ids = NULL,
     } else {
       "# scores: own indicators only\n"
     }
+    path_stage <- if (identical(path_res$sampler, "brms")) "brms" else "lm/glm"
     path_res$syntax <- paste0(
-      "# two-step: factor scores (CFA) then path (lm/glm)\n",
+      "# two-step: factor scores (CFA) then path (", path_stage, ")\n",
       score_note,
       "# measurement\n",
       attached$measurement_syntax,
@@ -1094,10 +1292,16 @@ fit_structural_model <- function(state, data, include_edge_ids = NULL,
 
   if (!nrow(edges)) {
     if (!length(dv_ids)) stop("No dependent variables to fit.", call. = FALSE)
-    return(fit_path_equations(state, dat, edges, dv_ids = dv_ids))
+    return(fit_path_equations(
+      state, dat, edges, dv_ids = dv_ids,
+      backend = backend, brms_args = brms_args
+    ))
   }
 
-  fit_path_equations(state, dat, edges, dv_ids = dv_ids)
+  fit_path_equations(
+    state, dat, edges, dv_ids = dv_ids,
+    backend = backend, brms_args = brms_args
+  )
 }
 
 #' @keywords internal
@@ -1183,6 +1387,20 @@ fit_lavaan_model <- function(state, dat, edges) {
 #' @return list(value, kind) with kind in c("r2", "mcfadden") or NULL
 #' @keywords internal
 r_squared_one_fit <- function(fit) {
+  if (inherits(fit, "brmsfit")) {
+    r2 <- tryCatch(
+      suppressWarnings(brms::bayes_R2(fit)),
+      error = function(e) NULL
+    )
+    if (is.null(r2)) return(NULL)
+    val <- if (is.matrix(r2) && "Estimate" %in% colnames(r2)) {
+      as.numeric(r2[1L, "Estimate"])
+    } else {
+      stats::median(as.numeric(r2), na.rm = TRUE)
+    }
+    if (is.finite(val)) return(list(value = val, kind = "r2"))
+    return(NULL)
+  }
   if (inherits(fit, "lm") && !inherits(fit, "glm")) {
     r2 <- tryCatch(summary(fit)$r.squared, error = function(e) NA_real_)
     if (is.finite(r2)) return(list(value = as.numeric(r2), kind = "r2"))
@@ -1512,6 +1730,35 @@ build_path_terms <- function(state, dat, preds, response_level = NA_character_) 
     if (identical(kind, "categorical")) {
       if (from_id %in% processed_cat) next
       processed_cat <- c(processed_cat, from_id)
+      # Ordered factor + polynomial link → integer scores + poly expansion
+      # (keeps qualitative labels in the data; linear/quadratic in the model).
+      deg_ord <- rel_kind_degree(rel_kind)
+      if (isTRUE(coding$ordered) && deg_ord >= 2L) {
+        # Ordinal scores must match Simulate / prior overlay: use declared
+        # factor_levels order, not treatment-coding all_levels (base-first).
+        meta_ord <- node_factor_coding(state, from_id)
+        levs <- meta_ord$levels
+        if (!length(levs)) levs <- coding$all_levels
+        if (!length(levs)) {
+          stop("Ordered predictor '", xn, "' has no levels.", call. = FALSE)
+        }
+        x_num <- ordered_level_scores(
+          dat[[xn]],
+          levels_order = levs,
+          base = meta_ord$base %||% coding$base
+        )
+        expanded <- expand_continuous_predictor(
+          local_dat, xn, x_num, max_degree = deg_ord
+        )
+        local_dat <- expanded$data
+        for (nm in expanded$term_names) {
+          if (!nm %in% term_names) {
+            term_names <- c(term_names, nm)
+            term_meta[[nm]] <- expanded$term_meta[[nm]]
+          }
+        }
+        next
+      }
       idxs <- which(preds$from == from_id)
       modes <- vapply(idxs, function(j) edge_cat_mode(preds, j, state), character(1))
       levels_present <- if ("level" %in% names(preds)) {
@@ -1694,17 +1941,39 @@ attach_slope_factors <- function(local_dat, dat, slope_terms) {
 #' Fit one path equation (lm/glm or lmer/glmer random intercept / slopes)
 #' @keywords internal
 fit_one_path_equation <- function(yname, y_kind, rhs_terms, local_dat,
-                                  cluster = NULL, slope_terms = NULL) {
+                                  cluster = NULL, slope_terms = NULL,
+                                  backend = c("freq", "brms"),
+                                  brms_args = NULL,
+                                  state = NULL, preds = NULL,
+                                  term_meta = NULL) {
+  backend <- match.arg(backend)
   rhs <- if (!length(rhs_terms)) "1" else paste(rhs_terms, collapse = " + ")
   binary <- identical(y_kind, "binary")
+  re <- NULL
   if (!is.null(cluster)) {
-    # Ensure grouping factor
     local_dat[[cluster]] <- as.factor(local_dat[[cluster]])
     re <- rm_re_term(cluster, slope_terms)
     fml <- stats::as.formula(paste(yname, "~", rhs, "+", re))
+  } else {
+    fml <- stats::as.formula(paste(yname, "~", rhs))
+  }
+  if (identical(backend, "brms")) {
+    return(fit_one_brms_equation(
+      yname = yname,
+      y_kind = y_kind,
+      formula = fml,
+      data = local_dat,
+      rhs = rhs,
+      re = re,
+      brms_args = brms_args,
+      state = state,
+      preds = preds,
+      term_meta = term_meta
+    ))
+  }
+  if (!is.null(cluster)) {
     if (binary) {
       fit <- lme4::glmer(fml, data = local_dat, family = stats::binomial())
-      # Promote to lmerTest-compatible summary when possible
       syntax <- paste0("glmer(binomial): ", yname, " ~ ", rhs, " + ", re)
       eng <- "glmer"
     } else {
@@ -1713,18 +1982,11 @@ fit_one_path_equation <- function(yname, y_kind, rhs_terms, local_dat,
       eng <- "lmer"
     }
   } else if (binary) {
-    fit <- stats::glm(
-      stats::as.formula(paste(yname, "~", rhs)),
-      data = local_dat,
-      family = stats::binomial()
-    )
+    fit <- stats::glm(fml, data = local_dat, family = stats::binomial())
     syntax <- paste0("glm(binomial): ", yname, " ~ ", rhs)
     eng <- "glm"
   } else {
-    fit <- stats::lm(
-      stats::as.formula(paste(yname, "~", rhs)),
-      data = local_dat
-    )
+    fit <- stats::lm(fml, data = local_dat)
     syntax <- paste0("lm: ", yname, " ~ ", rhs)
     eng <- "lm"
   }
@@ -1736,7 +1998,13 @@ fit_one_path_equation <- function(yname, y_kind, rhs_terms, local_dat,
 #' @param dv_ids Optional DV node ids (from the full graph). Ensures intercept-only
 #'   equations when a candidate omits all predictors for a DV.
 #' @keywords internal
-fit_path_equations <- function(state, dat, edges, dv_ids = NULL) {
+fit_path_equations <- function(state, dat, edges, dv_ids = NULL,
+                             backend = c("freq", "brms"),
+                             brms_args = NULL) {
+  backend <- match.arg(backend)
+  if (identical(backend, "brms")) {
+    brms_args <- normalize_brms_args(brms_args)
+  }
   state <- ensure_node_rm_columns(state)
   struct <- edges[edges$type != "measurement", , drop = FALSE]
   if (!"level" %in% names(struct)) {
@@ -1831,20 +2099,24 @@ fit_path_equations <- function(state, dat, edges, dv_ids = NULL) {
           }
         }
         fitted_one <- fit_one_path_equation(
-          yname, y_kind, character(), local_dat, cluster
+          yname, y_kind, character(), local_dat, cluster,
+          backend = backend, brms_args = brms_args,
+          state = state, preds = preds, term_meta = list()
         )
         syn <- fitted_one$syntax
         if (!identical(lhs_disp, yname)) {
           syn <- sub(
-            paste0("^((?:glm|glmer|lm|lmer)[^:]*): ", yname),
+            paste0("^((?:brms|glmer|glm|lmer|lm)[^:]*): ", yname),
             paste0("\\1: ", lhs_disp),
             syn
           )
         }
         fits[[fit_key]] <- fitted_one$fit
         syntax_lines <- c(syntax_lines, syn)
-        aic_sum <- aic_sum + stats::AIC(fitted_one$fit)
-        bic_sum <- bic_sum + stats::BIC(fitted_one$fit)
+        if (!identical(backend, "brms")) {
+          aic_sum <- aic_sum + stats::AIC(fitted_one$fit)
+          bic_sum <- bic_sum + stats::BIC(fitted_one$fit)
+        }
         npar_sum <- npar_sum + length(path_fixed_coefs(fitted_one$fit))
         next
       }
@@ -1857,13 +2129,15 @@ fit_path_equations <- function(state, dat, edges, dv_ids = NULL) {
       local_fit_dat <- attach_slope_factors(built$data, dat, slope_terms)
       fitted_one <- fit_one_path_equation(
         built$yname, built$y_kind, built$term_names, local_fit_dat,
-        cluster, slope_terms = slope_terms
+        cluster, slope_terms = slope_terms,
+        backend = backend, brms_args = brms_args,
+        state = state, preds = preds, term_meta = built$term_meta
       )
       # Tag syntax with response level / transform when display lhs differs
       syn <- fitted_one$syntax
       if (!identical(built$lhs_name, built$yname)) {
         syn <- sub(
-          paste0("^((?:glm|glmer|lm|lmer)[^:]*): ", built$yname),
+          paste0("^((?:brms|glmer|glm|lmer|lm)[^:]*): ", built$yname),
           paste0("\\1: ", built$lhs_name),
           syn
         )
@@ -1871,8 +2145,10 @@ fit_path_equations <- function(state, dat, edges, dv_ids = NULL) {
       fit <- fitted_one$fit
       fits[[fit_key]] <- fit
       syntax_lines <- c(syntax_lines, syn)
-      aic_sum <- aic_sum + stats::AIC(fit)
-      bic_sum <- bic_sum + stats::BIC(fit)
+      if (!identical(backend, "brms")) {
+        aic_sum <- aic_sum + stats::AIC(fit)
+        bic_sum <- bic_sum + stats::BIC(fit)
+      }
       npar_sum <- npar_sum + length(path_fixed_coefs(fit))
 
       ct <- path_coef_table(fit)
@@ -1880,26 +2156,47 @@ fit_path_equations <- function(state, dat, edges, dv_ids = NULL) {
       lhs <- built$lhs_name
 
       omni <- built$omnibus_groups %||% list()
+      ci_level <- if (inherits(fit, "brmsfit")) as.numeric(fit$smt_ci %||% 0.95) else NA_real_
       for (xn in names(omni)) {
-        wt <- joint_wald_test(fit, omni[[xn]])
         row_i <- row_i + 1L
-        est_rows[[row_i]] <- estimate_row(
-          lhs = lhs,
-          op = "~",
-          rhs = xn,
-          est = NA_real_,
-          se = NA_real_,
-          pvalue = wt$pvalue,
-          est_std = NA_real_,
-          df = wt$df,
-          level = NA_character_,
-          kind = "omnibus"
-        )
+        if (inherits(fit, "brmsfit")) {
+          excl <- cri_region_excludes_zero(fit, omni[[xn]], ci = ci_level)
+          est_rows[[row_i]] <- estimate_row(
+            lhs = lhs,
+            op = "~",
+            rhs = xn,
+            est = NA_real_,
+            se = NA_real_,
+            pvalue = NA_real_,
+            est_std = NA_real_,
+            df = length(omni[[xn]]),
+            level = NA_character_,
+            kind = "omnibus",
+            ci_level = ci_level,
+            includes_zero = if (is.na(excl)) NA else !isTRUE(excl)
+          )
+        } else {
+          wt <- joint_wald_test(fit, omni[[xn]])
+          est_rows[[row_i]] <- estimate_row(
+            lhs = lhs,
+            op = "~",
+            rhs = xn,
+            est = NA_real_,
+            se = NA_real_,
+            pvalue = wt$pvalue,
+            est_std = NA_real_,
+            df = wt$df,
+            level = NA_character_,
+            kind = "omnibus"
+          )
+        }
       }
 
       for (tn in built$term_names) {
         if (is.null(ct) || !tn %in% rownames(ct)) next
         meta <- built$term_meta[[tn]]
+        bounds <- path_coef_bounds(ct, tn)
+        bay <- path_coef_bayes_fields(ct, tn)
         row_i <- row_i + 1L
         est_rows[[row_i]] <- estimate_row(
           lhs = lhs,
@@ -1907,11 +2204,22 @@ fit_path_equations <- function(state, dat, edges, dv_ids = NULL) {
           rhs = meta$rhs,
           est = as.numeric(ct[tn, 1L]),
           se = as.numeric(ct[tn, 2L]),
-          pvalue = path_coef_pvalue(ct, tn),
+          pvalue = if (is.finite(bounds[[1]])) NA_real_ else path_coef_pvalue(ct, tn),
           est_std = if (tn %in% names(bstd)) as.numeric(bstd[[tn]]) else NA_real_,
           df = 1,
           level = meta$level,
-          kind = "effect"
+          kind = "effect",
+          ci_low = bounds[[1]],
+          ci_high = bounds[[2]],
+          ci_level = if (is.finite(bounds[[1]])) ci_level else NA_real_,
+          includes_zero = bay$includes_zero,
+          pd = bay$pd,
+          rope_low = bay$rope_low,
+          rope_high = bay$rope_high,
+          rope_pct = bay$rope_pct,
+          rope_decision = bay$rope_decision,
+          log_bf10 = bay$log_bf10,
+          term = tn
         )
       }
     }
@@ -1923,18 +2231,41 @@ fit_path_equations <- function(state, dat, edges, dv_ids = NULL) {
     empty_estimates()
   }
 
-  fit_measures <- data.frame(
-    measure = c("equations", "npar", "aic", "bic"),
-    value = c(as.numeric(length(fits)), as.numeric(npar_sum), aic_sum, bic_sum),
-    stringsAsFactors = FALSE
-  )
+  if (identical(backend, "brms")) {
+    fit_measures <- data.frame(
+      measure = c("equations", "npar", "chains", "iter", "warmup", "ci", "rope_k"),
+      value = c(
+        as.numeric(length(fits)),
+        as.numeric(npar_sum),
+        as.numeric(brms_args$chains),
+        as.numeric(brms_args$iter),
+        as.numeric(brms_args$warmup),
+        as.numeric(brms_args$ci),
+        as.numeric(brms_args$rope_k)
+      ),
+      stringsAsFactors = FALSE
+    )
+    header <- sprintf(
+      "# path models (brms · %d%% HDI · ROPE k=%.2f · %d chains · %d iter · warmup %d · seed %d)",
+      round(100 * brms_args$ci), brms_args$rope_k,
+      brms_args$chains, brms_args$iter, brms_args$warmup, brms_args$seed
+    )
+  } else {
+    fit_measures <- data.frame(
+      measure = c("equations", "npar", "aic", "bic"),
+      value = c(as.numeric(length(fits)), as.numeric(npar_sum), aic_sum, bic_sum),
+      stringsAsFactors = FALSE
+    )
+    header <- "# path models (equation-wise)"
+  }
 
   result <- list(
     estimates = estimates,
     fit = fits,
     fit_measures = fit_measures,
-    syntax = paste(c("# path models (equation-wise)", syntax_lines), collapse = "\n"),
+    syntax = paste(c(header, syntax_lines), collapse = "\n"),
     engine = "path",
+    sampler = if (identical(backend, "brms")) "brms" else "freq",
     ordered = character()
   )
   result$r_squared <- r_squared_from_fitted(result, state)

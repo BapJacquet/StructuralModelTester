@@ -74,11 +74,24 @@ node_plot_label <- function(state, node_id) {
 
 #' Prior band for an unstandardized slope Normal(b, σ_b)
 #'
-#' Plots `y = ȳ + b · (x − x̄)` with a ribbon for b ∈ [μ − σ, μ + σ].
+#' Matches Simulate when `intercept` is the DV's `sim_intercept`:
+#' - linear: `y = a + b · (x − x̄)` (centered predictor, same as sim)
+#' - quadratic/cubic: `y = a + b₁ x + b₂ x_c² (+ b₃ x_c³)` with
+#'   `x_c = x − x̄` (same as [`expand_continuous_predictor`] / poly sim).
+#'
+#' If `intercept` is not finite, falls back to `a = ȳ` so the band still
+#' sits on the plotted cloud. The ±1 SD ribbon uses the **linear** SD only.
 #' @keywords internal
-edge_prior_line_data <- function(x, y, prior_mean, prior_sd = 1) {
+edge_prior_line_data <- function(x, y, prior_mean, prior_sd = 1,
+                                 prior_mean2 = 0, prior_mean3 = 0,
+                                 degree = 1L,
+                                 intercept = NULL) {
   if (!is.finite(prior_mean)) return(NULL)
   if (!is.finite(prior_sd) || prior_sd < 0) prior_sd <- 0
+  if (!is.finite(prior_mean2)) prior_mean2 <- 0
+  if (!is.finite(prior_mean3)) prior_mean3 <- 0
+  degree <- as.integer(degree %||% 1L)
+  if (!is.finite(degree) || degree < 1L) degree <- 1L
   x <- suppressWarnings(as.numeric(x))
   y <- suppressWarnings(as.numeric(y))
   ok <- is.finite(x) & is.finite(y)
@@ -89,13 +102,29 @@ edge_prior_line_data <- function(x, y, prior_mean, prior_sd = 1) {
   if (!is.finite(sx) || sx <= 0) return(NULL)
   mx <- mean(x)
   my <- mean(y)
+  a <- if (is.finite(intercept)) as.numeric(intercept) else my
+  if (degree < 2L) {
+    xr <- range(x)
+    dx <- xr - mx
+    return(data.frame(
+      x_plot = xr,
+      y_plot = a + prior_mean * dx,
+      ymin = a + (prior_mean - prior_sd) * dx,
+      ymax = a + (prior_mean + prior_sd) * dx,
+      stringsAsFactors = FALSE
+    ))
+  }
   xr <- range(x)
-  dx <- xr - mx
+  xg <- seq(xr[[1]], xr[[2]], length.out = 51L)
+  xc <- xg - mx
+  # Match poly sim / expand: linear on raw x, powers on centered x
+  y0 <- a + prior_mean * xg + prior_mean2 * xc^2
+  if (degree >= 3L) y0 <- y0 + prior_mean3 * xc^3
   data.frame(
-    x_plot = xr,
-    y_plot = my + prior_mean * dx,
-    ymin = my + (prior_mean - prior_sd) * dx,
-    ymax = my + (prior_mean + prior_sd) * dx,
+    x_plot = xg,
+    y_plot = y0,
+    ymin = y0 - prior_sd * abs(xc),
+    ymax = y0 + prior_sd * abs(xc),
     stringsAsFactors = FALSE
   )
 }
@@ -409,6 +438,7 @@ filter_data_at_interaction_reference <- function(state, data, partners) {
 #' @param prior_mean Optional override for the unstandardized expected slope `b`
 #'   (defaults to the edge's stored prior mean).
 #' @param prior_sd Optional override for prior uncertainty (SD).
+#' @param prior_mean2,prior_mean3 Optional poly-term prior means (quadratic/cubic).
 #' @param simulated If TRUE, titles say "simulated X → Y" (sim fallback data).
 #' @return A ggplot object, or NULL if the edge cannot be plotted.
 #' @keywords internal
@@ -417,6 +447,8 @@ edge_relationship_plot <- function(state, data, edge_id,
                                    rel_kind = NULL,
                                    prior_mean = NULL,
                                    prior_sd = NULL,
+                                   prior_mean2 = NULL,
+                                   prior_mean3 = NULL,
                                    simulated = FALSE,
                                    latent_score_method = "own",
                                    fit = NULL,
@@ -441,6 +473,10 @@ edge_relationship_plot <- function(state, data, edge_id,
   pr <- edge_prior(state, edge_id)
   if (is.null(prior_mean) || !is.finite(prior_mean)) prior_mean <- pr$mean
   if (is.null(prior_sd) || !is.finite(prior_sd) || prior_sd <= 0) prior_sd <- pr$sd
+  if (is.null(prior_mean2) || !is.finite(prior_mean2)) prior_mean2 <- pr$mean2
+  if (is.null(prior_mean3) || !is.finite(prior_mean3)) prior_mean3 <- pr$mean3
+  prior_intercept <- node_sim_params(state, to_id)$intercept
+  if (!is.finite(prior_intercept)) prior_intercept <- 0
 
   to_level <- if ("to_level" %in% names(state$edges)) state$edges$to_level[idx] else NA_character_
 
@@ -573,7 +609,8 @@ edge_relationship_plot <- function(state, data, edge_id,
   }
   subtitle <- edge_plot_subtitle(
     est, est_std, etype, level, show_fit, rel_kind,
-    prior_mean = prior_mean, prior_sd = prior_sd
+    prior_mean = prior_mean, prior_sd = prior_sd,
+    prior_mean2 = prior_mean2, prior_mean3 = prior_mean3
   )
   title <- edge_plot_effect_title(
     from_lab, to_lab, effect = effect_kind, simulated = simulated
@@ -609,6 +646,47 @@ edge_relationship_plot <- function(state, data, edge_id,
   }
 
   if (identical(x_kind, "categorical")) {
+    meta_ord <- node_factor_coding(state, from_id)
+    deg_plot <- rel_kind_degree(rel_kind)
+    # Ordered + polynomial: keep level boxplots; overlay curved poly fit/prior
+    if (isTRUE(meta_ord$ordered) && deg_plot >= 2L) {
+      # Ordinal axis = factor_levels order (same as ordered_level_scores), not
+      # base-first treatment coding — otherwise the curve misaligns with boxes.
+      levs <- merge_level_order(meta_ord$levels, data_levels_chr(df$x_raw))
+      if (!length(levs)) {
+        coding_ord <- variable_coding(
+          df$x_raw,
+          base = meta_ord$base,
+          levels_order = meta_ord$levels,
+          force_factor = TRUE
+        )
+        levs <- coding_ord$all_levels
+      }
+      df$x_plot <- factor(as.character(df$x_raw), levels = levs)
+      return(edge_plot_ordered_poly(
+        df = df,
+        from_lab = from_lab,
+        to_lab = to_lab,
+        y_kind = y_kind,
+        title = title,
+        subtitle = subtitle,
+        caption = effect_caption,
+        show_fit = show_fit,
+        rel_kind = rel_kind,
+        prior_mean = prior_mean,
+        prior_sd = prior_sd,
+        prior_mean2 = prior_mean2,
+        prior_mean3 = prior_mean3,
+        prior_intercept = prior_intercept,
+        fit = fit,
+        focal = from_col,
+        levels_order = levs,
+        base = meta_ord$base,
+        points_mode = points_mode,
+        effect = effect_kind,
+        simulated = simulated
+      ))
+    }
     df$x_plot <- if (is.factor(df$x_raw)) droplevels(df$x_raw) else factor(df$x_raw)
     return(edge_plot_group(
       df, to_lab, y_kind, from_lab, subtitle,
@@ -641,6 +719,9 @@ edge_relationship_plot <- function(state, data, edge_id,
     rel_kind = rel_kind,
     prior_mean = prior_mean,
     prior_sd = prior_sd,
+    prior_mean2 = prior_mean2,
+    prior_mean3 = prior_mean3,
+    prior_intercept = prior_intercept,
     fit = fit,
     focal = from_col,
     hold_at = hold_at,
@@ -652,6 +733,8 @@ edge_relationship_plot <- function(state, data, edge_id,
 #' @keywords internal
 edge_plot_continuous <- function(df, from_lab, to_lab, y_kind, title, subtitle,
                                  caption, show_fit, rel_kind, prior_mean, prior_sd,
+                                 prior_mean2 = 0, prior_mean3 = 0,
+                                 prior_intercept = NULL,
                                  fit = NULL, focal = NULL, hold_at = list(),
                                  points_mode = "observed") {
   points_mode <- normalize_edge_plot_points(points_mode)
@@ -682,7 +765,8 @@ edge_plot_continuous <- function(df, from_lab, to_lab, y_kind, title, subtitle,
     pts <- pts[stats::complete.cases(pts), , drop = FALSE]
   }
 
-  # Fit overlay: emmeans when available, else bivariate smooth
+  # Fit overlay: poly-aware predict when degree ≥ 2 (emmeans holds X_p2 fixed),
+  # else emmeans when available, else bivariate smooth
   curve_df <- NULL
   if (isTRUE(show_fit) && !is.null(fit) && !is.null(focal) && nzchar(focal)) {
     x_rng <- range(df$x_plot, na.rm = TRUE)
@@ -691,15 +775,32 @@ edge_plot_continuous <- function(df, from_lab, to_lab, y_kind, title, subtitle,
     } else {
       x_grid <- stats::median(df$x_plot, na.rm = TRUE)
     }
-    curve_df <- emmeans_edge_curve(
-      fit, focal, hold_at = hold_at, x_grid = x_grid
-    )
+    deg_fit <- rel_kind_degree(rel_kind)
+    if (deg_fit >= 2L) {
+      curve_df <- poly_edge_curve_data(
+        fit, focal, x_grid = x_grid, y_binary = y_binary
+      )
+      if (exists("smt_debug", mode = "function")) {
+        smt_debug(
+          "edge_plot_continuous poly curve | focal=", focal,
+          " deg=", deg_fit,
+          " n=", if (is.null(curve_df)) 0L else nrow(curve_df)
+        )
+      }
+    } else {
+      curve_df <- emmeans_edge_curve(
+        fit, focal, hold_at = hold_at, x_grid = x_grid
+      )
+    }
   }
 
   prior_y <- if (!is.null(pts) && nrow(pts)) pts$y else df$y_plot
   prior_x <- if (!is.null(pts) && nrow(pts)) pts$x else df$x_plot
   prior_line <- edge_prior_line_data(
-    prior_x, prior_y, prior_mean, prior_sd = prior_sd
+    prior_x, prior_y, prior_mean, prior_sd = prior_sd,
+    prior_mean2 = prior_mean2, prior_mean3 = prior_mean3,
+    degree = rel_kind_degree(rel_kind),
+    intercept = prior_intercept
   )
 
   # Base data for ggplot scale when points are hidden
@@ -846,6 +947,141 @@ edge_plot_effect_caption <- function(effect = c("conditional", "marginal", "inte
     return("Conditional effect (co-predictors at reference)")
   }
   "Marginal effect (no co-predictors in this equation)"
+}
+
+#' Ordered factor + polynomial link: level boxplots with curved fit/prior
+#'
+#' ggplot places factor levels at integer positions 1…k, matching
+#' [`ordered_level_scores`], so a numeric poly curve overlays cleanly.
+#' @keywords internal
+edge_plot_ordered_poly <- function(df, from_lab, to_lab, y_kind, title, subtitle,
+                                   caption, show_fit, rel_kind,
+                                   prior_mean, prior_sd,
+                                   prior_mean2 = 0, prior_mean3 = 0,
+                                   prior_intercept = NULL,
+                                   fit = NULL, focal = NULL,
+                                   levels_order = NULL, base = NULL,
+                                   points_mode = "observed",
+                                   effect = c("conditional", "marginal"),
+                                   simulated = FALSE) {
+  effect <- match.arg(effect)
+  points_mode <- normalize_edge_plot_points(points_mode)
+  if (identical(points_mode, "partial")) points_mode <- "observed"
+  y_binary <- identical(y_kind, "binary")
+  if (y_binary) {
+    df$y_plot <- as_binary01(df$y_raw)
+    y_lab <- sprintf("P(%s = 1)", to_lab)
+  } else {
+    df$y_plot <- as.numeric(df$y_raw)
+    y_lab <- to_lab
+  }
+  df$hl <- "other"
+  if (is.null(caption) || !nzchar(caption)) {
+    caption <- edge_plot_effect_caption(effect)
+  }
+
+  levs <- levels(df$x_plot)
+  if (!length(levs) && length(levels_order)) levs <- levels_order
+  scores_obs <- ordered_level_scores(
+    df$x_raw,
+    levels_order = levs,
+    base = base
+  )
+  score_rng <- range(scores_obs, na.rm = TRUE)
+  if (!all(is.finite(score_rng))) {
+    score_rng <- c(1, max(1L, length(levs)))
+  }
+  x_grid <- if (diff(score_rng) > 0) {
+    seq(score_rng[[1]], score_rng[[2]], length.out = 51L)
+  } else {
+    score_rng[[1]]
+  }
+
+  curve_df <- NULL
+  if (isTRUE(show_fit) && !is.null(fit) && !is.null(focal) && nzchar(focal)) {
+    curve_df <- poly_edge_curve_data(
+      fit, focal, x_grid = x_grid, y_binary = y_binary
+    )
+    if (exists("smt_debug", mode = "function")) {
+      smt_debug(
+        "edge_plot_ordered_poly | focal=", focal,
+        " deg=", rel_kind_degree(rel_kind),
+        " n_curve=", if (is.null(curve_df)) 0L else nrow(curve_df),
+        " n_lev=", length(levs)
+      )
+    }
+  }
+
+  prior_line <- edge_prior_line_data(
+    scores_obs, df$y_plot, prior_mean, prior_sd = prior_sd,
+    prior_mean2 = prior_mean2, prior_mean3 = prior_mean3,
+    degree = rel_kind_degree(rel_kind),
+    intercept = prior_intercept
+  )
+  if (exists("smt_debug", mode = "function")) {
+    smt_debug(
+      "edge_prior poly | intercept=", prior_intercept,
+      " mean=", prior_mean, " mean2=", prior_mean2,
+      " y_range=", if (is.null(prior_line)) "NULL" else paste(round(range(prior_line$y_plot), 2), collapse = "..")
+    )
+  }
+
+  p <- ggplot2::ggplot(df, ggplot2::aes(x = .data$x_plot, y = .data$y_plot))
+  if (!identical(points_mode, "none")) {
+    if (y_binary) {
+      p <- p +
+        ggplot2::geom_jitter(
+          height = 0.04, width = 0.12, alpha = 0.35, size = 1.6,
+          color = "#2E86AB"
+        )
+    } else {
+      p <- p +
+        ggplot2::geom_jitter(
+          width = 0.12, alpha = 0.35, size = 1.4, color = "#2E86AB"
+        ) +
+        ggplot2::scale_fill_manual(values = c(focus = "#D9C7F5", other = "#E8EEF5"))
+    }
+  }
+  if (y_binary) {
+    p <- p + ggplot2::coord_cartesian(ylim = c(-0.05, 1.05))
+  }
+  p <- p +
+    ggplot2::labs(
+      title = title,
+      subtitle = subtitle,
+      caption = caption,
+      x = from_lab,
+      y = y_lab
+    ) +
+    edge_plot_theme()
+
+  # Boxplots / means under the curve
+  if (!identical(points_mode, "none") && !y_binary) {
+    p <- p +
+      ggplot2::geom_boxplot(
+        width = 0.55, outlier.alpha = 0.35, color = "#4A5568",
+        ggplot2::aes(fill = .data$hl), show.legend = FALSE, alpha = 0.55
+      )
+  } else if (y_binary && isTRUE(show_fit) && is.null(curve_df)) {
+    p <- p +
+      ggplot2::stat_summary(fun = mean, geom = "point", size = 3, color = "#C0392B") +
+      ggplot2::stat_summary(
+        fun.data = mean_se_fun, geom = "errorbar", width = 0.15, color = "#C0392B"
+      )
+  }
+
+  for (ly in edge_prior_overlay_layers(prior_line)) p <- p + ly
+  if (isTRUE(show_fit)) {
+    if (!is.null(curve_df) && nrow(curve_df)) {
+      for (ly in emmeans_fit_layers(curve_df, categorical = FALSE, y_binary = y_binary)) {
+        p <- p + ly
+      }
+    } else if (!y_binary) {
+      p <- p +
+        ggplot2::stat_summary(fun = mean, geom = "point", size = 2.8, color = "#1F7A4D")
+    }
+  }
+  p
 }
 
 edge_plot_group <- function(df, to_lab, y_kind, x_label, subtitle,
@@ -1183,7 +1419,8 @@ interaction_binary_x_fit_layers <- function(fit_df) {
 #' @keywords internal
 edge_plot_subtitle <- function(est, est_std, etype, level, show_fit = FALSE,
                                rel_kind = "linear", prior_mean = NULL,
-                               prior_sd = NULL) {
+                               prior_sd = NULL,
+                               prior_mean2 = NULL, prior_mean3 = NULL) {
   parts <- character()
   if (!is.na(etype) && nzchar(etype) && !identical(etype, "definitional")) {
     parts <- c(parts, etype)
@@ -1195,6 +1432,13 @@ edge_plot_subtitle <- function(est, est_std, etype, level, show_fit = FALSE,
     } else {
       parts <- c(parts, sprintf("expected b = %.2f (dashed)", prior_mean))
     }
+  }
+  deg_sub <- rel_kind_degree(rel_kind)
+  if (deg_sub >= 2L && is.finite(prior_mean2) && abs(prior_mean2) > 1e-12) {
+    parts <- c(parts, sprintf("b\u00B2 = %.2f", prior_mean2))
+  }
+  if (deg_sub >= 3L && is.finite(prior_mean3) && abs(prior_mean3) > 1e-12) {
+    parts <- c(parts, sprintf("b\u00B3 = %.2f", prior_mean3))
   }
   if (isTRUE(show_fit) && is.finite(est)) {
     parts <- c(parts, sprintf("b = %.3f", est))

@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "id": "Stage",
+      "label": "Stage",
+      "observed_column": "Stage",
+      "shape": "box",
+      "x": 120,
+      "y": 160,
+      "node_kind": "observed",
+      "cat_mode": "omnibus",
+      "repeated_measures": false,
+      "rm_slopes": false,
+      "dv_transform": "none",
+      "factor_base": "None",
+      "factor_ordered": true,
+      "factor_levels": "None\nLow\nModerate\nHigh",
+      "sim_mean": 0,
+      "sim_sd": 1,
+      "sim_intercept": 0,
+      "sim_resid_sd": 1,
+      "sim_var_kind": "categorical",
+      "sim_design_mode": "inter",
+      "sim_alloc_mode": "probability"
+    },
+    {
+      "id": "Y",
+      "label": "Y",
+      "observed_column": "Y",
+      "shape": "box",
+      "x": 420,
+      "y": 160,
+      "node_kind": "observed",
+      "cat_mode": "split",
+      "repeated_measures": false,
+      "rm_slopes": false,
+      "dv_transform": "none",
+      "factor_ordered": false,
+      "sim_mean": 0,
+      "sim_sd": 1,
+      "sim_intercept": 17.3,
+      "sim_resid_sd": 1,
+      "sim_var_kind": "continuous",
+      "sim_design_mode": "inter",
+      "sim_alloc_mode": "probability"
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "from": "Stage",
+      "to": "Y",
+      "type": "confirmatory",
+      "rel_kind": "quadratic",
+      "status": "pending",
+      "label": "C·omnibus",
+      "prior_family": "normal",
+      "prior_mean": 0.4,
+      "prior_sd": 1,
+      "prior_mean2": -0.15,
+      "prior_sd2": 1,
+      "prior_mean3": 0,
+      "prior_sd3": 1
+    }
+  ],
+  "next_node": 3,
+  "next_edge": 2
+}

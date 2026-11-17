@@ -31,12 +31,33 @@ normalize_edge_plot_points <- function(mode) {
   "observed"
 }
 
+#' Column names of the fixed-effect model matrix (lm/glm/merMod/brms)
+#' @keywords internal
+path_model_matrix_names <- function(fit) {
+  mm <- tryCatch(colnames(stats::model.matrix(fit)), error = function(e) character())
+  if (length(mm)) return(mm)
+  if (!inherits(fit, "brmsfit") || !is.data.frame(fit$data)) return(character())
+  tryCatch({
+    fml <- lme4::nobars(stats::formula(fit))
+    colnames(stats::model.matrix(fml, data = fit$data))
+  }, error = function(e) character())
+}
+
+#' Model frame, or the data stored on a brms fit
+#' @keywords internal
+path_model_frame <- function(fit) {
+  mf <- tryCatch(stats::model.frame(fit), error = function(e) NULL)
+  if (!is.null(mf)) return(mf)
+  if (inherits(fit, "brmsfit") && is.data.frame(fit$data)) return(fit$data)
+  NULL
+}
+
 #' Model-matrix / coef names belonging to a predictor node
 #' @keywords internal
 predictor_fit_columns <- function(state, fit, node_id) {
   xn <- tryCatch(lavaan_var_name(state, node_id), error = function(e) NA_character_)
   if (is.na(xn) || !nzchar(xn)) return(character())
-  mm <- tryCatch(colnames(stats::model.matrix(fit)), error = function(e) character())
+  mm <- path_model_matrix_names(fit)
   mm <- setdiff(mm, "(Intercept)")
   if (!length(mm)) return(character())
   sx <- sanitize_id(xn)
@@ -64,7 +85,7 @@ emmeans_hold_specs <- function(state, data, fit, hold_ids) {
   if (is.null(fit) || !length(hold_ids)) {
     return(list(at = at, labels = labels))
   }
-  mf <- tryCatch(stats::model.frame(fit), error = function(e) NULL)
+  mf <- path_model_frame(fit)
 
   for (pid in hold_ids) {
     cols <- predictor_fit_columns(state, fit, pid)
@@ -131,7 +152,7 @@ emmeans_focal_at <- function(fit, focal, x_grid) {
   x_grid <- x_grid[is.finite(x_grid)]
   if (!length(x_grid)) return(at)
   at[[focal]] <- x_grid
-  mf <- tryCatch(stats::model.frame(fit), error = function(e) NULL)
+  mf <- path_model_frame(fit)
   x_mu <- if (!is.null(mf) && focal %in% names(mf)) {
     mean(as.numeric(mf[[focal]]), na.rm = TRUE)
   } else {
@@ -139,7 +160,7 @@ emmeans_focal_at <- function(fit, focal, x_grid) {
   }
   if (!is.finite(x_mu)) x_mu <- 0
   xc <- x_grid - x_mu
-  mm <- tryCatch(colnames(stats::model.matrix(fit)), error = function(e) character())
+  mm <- path_model_matrix_names(fit)
   sx <- sanitize_id(focal)
   for (d in 2:6) {
     pn <- poly_col_name(focal, d)
@@ -175,7 +196,8 @@ emmeans_edge_curve <- function(fit, focal, hold_at = list(),
     return(NULL)
   }
 
-  use_response <- inherits(fit, "glm") || inherits(fit, "glmerMod")
+  use_response <- inherits(fit, "glm") || inherits(fit, "glmerMod") ||
+    (inherits(fit, "brmsfit") && fit$family$family %in% c("bernoulli", "binomial"))
   em <- tryCatch(
     {
       rg <- emmeans::ref_grid(fit, at = at)
@@ -233,6 +255,76 @@ emmeans_edge_curve <- function(fit, focal, hold_at = list(),
   )
 }
 
+#' Predicted curve for a polynomial-expanded focal predictor
+#'
+#' `emmeans` holds higher-power columns (e.g. `X_p2`) fixed when varying `X`,
+#' which yields a straight line. This helper rebuilds centered powers to match
+#' [`expand_continuous_predictor`] and uses `predict()`.
+#' @keywords internal
+poly_edge_curve_data <- function(fit, focal, x_grid, y_binary = FALSE) {
+  if (is.null(fit) || is.null(focal) || !nzchar(as.character(focal))) {
+    return(NULL)
+  }
+  x_grid <- suppressWarnings(as.numeric(x_grid))
+  x_grid <- x_grid[is.finite(x_grid)]
+  if (!length(x_grid)) return(NULL)
+  focal <- as.character(focal)[[1]]
+  mf <- path_model_frame(fit)
+  if (is.null(mf) || !focal %in% names(mf)) return(NULL)
+  x_train <- suppressWarnings(as.numeric(mf[[focal]]))
+  center <- mean(x_train, na.rm = TRUE)
+  if (!is.finite(center)) center <- 0
+
+  n <- length(x_grid)
+  nd <- mf[rep(1L, n), , drop = FALSE]
+  rownames(nd) <- NULL
+  # Drop response so predict() doesn't require it
+  resp <- tryCatch(as.character(stats::formula(fit)[[2L]]), error = function(e) NA_character_)
+  if (!is.na(resp) && nzchar(resp) && resp %in% names(nd)) {
+    nd[[resp]] <- NULL
+  }
+  nd[[focal]] <- x_grid
+  xc <- x_grid - center
+  for (d in 2:6) {
+    nm <- poly_col_name(focal, d)
+    if (nm %in% names(mf)) {
+      nd[[nm]] <- xc^d
+    }
+  }
+
+  use_response <- isTRUE(y_binary) || inherits(fit, "glm") || inherits(fit, "glmerMod")
+  pred <- tryCatch(
+    {
+      if (use_response) {
+        stats::predict(fit, newdata = nd, type = "response", se.fit = TRUE)
+      } else {
+        stats::predict(fit, newdata = nd, se.fit = TRUE)
+      }
+    },
+    error = function(e) {
+      if (exists("smt_debug", mode = "function")) {
+        smt_debug("poly_edge_curve_data failed: ", e$message)
+      }
+      NULL
+    }
+  )
+  if (is.null(pred)) return(NULL)
+  fit_y <- as.numeric(pred$fit)
+  se <- as.numeric(pred$se.fit)
+  if (!length(fit_y) || length(fit_y) != n) return(NULL)
+  if (!length(se) || length(se) != n || any(!is.finite(se))) {
+    se <- rep(0, n)
+  }
+  data.frame(
+    x = x_grid,
+    x_lab = as.character(x_grid),
+    y = fit_y,
+    ymin = fit_y - 1.96 * se,
+    ymax = fit_y + 1.96 * se,
+    stringsAsFactors = FALSE
+  )
+}
+
 #' Partial-residual coordinates for a focal continuous predictor
 #'
 #' Uses `residuals(fit, type = "partial")` for the linear term column. Falls
@@ -247,7 +339,7 @@ partial_residual_xy <- function(fit, focal) {
   if (is.null(pr)) return(NULL)
   pr <- as.matrix(pr)
   if (!focal %in% colnames(pr)) return(NULL)
-  mf <- tryCatch(stats::model.frame(fit), error = function(e) NULL)
+  mf <- path_model_frame(fit)
   if (is.null(mf) || !focal %in% names(mf)) return(NULL)
   x <- as.numeric(mf[[focal]])
   y <- as.numeric(pr[, focal])

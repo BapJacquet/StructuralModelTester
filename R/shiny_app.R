@@ -70,8 +70,8 @@ smt_ui <- function() {
             class = "smt-view-toggle",
             shiny::radioButtons(
               "center_view", NULL,
-              choiceNames = list("Data", "Prepare", "Model"),
-              choiceValues = list("data", "prepare", "model"),
+              choiceNames = list("Data", "Prepare", "Model", "Report"),
+              choiceValues = list("data", "prepare", "model", "report"),
               selected = "model", inline = TRUE
             ),
             shiny::uiOutput("smt_version_badge", inline = TRUE)
@@ -114,11 +114,16 @@ smt_ui <- function() {
             shiny::hr(class = "smt-hr"),
             shiny::h3("Analysis"),
             shiny::div(
-              title = "p-values: classical tests. Model comparison: AIC/BIC search over exploratory links.",
+              title = paste(
+                "p-values: classical tests.",
+                "Bayesian (brms): normal priors from Expected b ± SD; unsupported when the HDI is not outside the ROPE.",
+                "Model comparison: AIC/BIC search over exploratory links."
+              ),
               shiny::radioButtons(
                 "inference_mode", "Framework",
                 choices = c(
                   "p-values" = "pvalue",
+                  "Bayesian (brms)" = "bayes",
                   "Model comparison (AIC/BIC)" = "search"
                 ),
                 selected = "pvalue"
@@ -132,15 +137,24 @@ smt_ui <- function() {
                   "alpha", "α for exploratory marking",
                   value = 0.05, min = 0.001, max = 0.2, step = 0.01
                 )
-              ),
+              )
+            ),
+            shiny::conditionalPanel(
+              condition = "input.inference_mode == 'pvalue' || input.inference_mode == 'bayes'",
               shiny::div(
-                title = "Exploratory links with p > α are dashed (excluded) on the canvas.",
+                title = paste(
+                  "p-values: exploratory links with p > α are dashed.",
+                  "Bayesian: exploratory links are dashed when the HDI is not entirely outside the ROPE."
+                ),
                 shiny::checkboxInput(
                   "mark_nonsig",
-                  "Mark non-significant exploratory links",
+                  "Mark unsupported exploratory links",
                   TRUE
                 )
-              ),
+              )
+            ),
+            shiny::conditionalPanel(
+              condition = "input.inference_mode == 'pvalue'",
               shiny::div(
                 title = paste(
                   "Adjusts confirmatory link p-values across all confirmatory paths",
@@ -158,6 +172,36 @@ smt_ui <- function() {
                   selected = "holm",
                   width = "100%"
                 )
+              )
+            ),
+            shiny::conditionalPanel(
+              condition = "input.inference_mode == 'bayes'",
+              shiny::helpText(
+                "Each equation is sampled with brms. Expected b ± SD is a normal prior. Results show the posterior mean, HDI, pd, and ROPE. A link is unsupported when the HDI is not entirely outside the ROPE."
+              ),
+              shiny::numericInput(
+                "bayes_ci", "HDI mass",
+                value = 0.95, min = 0.5, max = 0.99, step = 0.01
+              ),
+              shiny::numericInput(
+                "bayes_rope_k", "ROPE (± fraction of prior SD)",
+                value = 0.1, min = 0.01, max = 1, step = 0.01
+              ),
+              shiny::numericInput(
+                "bayes_chains", "Chains",
+                value = 2, min = 1, max = 4, step = 1
+              ),
+              shiny::numericInput(
+                "bayes_iter", "Iterations (per chain)",
+                value = 2000, min = 200, max = 10000, step = 100
+              ),
+              shiny::numericInput(
+                "bayes_warmup", "Warmup (per chain)",
+                value = 1000, min = 50, max = 5000, step = 50
+              ),
+              shiny::numericInput(
+                "bayes_seed", "MCMC seed",
+                value = 1, step = 1
               )
             ),
             shiny::conditionalPanel(
@@ -208,6 +252,8 @@ smt_ui <- function() {
               )
             ),
             shiny::hr(class = "smt-hr"),
+            shiny::conditionalPanel(
+              condition = "input.inference_mode != 'bayes'",
             shiny::div(
               title = paste(
                 "Applied only after the final model is chosen (not during AIC/BIC search).",
@@ -242,6 +288,7 @@ smt_ui <- function() {
                   step = 1
                 )
               )
+            )
             ),
             shiny::uiOutput("latent_score_method_ui"),
             shiny::hr(class = "smt-hr"),
@@ -448,6 +495,7 @@ smt_ui <- function() {
                 shiny::div(
                   class = "smt-edge-plot-header",
                   shiny::h3(class = "smt-center-title smt-edge-plot-title", "Conditional / marginal effect"),
+                  shiny::uiOutput("report_pin_edge_plot", inline = TRUE),
                   shiny::selectInput(
                     "edge_rel_kind",
                     label = NULL,
@@ -480,35 +528,102 @@ smt_ui <- function() {
                   ),
                   shiny::div(
                     class = "smt-edge-prior-inline",
+                    `data-rel` = "linear",
                     title = paste(
-                      "Normal prior on the unstandardized coefficient b",
-                      "(continuous: slope on the predictor's units; factors: contrast vs base).",
-                      "On measurement links this is the loading λ used to simulate indicators",
-                      "(default 1; unset/0 also treated as 1 in Simulate).",
-                      "Used for simulation / power; ignored by frequentist Run."
+                      "Expected coefficients: Simulate / power, and normal priors when Framework is Bayesian (brms).",
+                      "b / λ = linear slope or measurement loading;",
+                      "b² / b³ = centered higher powers when the link is quadratic/cubic.",
+                      "± = prior SD (uncertainty)."
                     ),
-                    shiny::numericInput(
-                      "prior_mean_selected",
-                      "Expected b / λ",
-                      value = 0,
-                      step = 0.1,
-                      width = "110px"
+                    shiny::span(class = "smt-prior-row-lab", "Expected"),
+                    shiny::div(
+                      class = "smt-prior-term",
+                      `data-deg` = "1",
+                      shiny::span(class = "smt-prior-term-lab", "b"),
+                      shiny::numericInput(
+                        "prior_mean_selected",
+                        label = NULL,
+                        value = 0,
+                        step = 0.1,
+                        width = "54px"
+                      ),
+                      shiny::span(class = "smt-prior-pm", "\u00b1"),
+                      shiny::numericInput(
+                        "prior_sd_selected",
+                        label = NULL,
+                        value = 1,
+                        min = 0.01,
+                        step = 0.1,
+                        width = "48px"
+                      )
                     ),
-                    shiny::numericInput(
-                      "prior_sd_selected",
-                      "Uncertainty (SD)",
-                      value = 1,
-                      min = 0.01,
-                      step = 0.1,
-                      width = "110px"
+                    shiny::div(
+                      class = "smt-prior-term",
+                      `data-deg` = "2",
+                      shiny::span(class = "smt-prior-term-lab", "b\u00B2"),
+                      shiny::numericInput(
+                        "prior_mean2_selected",
+                        label = NULL,
+                        value = 0,
+                        step = 0.1,
+                        width = "54px"
+                      ),
+                      shiny::span(class = "smt-prior-pm", "\u00b1"),
+                      shiny::numericInput(
+                        "prior_sd2_selected",
+                        label = NULL,
+                        value = 1,
+                        min = 0.01,
+                        step = 0.1,
+                        width = "48px"
+                      )
+                    ),
+                    shiny::div(
+                      class = "smt-prior-term",
+                      `data-deg` = "3",
+                      shiny::span(class = "smt-prior-term-lab", "b\u00B3"),
+                      shiny::numericInput(
+                        "prior_mean3_selected",
+                        label = NULL,
+                        value = 0,
+                        step = 0.1,
+                        width = "54px"
+                      ),
+                      shiny::span(class = "smt-prior-pm", "\u00b1"),
+                      shiny::numericInput(
+                        "prior_sd3_selected",
+                        label = NULL,
+                        value = 1,
+                        min = 0.01,
+                        step = 0.1,
+                        width = "48px"
+                      )
                     )
                   )
                 ),
                 shiny::div(
                   class = "smt-edge-plot-body",
-                  shiny::plotOutput("edge_plot", height = "240px")
+                  shiny::plotOutput("edge_plot", height = "280px")
                 )
               )
+            )
+          ),
+          shiny::conditionalPanel(
+            condition = "input.center_view == 'report'",
+            shiny::div(
+              class = "smt-center-inner smt-report-wrap",
+              shiny::div(
+                class = "smt-report-header",
+                shiny::h3(class = "smt-center-title", "Report"),
+                shiny::uiOutput("export_report_pdf_btn", inline = TRUE)
+              ),
+              shiny::helpText(
+                "Pin analyses and plots from the Results panel and Model view ",
+                "with the + controls. Modules stay live-bound to the current fit ",
+                "(and to the DV / edge captured when you pinned them). ",
+                "Export PDF builds an APA 7 manuscript (apa7 LaTeX class) of the pinned modules."
+              ),
+              shiny::uiOutput("report_stack")
             )
           )
         ),
@@ -534,9 +649,9 @@ smt_ui <- function() {
                 shiny::plotOutput("dv_resid_plot", height = "320px")
               )
             ),
-            shiny::h4("Power analysis"),
+            shiny::uiOutput("report_section_power"),
             shiny::uiOutput("power_summary_msg"),
-            shiny::h4("Path coefficients"),
+            shiny::uiOutput("report_section_coef"),
             DT::DTOutput("coef_table"),
             shiny::conditionalPanel(
               condition = "input.inference_mode == 'search'",
@@ -578,6 +693,29 @@ smt_server <- function(input, output, session) {
     n_cap = 1000L
   ))
   power_modal_status_rv <- shiny::reactiveVal("")
+  # Report tab: ordered list of pinned modules (live-bound).
+  report_modules <- shiny::reactiveVal(empty_report_modules())
+  report_plot_registered <- shiny::reactiveVal(character())
+  report_table_registered <- shiny::reactiveVal(character())
+
+  report_toggle_module <- function(type, params = NULL) {
+    mods <- shiny::isolate(report_modules())
+    hits <- report_find_modules(mods, type, params)
+    if (length(hits)) {
+      for (h in hits) {
+        mods <- report_remove_module(mods, h$uid)
+      }
+    } else {
+      mods <- report_add_module(mods, type, params)
+    }
+    report_modules(mods)
+  }
+
+  selected_edge_id <- shiny::reactive({
+    sel <- input$graph_selected
+    if (is.null(sel$edges) || !length(sel$edges)) return(NULL)
+    as.character(sel$edges[[1]])
+  })
 
   smt_show_power_modal <- function() {
     ps <- power_settings_rv()
@@ -1446,78 +1584,104 @@ smt_server <- function(input, output, session) {
       return(list(state = st, changed = FALSE))
     }
     if (is.na(m) || is.na(s)) return(list(state = st, changed = FALSE))
+    m2 <- input$prior_mean2_selected
+    s2 <- input$prior_sd2_selected
+    m3 <- input$prior_mean3_selected
+    s3 <- input$prior_sd3_selected
+    mean2 <- if (!is.null(m2) && length(m2) == 1L && is.finite(m2)) as.numeric(m2) else NULL
+    sd2 <- if (!is.null(s2) && length(s2) == 1L && is.finite(s2) && s2 > 0) as.numeric(s2) else NULL
+    mean3 <- if (!is.null(m3) && length(m3) == 1L && is.finite(m3)) as.numeric(m3) else NULL
+    sd3 <- if (!is.null(s3) && length(s3) == 1L && is.finite(s3) && s3 > 0) as.numeric(s3) else NULL
     cur <- edge_prior(st, eid)
-    if (isTRUE(all.equal(cur$mean, as.numeric(m), tolerance = 1e-9)) &&
-          isTRUE(all.equal(cur$sd, as.numeric(s), tolerance = 1e-9))) {
-      return(list(state = st, changed = FALSE))
-    }
-    st <- set_edge_prior(st, eid, mean = m, sd = s)
+    same <- isTRUE(all.equal(cur$mean, as.numeric(m), tolerance = 1e-9)) &&
+      isTRUE(all.equal(cur$sd, as.numeric(s), tolerance = 1e-9)) &&
+      (is.null(mean2) || isTRUE(all.equal(cur$mean2, mean2, tolerance = 1e-9))) &&
+      (is.null(sd2) || isTRUE(all.equal(cur$sd2, sd2, tolerance = 1e-9))) &&
+      (is.null(mean3) || isTRUE(all.equal(cur$mean3, mean3, tolerance = 1e-9))) &&
+      (is.null(sd3) || isTRUE(all.equal(cur$sd3, sd3, tolerance = 1e-9)))
+    if (same) return(list(state = st, changed = FALSE))
+    st <- set_edge_prior(
+      st, eid,
+      mean = m, sd = s,
+      mean2 = mean2, sd2 = sd2,
+      mean3 = mean3, sd3 = sd3
+    )
     list(state = st, changed = TRUE)
   }
 
-  # How many programmatic prior updates to ignore (mean + sd = 2).
+  # How many programmatic prior updates to ignore (mean/sd × 3 degrees = 6).
   skip_prior_writes_left <- shiny::reactiveVal(0L)
   last_prior_edge_id <- shiny::reactiveVal(NULL)
+
+  sync_prior_inputs <- function(pr) {
+    skip_prior_writes_left(6L)
+    shiny::updateNumericInput(session, "prior_mean_selected", value = pr$mean)
+    shiny::updateNumericInput(session, "prior_sd_selected", value = pr$sd)
+    shiny::updateNumericInput(session, "prior_mean2_selected", value = pr$mean2)
+    shiny::updateNumericInput(session, "prior_sd2_selected", value = pr$sd2)
+    shiny::updateNumericInput(session, "prior_mean3_selected", value = pr$mean3)
+    shiny::updateNumericInput(session, "prior_sd3_selected", value = pr$sd3)
+  }
 
   shiny::observeEvent(selected_structural_edge_id(), {
     new_eid <- selected_structural_edge_id()
     old_eid <- shiny::isolate(last_prior_edge_id())
     # Persist edits for the edge that was shown before this selection change
     if (!is.null(old_eid) && !identical(old_eid, new_eid)) {
-      m <- input$prior_mean_selected
-      s <- input$prior_sd_selected
-      if (!is.null(m) && !is.null(s) && length(m) == 1L && length(s) == 1L &&
-            is.finite(m) && is.finite(s)) {
-        st0 <- state()
-        cur <- edge_prior(st0, old_eid)
-        if (!isTRUE(all.equal(cur$mean, as.numeric(m), tolerance = 1e-9)) ||
-              !isTRUE(all.equal(cur$sd, as.numeric(s), tolerance = 1e-9))) {
-          skip_graph_render(TRUE)
-          state(set_edge_prior(st0, old_eid, mean = m, sd = s))
-        }
+      merged <- merge_edge_priors_from_inputs(state(), edge_id = old_eid)
+      if (isTRUE(merged$changed)) {
+        skip_graph_render(TRUE)
+        state(merged$state)
       }
     }
     last_prior_edge_id(new_eid)
     if (is.null(new_eid)) {
-      skip_prior_writes_left(2L)
-      shiny::updateNumericInput(session, "prior_mean_selected", value = 0)
-      shiny::updateNumericInput(session, "prior_sd_selected", value = 1)
+      sync_prior_inputs(list(
+        mean = 0, sd = 1, mean2 = 0, sd2 = 1, mean3 = 0, sd3 = 1
+      ))
       return()
     }
-    pr <- edge_prior(state(), new_eid)
-    skip_prior_writes_left(2L)
-    shiny::updateNumericInput(session, "prior_mean_selected", value = pr$mean)
-    shiny::updateNumericInput(session, "prior_sd_selected", value = pr$sd)
+    sync_prior_inputs(edge_prior(state(), new_eid))
   }, ignoreNULL = FALSE)
 
-  shiny::observeEvent(input$prior_mean_selected, {
+  flush_prior_input_write <- function() {
     left <- shiny::isolate(skip_prior_writes_left())
     if (left > 0L) {
       skip_prior_writes_left(left - 1L)
-      return()
+      return(invisible(NULL))
     }
-    if (!inspector_writes_allowed()) return()
+    if (!inspector_writes_allowed()) return(invisible(NULL))
     eid <- selected_structural_edge_id()
-    if (is.null(eid)) return()
+    if (is.null(eid)) return(invisible(NULL))
     merged <- merge_edge_priors_from_inputs(state(), edge_id = eid)
-    if (!isTRUE(merged$changed)) return()
+    if (!isTRUE(merged$changed)) return(invisible(NULL))
     skip_graph_render(TRUE)
     state(merged$state)
+    invisible(NULL)
+  }
+
+  shiny::observeEvent(input$prior_mean_selected, {
+    flush_prior_input_write()
   }, ignoreInit = TRUE, ignoreNULL = TRUE)
 
   shiny::observeEvent(input$prior_sd_selected, {
-    left <- shiny::isolate(skip_prior_writes_left())
-    if (left > 0L) {
-      skip_prior_writes_left(left - 1L)
-      return()
-    }
-    if (!inspector_writes_allowed()) return()
-    eid <- selected_structural_edge_id()
-    if (is.null(eid)) return()
-    merged <- merge_edge_priors_from_inputs(state(), edge_id = eid)
-    if (!isTRUE(merged$changed)) return()
-    skip_graph_render(TRUE)
-    state(merged$state)
+    flush_prior_input_write()
+  }, ignoreInit = TRUE, ignoreNULL = TRUE)
+
+  shiny::observeEvent(input$prior_mean2_selected, {
+    flush_prior_input_write()
+  }, ignoreInit = TRUE, ignoreNULL = TRUE)
+
+  shiny::observeEvent(input$prior_sd2_selected, {
+    flush_prior_input_write()
+  }, ignoreInit = TRUE, ignoreNULL = TRUE)
+
+  shiny::observeEvent(input$prior_mean3_selected, {
+    flush_prior_input_write()
+  }, ignoreInit = TRUE, ignoreNULL = TRUE)
+
+  shiny::observeEvent(input$prior_sd3_selected, {
+    flush_prior_input_write()
   }, ignoreInit = TRUE, ignoreNULL = TRUE)
 
   shiny::observeEvent(input$smt_node_moved, {
@@ -1741,12 +1905,17 @@ smt_server <- function(input, output, session) {
       c(from_id, to_id)
     }
     has_result <- !is.null(shiny::isolate(last_result()))
+    prefer_sim <- isTRUE(shiny::isolate(results_are_simulated())) ||
+      (!is.null(sim_dat) && is.null(analysis_dat))
     picked <- pick_plot_data_for_nodes(
-      st, analysis_dat, sim_dat, need_ids, has_result = has_result
+      st, analysis_dat, sim_dat, need_ids,
+      has_result = has_result,
+      prefer_simulated = prefer_sim
     )
     if (is.null(picked$data)) {
       smt_debug(
         "R edge_plot -> no data/sim | has_result=", has_result,
+        " prefer_sim=", prefer_sim,
         " | ", picked$reason %||% ""
       )
       return(edge_plot_message(
@@ -1771,13 +1940,23 @@ smt_server <- function(input, output, session) {
     pr <- edge_prior(st, eid)
     prior_mean <- pr$mean
     prior_sd <- pr$sd
+    prior_mean2 <- pr$mean2
+    prior_mean3 <- pr$mean3
     pm_in <- input$prior_mean_selected
     ps_in <- input$prior_sd_selected
+    pm2_in <- input$prior_mean2_selected
+    pm3_in <- input$prior_mean3_selected
     if (!is.null(pm_in) && length(pm_in) == 1L && is.finite(pm_in)) {
       prior_mean <- as.numeric(pm_in)
     }
     if (!is.null(ps_in) && length(ps_in) == 1L && is.finite(ps_in) && ps_in > 0) {
       prior_sd <- as.numeric(ps_in)
+    }
+    if (!is.null(pm2_in) && length(pm2_in) == 1L && is.finite(pm2_in)) {
+      prior_mean2 <- as.numeric(pm2_in)
+    }
+    if (!is.null(pm3_in) && length(pm3_in) == 1L && is.finite(pm3_in)) {
+      prior_mean3 <- as.numeric(pm3_in)
     }
     points_mode <- normalize_edge_plot_points(input$edge_plot_points)
     res0 <- shiny::isolate(last_result())
@@ -1794,6 +1973,7 @@ smt_server <- function(input, output, session) {
       " rk=", rk, " show_fit=", show_fit,
       " simulated=", simulated,
       " prior_mean=", prior_mean, " prior_sd=", prior_sd,
+      " prior_mean2=", prior_mean2, " prior_mean3=", prior_mean3,
       " nrow_data=", nrow(dat),
       " points=", points_mode,
       " has_fit=", !is.null(edge_fit)
@@ -1811,6 +1991,8 @@ smt_server <- function(input, output, session) {
         rel_kind = rk,
         prior_mean = prior_mean,
         prior_sd = prior_sd,
+        prior_mean2 = prior_mean2,
+        prior_mean3 = prior_mean3,
         simulated = simulated,
         latent_score_method = score_meth,
         fit = edge_fit,
@@ -1824,6 +2006,30 @@ smt_server <- function(input, output, session) {
     if (is.null(p)) {
       smt_debug("R edge_plot -> placeholder (plot fn returned NULL)")
       return(edge_plot_placeholder())
+    }
+    if (identical(res0$sampler, "brms")) {
+      info <- tryCatch(
+        edge_bayes_param_info(res0, st, eid, degree = 1L),
+        error = function(e) {
+          smt_debug("R edge_plot bayes info ERROR: ", e$message)
+          NULL
+        }
+      )
+      if (!is.null(info)) {
+        p2 <- tryCatch(
+          compose_edge_bayes_plot(p, info),
+          error = function(e) {
+            smt_debug("R edge_plot bayes compose ERROR: ", e$message)
+            p
+          }
+        )
+        if (!is.null(p2)) p <- p2
+        smt_debug(
+          "R edge_plot bayes strip | term=", info$term,
+          " pd=", info$summary$pd %||% NA,
+          " rope_decision=", info$summary$rope_decision %||% NA
+        )
+      }
     }
     smt_debug("R edge_plot -> ggplot OK | class=", paste(class(p), collapse = ","))
     p
@@ -1844,6 +2050,7 @@ smt_server <- function(input, output, session) {
     }
     unc <- input$uncertainty_method %||% "none"
     if (!unc %in% c("none", "bootstrap", "plausible")) unc <- "none"
+    if (identical(input$inference_mode, "bayes")) unc <- "none"
     draws <- input$uncertainty_draws
     if (identical(unc, "plausible") && (is.null(draws) || !is.finite(draws))) draws <- 20
     if (identical(unc, "bootstrap") && (is.null(draws) || !is.finite(draws))) draws <- 199
@@ -1873,6 +2080,22 @@ smt_server <- function(input, output, session) {
           uncertainty = unc,
           uncertainty_draws = draws,
           uncertainty_progress = progress_cb,
+          latent_score_method = score_meth
+        )
+      } else if (identical(input$inference_mode, "bayes")) {
+        shiny::setProgress(
+          value = 0.25,
+          detail = "Sampling with brms (one Stan model per equation)"
+        )
+        fit_bayes_model(
+          fit_st, dat,
+          ci = input$bayes_ci,
+          rope_k = input$bayes_rope_k,
+          mark_nonsig = isTRUE(input$mark_nonsig),
+          chains = input$bayes_chains,
+          iter = input$bayes_iter,
+          warmup = input$bayes_warmup,
+          seed = input$bayes_seed,
           latent_score_method = score_meth
         )
       } else {
@@ -1930,6 +2153,11 @@ smt_server <- function(input, output, session) {
       } else {
         ""
       }
+      bayes_txt <- if (identical(res$sampler, "brms")) {
+        " Posterior means, HDI, pd, and ROPE are on the canvas and link plot."
+      } else {
+        ""
+      }
       if (isTRUE(simulated)) {
         seed_txt <- if (!is.null(sim_seed_used) && is.finite(sim_seed_used)) {
           sprintf(" · seed %d", as.integer(sim_seed_used))
@@ -1940,12 +2168,13 @@ smt_server <- function(input, output, session) {
           "Simulated analysis complete (",
           nrow(dat), " rows). Results are from simulated data.",
           seed_txt,
-          unc_txt
+          unc_txt,
+          bayes_txt
         ))
       } else if (isTRUE(res$model_averaged)) {
-        status(paste0("Analysis complete (full model averaging on canvas).", unc_txt))
+        status(paste0("Analysis complete (full model averaging on canvas).", unc_txt, bayes_txt))
       } else {
-        status(paste0("Analysis complete.", unc_txt))
+        status(paste0("Analysis complete.", unc_txt, bayes_txt))
       }
     })
     shiny::updateRadioButtons(session, "center_view", selected = "model")
@@ -2076,6 +2305,15 @@ smt_server <- function(input, output, session) {
         " currently at 0: ",
         paste(labs, collapse = "; "),
         ". Auto-added interaction mains default to 0 until you set them."
+      )
+      status(msg)
+      power_modal_status_rv(msg)
+      return()
+    }
+    if (identical(input$inference_mode, "bayes")) {
+      msg <- paste(
+        "Power analysis stays on the frequentist engines.",
+        "Switch Framework to p-values or AIC/BIC, then run power."
       )
       status(msg)
       power_modal_status_rv(msg)
@@ -2471,17 +2709,33 @@ smt_server <- function(input, output, session) {
       mean <- as.numeric(smt_cmd_arg(args, "mean", 0)[[1]])
       sd <- as.numeric(smt_cmd_arg(args, "sd", 1)[[1]])
       family <- as.character(smt_cmd_arg(args, "family", "normal")[[1]])
-      st <- set_edge_prior(st, eid, mean = mean, sd = sd, family = family)
+      mean2 <- smt_cmd_arg(args, "mean2", NULL)
+      sd2 <- smt_cmd_arg(args, "sd2", NULL)
+      mean3 <- smt_cmd_arg(args, "mean3", NULL)
+      sd3 <- smt_cmd_arg(args, "sd3", NULL)
+      if (!is.null(mean2)) mean2 <- as.numeric(mean2[[1]])
+      if (!is.null(sd2)) sd2 <- as.numeric(sd2[[1]])
+      if (!is.null(mean3)) mean3 <- as.numeric(mean3[[1]])
+      if (!is.null(sd3)) sd3 <- as.numeric(sd3[[1]])
+      st <- set_edge_prior(
+        st, eid,
+        mean = mean, sd = sd, family = family,
+        mean2 = mean2, sd2 = sd2, mean3 = mean3, sd3 = sd3
+      )
       state(st)
       sel_eid <- shiny::isolate(selected_structural_edge_id())
       if (!is.null(sel_eid) && identical(sel_eid, eid)) {
-        skip_prior_writes_left(2L)
-        shiny::updateNumericInput(session, "prior_mean_selected", value = mean)
-        shiny::updateNumericInput(session, "prior_sd_selected", value = sd)
+        sync_prior_inputs(edge_prior(st, eid))
         edge_plot_tick(shiny::isolate(edge_plot_tick()) + 1L)
       }
       status(sprintf("Updated prior on %s via smt_cmd.", eid))
-      return(list(ok = TRUE, message = "prior set", id = eid, mean = mean, sd = sd))
+      pr <- edge_prior(st, eid)
+      return(list(
+        ok = TRUE, message = "prior set", id = eid,
+        mean = pr$mean, sd = pr$sd,
+        mean2 = pr$mean2, sd2 = pr$sd2,
+        mean3 = pr$mean3, sd3 = pr$sd3
+      ))
     }
     if (identical(action, "set_edge_rel_kind")) {
       st <- state()
@@ -3607,7 +3861,10 @@ smt_server <- function(input, output, session) {
             if (!is.null(factor_nid) && identical(factor_nid, dv)) {
               factor_coding_inspector_ui(st, dat, dv)
             },
-            shiny::h4("Equation"),
+            smt_report_section_head(
+              "Equation",
+              shiny::uiOutput("report_pin_equations", inline = TRUE)
+            ),
             if (!is.null(eq_html)) {
               eq_html
             } else {
@@ -3675,7 +3932,10 @@ smt_server <- function(input, output, session) {
 
     # Default: global model-fit equations (MathJax for LaTeX)
     shiny::withMathJax(shiny::tagList(
-      shiny::h4("Model fit"),
+      smt_report_section_head(
+        "Model fit",
+        shiny::uiOutput("report_pin_equations", inline = TRUE)
+      ),
       if (is.null(res)) {
         shiny::helpText("Run the analysis to see fitted equations.")
       } else if (isTRUE(res$model_averaged)) {
@@ -3711,7 +3971,10 @@ smt_server <- function(input, output, session) {
     fits_dv <- dv_result_fits(res, dv)
     if (!length(fits_dv)) {
       return(shiny::tagList(
-        shiny::h4("Residual diagnostics"),
+        smt_report_section_head(
+          "Residual diagnostics",
+          shiny::uiOutput("report_pin_residual", inline = TRUE)
+        ),
         shiny::helpText("Run the analysis to see residual diagnostics for this DV.")
       ))
     }
@@ -3725,7 +3988,10 @@ smt_server <- function(input, output, session) {
     ))
     if (!has_any) return(NULL)
     shiny::tagList(
-      shiny::h4("Residual diagnostics"),
+      smt_report_section_head(
+        "Residual diagnostics",
+        shiny::uiOutput("report_pin_residual", inline = TRUE)
+      ),
       if (length(keys) > 1L) {
         shiny::selectInput(
           "dv_diag_equation",
@@ -3793,6 +4059,409 @@ smt_server <- function(input, output, session) {
   })
   shiny::outputOptions(output, "dv_resid_plot", suspendWhenHidden = FALSE)
 
+  # ---- Report pin controls + stack ----
+  output$export_report_pdf_btn <- shiny::renderUI({
+    mods <- report_modules()
+    if (!length(mods)) {
+      return(shiny::tags$button(
+        class = "smt-btn smt-btn-ghost smt-report-export smt-report-export-disabled",
+        type = "button",
+        disabled = NA,
+        title = "Pin at least one module to export",
+        "Export PDF"
+      ))
+    }
+    shiny::downloadButton(
+      "export_report_pdf",
+      "Export PDF",
+      class = "smt-btn smt-btn-ghost smt-report-export",
+      title = "Download APA-style PDF of pinned modules (requires LaTeX / tinytex)"
+    )
+  })
+
+  output$export_report_pdf <- shiny::downloadHandler(
+    filename = function() paste0("smt-report-", Sys.Date(), ".pdf"),
+    content = function(file) {
+      mods <- shiny::isolate(report_modules())
+      if (!length(mods)) {
+        shiny::showNotification(
+          "Pin at least one module before exporting.",
+          type = "warning", duration = 6
+        )
+        stop("No report modules pinned.", call. = FALSE)
+      }
+      if (!report_export_available()) {
+        shiny::showNotification(
+          paste(
+            "PDF export needs the tinytex package and a LaTeX engine.",
+            "In R: install.packages(\"tinytex\"); tinytex::install_tinytex()"
+          ),
+          type = "error", duration = 12
+        )
+        stop("LaTeX / tinytex not available.", call. = FALSE)
+      }
+      ok <- tryCatch(
+        {
+          report_build_pdf(
+            modules = mods,
+            state = shiny::isolate(state()),
+            result = shiny::isolate(last_result()),
+            power = shiny::isolate(power_result_rv()),
+            outfile = file,
+            analysis_data = shiny::isolate(analysis_rv()),
+            sim_data = shiny::isolate(sim_data_rv()),
+            results_simulated = isTRUE(shiny::isolate(results_are_simulated()))
+          )
+          TRUE
+        },
+        error = function(e) {
+          shiny::showNotification(
+            paste("PDF export failed:", conditionMessage(e)),
+            type = "error", duration = 12
+          )
+          FALSE
+        }
+      )
+      if (!isTRUE(ok)) {
+        stop("PDF export failed.", call. = FALSE)
+      }
+    }
+  )
+
+  output$report_section_power <- shiny::renderUI({
+    mods <- report_modules()
+    pw <- power_result_rv()
+    pinned <- report_has_module(mods, "power")
+    enabled <- !is.null(pw) && !is.null(pw$power) && nrow(pw$power) > 0
+    smt_report_section_head(
+      "Power analysis",
+      smt_report_pin_button("report_pin_power_btn", pinned = pinned, enabled = enabled)
+    )
+  })
+
+  output$report_section_coef <- shiny::renderUI({
+    mods <- report_modules()
+    res <- last_result()
+    pinned <- report_has_module(mods, "coef_table")
+    enabled <- !is.null(res)
+    smt_report_section_head(
+      "Path coefficients",
+      smt_report_pin_button("report_pin_coef_btn", pinned = pinned, enabled = enabled)
+    )
+  })
+
+  output$report_pin_equations <- shiny::renderUI({
+    mods <- report_modules()
+    res <- last_result()
+    pinned <- report_has_module(mods, "equations")
+    enabled <- !is.null(res)
+    smt_report_pin_button("report_pin_equations_btn", pinned = pinned, enabled = enabled)
+  })
+
+  output$report_pin_residual <- shiny::renderUI({
+    mods <- report_modules()
+    dv <- selected_dv_id()
+    res <- last_result()
+    params <- list(dv_id = dv)
+    pinned <- !is.null(dv) && report_has_module(mods, "residual", params)
+    enabled <- !is.null(dv) && !is.null(res) &&
+      length(dv_result_fits(res, dv)) > 0L
+    smt_report_pin_button(
+      "report_pin_residual_btn",
+      pinned = pinned,
+      enabled = enabled,
+      title_add = "Add residual diagnostics for this DV to Report",
+      title_remove = "Remove this DV residual diagnostics from Report"
+    )
+  })
+
+  output$report_pin_edge_plot <- shiny::renderUI({
+    mods <- report_modules()
+    eid <- selected_edge_id()
+    params <- list(edge_id = eid)
+    pinned <- !is.null(eid) && report_has_module(mods, "edge_plot", params)
+    enabled <- !is.null(eid) && nzchar(eid)
+    smt_report_pin_button(
+      "report_pin_edge_btn",
+      pinned = pinned,
+      enabled = enabled,
+      title_add = "Add this edge plot to Report",
+      title_remove = "Remove this edge plot from Report"
+    )
+  })
+
+  shiny::observeEvent(input$report_pin_power_btn, {
+    report_toggle_module("power")
+  }, ignoreInit = TRUE)
+
+  shiny::observeEvent(input$report_pin_coef_btn, {
+    report_toggle_module("coef_table")
+  }, ignoreInit = TRUE)
+
+  shiny::observeEvent(input$report_pin_equations_btn, {
+    report_toggle_module("equations")
+  }, ignoreInit = TRUE)
+
+  shiny::observeEvent(input$report_pin_residual_btn, {
+    dv <- selected_dv_id()
+    if (is.null(dv)) return()
+    report_toggle_module("residual", list(dv_id = dv))
+  }, ignoreInit = TRUE)
+
+  shiny::observeEvent(input$report_pin_edge_btn, {
+    eid <- selected_edge_id()
+    if (is.null(eid) || !nzchar(eid)) return()
+    report_toggle_module("edge_plot", list(edge_id = eid))
+  }, ignoreInit = TRUE)
+
+  shiny::observeEvent(input$report_remove_module, {
+    uid <- as.character(input$report_remove_module %||% "")
+    if (!nzchar(uid)) return()
+    report_modules(report_remove_module(report_modules(), uid))
+  }, ignoreInit = TRUE)
+
+  # TeX / Word copy is client-side (embedded JSON + user-gesture execCommand).
+  # Server-push clipboard after a Shiny round-trip is blocked by browsers.
+
+  # Register plot/table outputs for report modules (stable ids; avoid remount blanks)
+  shiny::observe({
+    mods <- report_modules()
+    plot_reg <- shiny::isolate(report_plot_registered())
+    tbl_reg <- shiny::isolate(report_table_registered())
+    for (m in mods) {
+      uid <- as.character(m$uid %||% "")
+      typ <- as.character(m$type %||% "")
+      if (!nzchar(uid)) next
+      if (typ %in% c("residual", "edge_plot") && !uid %in% plot_reg) {
+        local({
+          local_uid <- uid
+          out_id <- paste0("report_plot_", local_uid)
+          output[[out_id]] <- shiny::renderPlot({
+            mods_now <- report_modules()
+            hit <- Filter(function(x) identical(x$uid, local_uid), mods_now)
+            if (!length(hit)) {
+              return(ggplot2::ggplot() + ggplot2::theme_void())
+            }
+            mod <- hit[[1]]
+            st <- state()
+            res <- last_result()
+            if (identical(mod$type, "residual")) {
+              dv <- mod$params$dv_id %||% NA_character_
+              fits_dv <- dv_result_fits(res, dv)
+              if (!length(fits_dv)) {
+                return(residual_diagnostics_plot(NULL, title = NULL))
+              }
+              keys <- names(fits_dv)
+              key <- keys[[1]]
+              residual_diagnostics_plot(
+                fits_dv[[key]],
+                title = dv_fit_key_label(st, key)
+              )
+            } else {
+              eid <- mod$params$edge_id %||% NA_character_
+              if (is.na(eid) || !nzchar(eid)) {
+                return(edge_plot_placeholder())
+              }
+              analysis_dat <- analysis_rv()
+              sim_dat <- sim_data_rv()
+              st2 <- ensure_edge_to_port(st)
+              idx <- match(eid, st2$edges$id)
+              if (is.na(idx)) return(edge_plot_placeholder())
+              from_id <- st2$edges$from[idx]
+              to_id <- st2$edges$to[idx]
+              need_ids <- if (is_interaction_node(st2, from_id)) {
+                fac <- interaction_factors(st2, from_id)
+                c(fac$a, fac$b, to_id)
+              } else {
+                c(from_id, to_id)
+              }
+              has_result <- !is.null(res)
+              res_sim <- isTRUE(results_are_simulated())
+              picked <- pick_plot_data_for_nodes(
+                st2, analysis_dat, sim_dat, need_ids,
+                has_result = has_result,
+                prefer_simulated = isTRUE(res_sim) ||
+                  (!is.null(sim_dat) && is.null(analysis_dat))
+              )
+              if (is.null(picked$data)) {
+                return(edge_plot_message(
+                  picked$title %||% "No data",
+                  picked$reason %||% "Load data or run Simulate to plot this link."
+                ))
+              }
+              dat <- picked$data
+              simulated <- isTRUE(picked$simulated)
+              rk <- st2$edges$rel_kind[idx]
+              if (is.na(rk) || !nzchar(rk)) rk <- "linear"
+              show_fit <- !is.null(res) && identical(isTRUE(simulated), res_sim)
+              pr <- edge_prior(st2, eid)
+              to_level <- if ("to_level" %in% names(st2$edges)) {
+                st2$edges$to_level[idx]
+              } else {
+                NA_character_
+              }
+              edge_fit <- if (isTRUE(show_fit)) {
+                edge_fit_for_plot(res, to_id, to_level = to_level)
+              } else {
+                NULL
+              }
+              score_meth <- normalize_latent_score_method(
+                res$latent_score_method %||% "own",
+                st2
+              )
+              tryCatch(
+                edge_relationship_plot(
+                  st2, dat, eid,
+                  show_fit = show_fit,
+                  rel_kind = rk,
+                  prior_mean = pr$mean,
+                  prior_sd = pr$sd,
+                  prior_mean2 = pr$mean2,
+                  prior_mean3 = pr$mean3,
+                  simulated = simulated,
+                  latent_score_method = score_meth,
+                  fit = edge_fit,
+                  points_mode = "observed"
+                ),
+                error = function(e) edge_plot_message("Plot error", e$message)
+              )
+            }
+          })
+          shiny::outputOptions(output, out_id, suspendWhenHidden = FALSE)
+        })
+        plot_reg <- c(plot_reg, uid)
+      }
+      if (identical(typ, "coef_table") && !uid %in% tbl_reg) {
+        local({
+          local_uid <- uid
+          out_id <- paste0("report_tbl_", local_uid)
+          output[[out_id]] <- DT::renderDT({
+            mods_now <- report_modules()
+            hit <- Filter(function(x) identical(x$uid, local_uid), mods_now)
+            if (!length(hit)) {
+              return(smt_apa_datatable(data.frame()))
+            }
+            res <- last_result()
+            est <- if (!is.null(res) && !isTRUE(res$model_averaged)) {
+              res$estimates
+            } else {
+              NULL
+            }
+            tab <- estimates_table(
+              state(),
+              estimates = est,
+              conf_adjust = res$conf_adjust %||% "none"
+            )
+            smt_apa_datatable(tab)
+          })
+          shiny::outputOptions(output, out_id, suspendWhenHidden = FALSE)
+        })
+        tbl_reg <- c(tbl_reg, uid)
+      }
+    }
+    report_plot_registered(unique(plot_reg))
+    report_table_registered(unique(tbl_reg))
+  })
+
+  output$report_stack <- shiny::renderUI({
+    mods <- report_modules()
+    if (!length(mods)) {
+      return(shiny::div(
+        class = "smt-report-empty",
+        "No modules yet. Use the + buttons next to Path coefficients, Model fit, ",
+        "Residual diagnostics, the edge plot, or Power analysis."
+      ))
+    }
+    st <- state()
+    res <- last_result()
+    pw <- power_result_rv()
+    cards <- lapply(mods, function(m) {
+      uid <- m$uid
+      title <- report_module_title(m, st)
+      body <- switch(
+        as.character(m$type),
+        coef_table = {
+          if (is.null(res)) {
+            shiny::helpText("Run the analysis to populate path coefficients.")
+          } else {
+            shiny::tagList(
+              shiny::tags$p(class = "smt-apa-caption", shiny::em("Path coefficients")),
+              DT::DTOutput(paste0("report_tbl_", uid))
+            )
+          }
+        },
+        equations = {
+          if (is.null(res)) {
+            shiny::helpText("Run the analysis to see fitted equations.")
+          } else if (isTRUE(res$model_averaged)) {
+            shiny::withMathJax(format_averaged_equations_html(res, st))
+          } else {
+            shiny::withMathJax(format_best_equations_html(res, st))
+          }
+        },
+        residual = {
+          shiny::plotOutput(paste0("report_plot_", uid), height = "280px")
+        },
+        edge_plot = {
+          shiny::plotOutput(paste0("report_plot_", uid), height = "260px")
+        },
+        power = {
+          if (is.null(pw) || is.null(pw$power) || !nrow(pw$power)) {
+            shiny::helpText("Run power analysis to populate this module.")
+          } else {
+            smt_power_recommend_ui(pw, compact = FALSE)
+          }
+        },
+        shiny::helpText("Unknown module type.")
+      )
+      clip_tex <- tryCatch(
+        report_module_tex_clipboard(
+          m, st, result = res, power = pw,
+          analysis_data = analysis_rv(),
+          sim_data = sim_data_rv(),
+          results_simulated = isTRUE(results_are_simulated())
+        ),
+        error = function(e) {
+          smt_debug("report clip tex fail uid=", uid, " ", e$message)
+          ""
+        }
+      )
+      clip_html <- tryCatch(
+        report_module_html_clipboard(
+          m, st, result = res, power = pw,
+          analysis_data = analysis_rv(),
+          sim_data = sim_data_rv(),
+          results_simulated = isTRUE(results_are_simulated())
+        ),
+        error = function(e) {
+          smt_debug("report clip html fail uid=", uid, " ", e$message)
+          list(html = "", text = "")
+        }
+      )
+      shiny::div(
+        class = "smt-report-module",
+        `data-report-uid` = uid,
+        shiny::div(
+          class = "smt-report-module-head",
+          shiny::tags$h4(class = "smt-report-module-title", title),
+          smt_report_copy_buttons(uid, tex = clip_tex, html_payload = clip_html),
+          shiny::actionButton(
+            paste0("report_rm_", uid),
+            label = shiny::span(class = "smt-report-pin-glyph", "\u2212"),
+            class = "smt-btn smt-btn-ghost smt-report-pin smt-report-pin-on",
+            title = "Remove from Report",
+            onclick = sprintf(
+              "Shiny.setInputValue('report_remove_module', '%s', {priority: 'event'});",
+              uid
+            )
+          )
+        ),
+        shiny::div(class = "smt-report-module-body", body)
+      )
+    })
+    shiny::div(class = "smt-report-stack", cards)
+  })
+
   output$coef_table <- DT::renderDT({
     invisible(results_content_sig())
     res <- last_result()
@@ -3810,15 +4479,11 @@ smt_server <- function(input, output, session) {
       # Match Y, transform log(Y), and split outcomes Y[level]
       is_to <- tab$To %in% c(dv_lab, tr_lab) |
         startsWith(as.character(tab$To), paste0(dv_lab, "["))
-      keep <- is_to | (tab$Type == "indirect" & (tab$From == dv_lab | is_to))
+      is_indirect <- startsWith(as.character(tab$Level %||% ""), "via ")
+      keep <- is_to | (is_indirect & (tab$From == dv_lab | is_to))
       tab <- tab[keep, , drop = FALSE]
     }
-    DT::datatable(
-      tab,
-      rownames = FALSE,
-      options = list(dom = "t", paging = FALSE, scrollX = TRUE),
-      class = "compact"
-    )
+    smt_apa_datatable(tab)
   })
 
   output$best_vs_conf_table <- DT::renderDT({
@@ -3826,22 +4491,15 @@ smt_server <- function(input, output, session) {
     if (is.null(res) || is.null(res$best_vs_confirmatory)) return(NULL)
     tab <- format_best_vs_confirmatory_display(res$best_vs_confirmatory, state())
     if (is.null(tab) || !nrow(tab)) return(NULL)
-    DT::datatable(
-      tab,
-      rownames = FALSE,
-      options = list(dom = "t", paging = FALSE, scrollX = TRUE),
-      class = "compact"
-    )
+    smt_apa_datatable(tab)
   })
 
   output$comparison_table <- DT::renderDT({
     res <- last_result()
     if (is.null(res) || is.null(res$comparison)) return(NULL)
-    DT::datatable(
+    smt_apa_datatable(
       format_comparison_display(res$comparison, state()),
-      rownames = FALSE,
-      options = list(pageLength = 8, scrollX = TRUE, dom = "tip"),
-      class = "compact"
+      page_length = 8L
     )
   })
 

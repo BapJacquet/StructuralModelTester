@@ -472,8 +472,16 @@ simulate_path_data <- function(state, n = 500L, seed = 1L) {
       for (i in seq_len(nrow(inc))) {
         eid <- inc$id[[i]]
         from_id <- inc$from[[i]]
-        beta <- edge_prior(state, eid)$mean
+        pr <- edge_prior(state, eid)
+        beta <- pr$mean
         if (!is.finite(beta)) beta <- 0
+        rk <- if ("rel_kind" %in% names(inc)) {
+          as.character(inc$rel_kind[[i]] %||% "linear")
+        } else {
+          "linear"
+        }
+        if (is.na(rk) || !nzchar(rk)) rk <- "linear"
+        deg <- rel_kind_degree(rk)
 
         if (is_interaction_node(state, from_id)) {
           fac <- interaction_factors(state, from_id)
@@ -503,6 +511,53 @@ simulate_path_data <- function(state, n = 500L, seed = 1L) {
         }
 
         ensure_col(from_id)
+        from_kind <- node_sim_var_kind(state, from_id, data = NULL)
+        meta_ord <- node_factor_coding(state, from_id)
+        use_poly <- deg >= 2L && (
+          identical(from_kind, "continuous") ||
+            (identical(from_kind, "categorical") && isTRUE(meta_ord$ordered))
+        )
+        if (use_poly) {
+          from_nm <- node_sim_column(state, from_id)
+          x_raw <- dat[[from_nm]]
+          if (identical(from_kind, "categorical") && isTRUE(meta_ord$ordered)) {
+            x_num <- ordered_level_scores(
+              x_raw,
+              levels_order = meta_ord$levels,
+              base = meta_ord$base
+            )
+          } else {
+            x_num <- as.numeric(x_raw)
+          }
+          x_num[!is.finite(x_num)] <- NA_real_
+          mx <- mean(x_num, na.rm = TRUE)
+          if (!is.finite(mx)) mx <- 0
+          xc <- x_num - mx
+          # Match expand_continuous_predictor: linear on raw x, powers on centered x
+          contrib <- beta * x_num
+          if (deg >= 2L) {
+            b2 <- pr$mean2
+            if (!is.finite(b2)) b2 <- 0
+            contrib <- contrib + b2 * xc^2
+          }
+          if (deg >= 3L) {
+            b3 <- pr$mean3
+            if (!is.finite(b3)) b3 <- 0
+            contrib <- contrib + b3 * xc^3
+          }
+          contrib[!is.finite(contrib)] <- 0
+          eta <- eta + contrib
+          if (exists("smt_debug", mode = "function")) {
+            smt_debug(
+              "sim apply poly | edge=", eid, " from=", from_id,
+              " deg=", deg, " beta=", beta,
+              " mean2=", pr$mean2, " mean3=", pr$mean3,
+              " mean_contrib=", round(mean(contrib, na.rm = TRUE), 4)
+            )
+          }
+          next
+        }
+
         lv <- if ("level" %in% names(inc)) inc$level[[i]] else NA_character_
         pred <- sim_edge_predictor(state, dat, from_id, level = lv)
         if (is.list(pred)) {
@@ -658,10 +713,13 @@ latent_indicators_available <- function(state, dat, latent_ids) {
 #'
 #' @param node_ids Character vector of endpoint node ids (and interaction factors).
 #' @param has_result TRUE when a fitted result is available (factor scores OK).
+#' @param prefer_simulated When TRUE and sim columns exist, use simulated data
+#'   even if analysis columns are mapped (so prior overlays match Simulate).
 #' @return list(data, simulated) or list(data=NULL, simulated=FALSE, reason=..., title=...)
 #' @keywords internal
 pick_plot_data_for_nodes <- function(state, analysis, sim, node_ids,
-                                     has_result = FALSE) {
+                                     has_result = FALSE,
+                                     prefer_simulated = FALSE) {
   node_ids <- unique(as.character(node_ids))
   node_ids <- node_ids[!is.na(node_ids) & nzchar(node_ids)]
   node_ids <- node_ids[
@@ -739,14 +797,23 @@ pick_plot_data_for_nodes <- function(state, analysis, sim, node_ids,
     ))
   }
 
+  plot_cols <- vapply(node_ids, function(id) node_plot_column(state, id), character(1))
+  sim_ok <- length(plot_cols) > 0L &&
+    all(vapply(plot_cols, function(c) col_ok(sim, c), logical(1)))
+  if (isTRUE(prefer_simulated) && isTRUE(sim_ok)) {
+    if (exists("smt_debug", mode = "function")) {
+      smt_debug("pick_plot_data prefer sim | n=", NROW(sim))
+    }
+    return(list(data = sim, simulated = TRUE))
+  }
+
   mapped <- vapply(node_ids, function(id) node_analysis_column(state, id), character(1))
   all_mapped <- length(mapped) > 0L && all(!is.na(mapped) & nzchar(mapped))
   if (all_mapped && all(vapply(mapped, function(c) col_ok(analysis, c), logical(1)))) {
     return(list(data = analysis, simulated = FALSE))
   }
 
-  plot_cols <- vapply(node_ids, function(id) node_plot_column(state, id), character(1))
-  if (length(plot_cols) && all(vapply(plot_cols, function(c) col_ok(sim, c), logical(1)))) {
+  if (isTRUE(sim_ok)) {
     return(list(data = sim, simulated = TRUE))
   }
 

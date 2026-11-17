@@ -1,3 +1,22 @@
+test_that("negative coefficients join with minus not plus-minus", {
+  expect_equal(
+    StructuralModelTester:::join_eta_tex_parts(c("1.00", "-0.15 \\cdot X")),
+    "1.00 - 0.15 \\cdot X"
+  )
+  expect_equal(
+    StructuralModelTester:::join_eta_tex_parts(c("1.00", "0.20 \\cdot X")),
+    "1.00 + 0.20 \\cdot X"
+  )
+  w <- list(
+    lhs = "Y", wrap_left = "", wrap_right = "", generative = FALSE, sigma = NA_real_
+  )
+  tex <- StructuralModelTester:::smt_eq_outcome_tex(
+    w, c("1.00", "-0.15^{\\pm 0.05} \\cdot X")
+  )
+  expect_match(tex, "&\\\\quad - 0\\.15", perl = TRUE)
+  expect_false(grepl("\\+ -", tex, fixed = TRUE))
+})
+
 test_that("lm equation wrapper is generative with residual SD", {
   dat <- data.frame(Y = c(1, 2, 3, 4, 5, 6), X = c(0, 1, 0, 1, 0, 1))
   fit <- stats::lm(Y ~ X, data = dat)

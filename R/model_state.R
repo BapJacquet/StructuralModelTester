@@ -59,6 +59,10 @@ empty_model_state <- function() {
       prior_family = character(),
       prior_mean = numeric(),
       prior_sd = numeric(),
+      prior_mean2 = numeric(),
+      prior_sd2 = numeric(),
+      prior_mean3 = numeric(),
+      prior_sd3 = numeric(),
       stringsAsFactors = FALSE
     ),
     next_node = 1L,
@@ -189,6 +193,7 @@ ensure_edge_to_port <- function(state) {
 #' Stored as Normal(mean, sd) for simulation / later Bayesian work.
 #' Continuous links use mean-centered X so `mean` is a raw slope; factor links
 #' use treatment contrasts. UI: Expected b + Uncertainty. Defaults 0 / 1.
+#' Polynomial terms use `mean2`/`sd2` (quadratic) and `mean3`/`sd3` (cubic).
 #' @keywords internal
 ensure_edge_priors <- function(state) {
   n <- nrow(state$edges)
@@ -201,6 +206,18 @@ ensure_edge_priors <- function(state) {
   if (!"prior_sd" %in% names(state$edges)) {
     state$edges$prior_sd <- rep(1, n)
   }
+  if (!"prior_mean2" %in% names(state$edges)) {
+    state$edges$prior_mean2 <- rep(0, n)
+  }
+  if (!"prior_sd2" %in% names(state$edges)) {
+    state$edges$prior_sd2 <- rep(1, n)
+  }
+  if (!"prior_mean3" %in% names(state$edges)) {
+    state$edges$prior_mean3 <- rep(0, n)
+  }
+  if (!"prior_sd3" %in% names(state$edges)) {
+    state$edges$prior_sd3 <- rep(1, n)
+  }
   if (!n) return(state)
   miss_f <- is.na(state$edges$prior_family) | !nzchar(as.character(state$edges$prior_family))
   if (any(miss_f)) state$edges$prior_family[miss_f] <- "normal"
@@ -211,27 +228,51 @@ ensure_edge_priors <- function(state) {
   miss_s <- is.na(state$edges$prior_sd) | !is.finite(state$edges$prior_sd) |
     state$edges$prior_sd <= 0
   if (any(miss_s)) state$edges$prior_sd[miss_s] <- 1
+  miss_m2 <- is.na(state$edges$prior_mean2) | !is.finite(state$edges$prior_mean2)
+  if (any(miss_m2)) state$edges$prior_mean2[miss_m2] <- 0
+  miss_s2 <- is.na(state$edges$prior_sd2) | !is.finite(state$edges$prior_sd2) |
+    state$edges$prior_sd2 <= 0
+  if (any(miss_s2)) state$edges$prior_sd2[miss_s2] <- 1
+  miss_m3 <- is.na(state$edges$prior_mean3) | !is.finite(state$edges$prior_mean3)
+  if (any(miss_m3)) state$edges$prior_mean3[miss_m3] <- 0
+  miss_s3 <- is.na(state$edges$prior_sd3) | !is.finite(state$edges$prior_sd3) |
+    state$edges$prior_sd3 <= 0
+  if (any(miss_s3)) state$edges$prior_sd3[miss_s3] <- 1
   state
 }
 
-#' Read prior for one edge
+#' Read prior for one edge (linear + optional poly degrees)
 #' @keywords internal
 edge_prior <- function(state, edge_id) {
   state <- ensure_edge_priors(state)
   idx <- match(edge_id, state$edges$id)
   if (is.na(idx)) {
-    return(list(family = "normal", mean = 0, sd = 1))
+    return(list(
+      family = "normal",
+      mean = 0, sd = 1,
+      mean2 = 0, sd2 = 1,
+      mean3 = 0, sd3 = 1
+    ))
   }
   list(
     family = as.character(state$edges$prior_family[idx]),
     mean = as.numeric(state$edges$prior_mean[idx]),
-    sd = as.numeric(state$edges$prior_sd[idx])
+    sd = as.numeric(state$edges$prior_sd[idx]),
+    mean2 = as.numeric(state$edges$prior_mean2[idx]),
+    sd2 = as.numeric(state$edges$prior_sd2[idx]),
+    mean3 = as.numeric(state$edges$prior_mean3[idx]),
+    sd3 = as.numeric(state$edges$prior_sd3[idx])
   )
 }
 
 #' Set Normal prior parameters on one edge (does not clear fit estimates)
+#'
+#' @param mean,sd Linear (degree-1) expected coefficient and SD.
+#' @param mean2,sd2 Quadratic term prior (used when `rel_kind` is quadratic/cubic).
+#' @param mean3,sd3 Cubic term prior (used when `rel_kind` is cubic).
 #' @keywords internal
-set_edge_prior <- function(state, edge_id, mean = 0, sd = 1, family = "normal") {
+set_edge_prior <- function(state, edge_id, mean = 0, sd = 1, family = "normal",
+                           mean2 = NULL, sd2 = NULL, mean3 = NULL, sd3 = NULL) {
   state <- ensure_edge_priors(state)
   idx <- match(edge_id, state$edges$id)
   if (is.na(idx)) return(state)
@@ -243,6 +284,26 @@ set_edge_prior <- function(state, edge_id, mean = 0, sd = 1, family = "normal") 
   state$edges$prior_family[idx] <- family
   state$edges$prior_mean[idx] <- mean
   state$edges$prior_sd[idx] <- sd
+  if (!is.null(mean2)) {
+    m2 <- as.numeric(mean2)
+    if (!is.finite(m2)) m2 <- 0
+    state$edges$prior_mean2[idx] <- m2
+  }
+  if (!is.null(sd2)) {
+    s2 <- as.numeric(sd2)
+    if (!is.finite(s2) || s2 <= 0) s2 <- 1
+    state$edges$prior_sd2[idx] <- s2
+  }
+  if (!is.null(mean3)) {
+    m3 <- as.numeric(mean3)
+    if (!is.finite(m3)) m3 <- 0
+    state$edges$prior_mean3[idx] <- m3
+  }
+  if (!is.null(sd3)) {
+    s3 <- as.numeric(sd3)
+    if (!is.finite(s3) || s3 <= 0) s3 <- 1
+    state$edges$prior_sd3[idx] <- s3
+  }
   state
 }
 
@@ -781,6 +842,10 @@ add_edge <- function(state, from, to,
       prior_family = "normal",
       prior_mean = 0,
       prior_sd = 1,
+      prior_mean2 = 0,
+      prior_sd2 = 1,
+      prior_mean3 = 0,
+      prior_sd3 = 1,
       stringsAsFactors = FALSE
     )
     state$edges <- rbind(state$edges, new_row)
@@ -841,6 +906,10 @@ add_edge <- function(state, from, to,
     prior_family = "normal",
     prior_mean = prior_mean0,
     prior_sd = 1,
+    prior_mean2 = 0,
+    prior_sd2 = 1,
+    prior_mean3 = 0,
+    prior_sd3 = 1,
     stringsAsFactors = FALSE
   )
   state$edges <- rbind(state$edges, new_row)
@@ -1192,9 +1261,17 @@ sync_sim_kinds_from_data <- function(state, data) {
     if (!kind %in% c("continuous", "categorical", "binary")) next
     state$nodes$sim_var_kind[[i]] <- kind
     if (kind %in% c("binary", "categorical")) {
-      levs <- data_levels_chr(data[[col]])
-      if (length(levs)) {
+      levs_data <- data_levels_chr(data[[col]])
+      if (length(levs_data)) {
         meta <- node_factor_coding(state, id)
+        # Keep declared factor_levels order when present (ordered ordinals,
+        # custom sequences). data_levels_chr() sorts characters alphabetically
+        # and must not wipe e.g. None < Low < Moderate < High.
+        levs <- if (length(meta$levels)) {
+          merge_level_order(meta$levels, levs_data)
+        } else {
+          levs_data
+        }
         base <- if (!is.na(meta$base) && nzchar(meta$base) && meta$base %in% levs) {
           meta$base
         } else {
@@ -1282,6 +1359,11 @@ node_sim_factor_levels <- function(state, node_id, data = NULL) {
   if (!length(levs) && length(data_levs)) levs <- data_levs
   if (!length(levs) && identical(kind, "binary")) levs <- c("0", "1")
   if (!length(levs) && identical(kind, "categorical")) levs <- c("A", "B", "C")
+  # Ordered factors: keep declared ordinal sequence (do not move base first)
+  if (isTRUE(meta$ordered) && length(meta$levels)) {
+    levs <- merge_level_order(meta$levels, c(levs, data_levs))
+    return(levs[!is.na(levs) & nzchar(levs)])
+  }
   base <- meta$base
   if (is.na(base) || !nzchar(base)) {
     base <- if (length(data_levs)) data_levs[[1]] else if (length(levs)) levs[[1]] else NA_character_
@@ -1836,6 +1918,14 @@ clear_fit_results <- function(state) {
   state$edges$pvalue <- NA_real_
   if (!"estimate_std" %in% names(state$edges)) state$edges$estimate_std <- NA_real_
   state$edges$estimate_std <- NA_real_
+  if ("ci_low" %in% names(state$edges)) state$edges$ci_low <- NA_real_
+  if ("ci_high" %in% names(state$edges)) state$edges$ci_high <- NA_real_
+  if ("includes_zero" %in% names(state$edges)) state$edges$includes_zero <- NA
+  if ("pd" %in% names(state$edges)) state$edges$pd <- NA_real_
+  if ("rope_low" %in% names(state$edges)) state$edges$rope_low <- NA_real_
+  if ("rope_high" %in% names(state$edges)) state$edges$rope_high <- NA_real_
+  if ("rope_pct" %in% names(state$edges)) state$edges$rope_pct <- NA_real_
+  if ("rope_decision" %in% names(state$edges)) state$edges$rope_decision <- NA_character_
   state$edges$label <- vapply(seq_len(nrow(state$edges)), function(i) {
     if (is_interaction_node(state, state$edges$to[i])) {
       tp <- state$edges$to_port[i]
@@ -1867,6 +1957,22 @@ apply_estimates_to_edges <- function(state, estimates, included_edge_ids = NULL)
 
   if (is.null(included_edge_ids)) {
     included_edge_ids <- state$edges$id
+  }
+  if (!is.null(estimates) && nrow(estimates) && "ci_low" %in% names(estimates)) {
+    if (!"ci_low" %in% names(state$edges)) state$edges$ci_low <- NA_real_
+    if (!"ci_high" %in% names(state$edges)) state$edges$ci_high <- NA_real_
+    if (!"includes_zero" %in% names(state$edges)) state$edges$includes_zero <- NA
+    if ("pd" %in% names(estimates) && !"pd" %in% names(state$edges)) {
+      state$edges$pd <- NA_real_
+    }
+    if ("rope_low" %in% names(estimates)) {
+      if (!"rope_low" %in% names(state$edges)) state$edges$rope_low <- NA_real_
+      if (!"rope_high" %in% names(state$edges)) state$edges$rope_high <- NA_real_
+      if (!"rope_pct" %in% names(state$edges)) state$edges$rope_pct <- NA_real_
+      if (!"rope_decision" %in% names(state$edges)) {
+        state$edges$rope_decision <- NA_character_
+      }
+    }
   }
 
   for (i in seq_len(nrow(state$edges))) {
@@ -1976,10 +2082,35 @@ apply_estimates_to_edges <- function(state, estimates, included_edge_ids = NULL)
       pv <- as.numeric(row$pvalue)
       est_std <- if ("est_std" %in% names(row)) as.numeric(row$est_std) else NA_real_
       df_om <- if ("df" %in% names(row)) as.numeric(row$df) else NA_real_
+      ci_lo <- if ("ci_low" %in% names(row)) as.numeric(row$ci_low) else NA_real_
+      ci_hi <- if ("ci_high" %in% names(row)) as.numeric(row$ci_high) else NA_real_
+      ci_lvl <- if ("ci_level" %in% names(row)) as.numeric(row$ci_level) else NA_real_
+      inc0 <- if ("includes_zero" %in% names(row)) as.logical(row$includes_zero) else NA
+      pd <- if ("pd" %in% names(row)) as.numeric(row$pd) else NA_real_
+      rope_lo <- if ("rope_low" %in% names(row)) as.numeric(row$rope_low) else NA_real_
+      rope_hi <- if ("rope_high" %in% names(row)) as.numeric(row$rope_high) else NA_real_
+      rope_pct <- if ("rope_pct" %in% names(row)) as.numeric(row$rope_pct) else NA_real_
+      rope_dec <- if ("rope_decision" %in% names(row)) {
+        as.character(row$rope_decision)
+      } else {
+        NA_character_
+      }
       state$edges$estimate[i] <- est
       state$edges$se[i] <- se
       state$edges$pvalue[i] <- pv
       state$edges$estimate_std[i] <- est_std
+      if ("ci_low" %in% names(state$edges)) {
+        state$edges$ci_low[i] <- ci_lo
+        state$edges$ci_high[i] <- ci_hi
+        state$edges$includes_zero[i] <- inc0
+      }
+      if ("pd" %in% names(state$edges)) state$edges$pd[i] <- pd
+      if ("rope_low" %in% names(state$edges)) {
+        state$edges$rope_low[i] <- rope_lo
+        state$edges$rope_high[i] <- rope_hi
+        state$edges$rope_pct[i] <- rope_pct
+        state$edges$rope_decision[i] <- rope_dec
+      }
       prefix <- type_short_label(etype)
       if (is_omni_edge) {
         prefix <- paste0(prefix, "·omnibus")
@@ -2019,7 +2150,24 @@ apply_estimates_to_edges <- function(state, estimates, included_edge_ids = NULL)
         }
       }
       poly_txt <- if (length(poly_bits)) paste0(" ", paste(poly_bits, collapse = " ")) else ""
-      if (is_omni_edge && is.finite(pv)) {
+      cri_txt <- if (is.finite(ci_lo) && is.finite(ci_hi)) {
+        sprintf("[%.2f, %.2f]", ci_lo, ci_hi)
+      } else {
+        ""
+      }
+      pd_txt <- if (is.finite(pd)) sprintf(" pd=%.0f%%", 100 * pd) else ""
+      if (is_omni_edge && !is.na(rope_dec) && nzchar(rope_dec)) {
+        pct <- if (is.finite(ci_lvl)) sprintf("%d%% ", round(100 * ci_lvl)) else ""
+        state$edges$label[i] <- sprintf("%s (%sHDI %s)%s", prefix, pct, rope_dec, pd_txt)
+      } else if (is_omni_edge && !is.na(inc0)) {
+        pct <- if (is.finite(ci_lvl)) sprintf("%d%% ", round(100 * ci_lvl)) else ""
+        verb <- if (isTRUE(inc0)) "overlaps ROPE" else "outside ROPE"
+        state$edges$label[i] <- sprintf("%s (%s%s)%s", prefix, pct, verb, pd_txt)
+      } else if (!is.na(est) && nzchar(cri_txt)) {
+        state$edges$label[i] <- sprintf(
+          "%s %.2f%s %s%s", prefix, est, poly_txt, cri_txt, pd_txt
+        )
+      } else if (is_omni_edge && is.finite(pv)) {
         df_txt <- if (is.finite(df_om)) sprintf("df=%s, ", formatC(df_om, digits = 0, format = "f")) else ""
         state$edges$label[i] <- sprintf("%s (%sp=%s)", prefix, df_txt, format_pvalue(pv))
       } else if (!is.na(est) && !is.na(se) && !is.na(pv)) {

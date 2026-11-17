@@ -69,6 +69,14 @@ smt_examples_catalog <- function() {
       tags = c("CFA", "factor scores", "unidimensionality"),
       data = "measurement_demo.csv",
       model = "measurement_demo_model.json"
+    ),
+    list(
+      id = "ordered_quad",
+      title = "Ordered quadratic",
+      blurb = "Stage with four ordered levels (None → High) and a quadratic Stage → Y link (scores 1–4 → linear + Stage²).",
+      tags = c("ordered", "quadratic", "polynomial"),
+      data = "ordered_quad_demo.csv",
+      model = "ordered_quad_demo_model.json"
     )
   )
 }

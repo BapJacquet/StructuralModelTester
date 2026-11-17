@@ -60,6 +60,7 @@ smt_cmd("add_edge", from = "X", to = "Y", type = "confirmatory")
 
 # Expected unstandardized b (used by Simulate / Power)
 smt_cmd("set_edge_prior", from = "X", to = "Y", mean = 0.5, sd = 0.2)
+smt_cmd("set_edge_prior", from = "X", to = "Y", mean = 0.2, mean2 = -0.1, sd2 = 0.3)
 
 # Exogenous X ~ N(mean, sd); DV residual / intercept on outcome scale
 smt_cmd("set_node_sim", node = "X", mean = 0, sd = 1)
@@ -104,7 +105,7 @@ All actions return a list with at least `id`, `ok`, `action`, and usually `messa
 | `map_column` | `id`/`node`, `column` | Map data column onto node |
 | `set_sim_var_kind` | `id`/`node`, `kind`, optional `levels` | `continuous` / `binary` / categorical kinds; `levels` sets coding |
 | `set_node_sim` | `id`/`node`, optional `mean`, `sd`, `intercept`, `resid_sd`, `min`, `max` | Only provided fields change |
-| `set_edge_prior` | `id` **or** `from`+`to`, `mean`, `sd`, optional `family` | Expected effect; default family `normal` |
+| `set_edge_prior` | `id` **or** `from`+`to`, `mean`, `sd`, optional `family`, optional `mean2`/`sd2`/`mean3`/`sd3` | Expected effect (linear + poly terms); default family `normal` |
 | `set_edge_rel_kind` | `id` **or** `from`+`to`, `rel_kind` | e.g. `linear` |
 | `clear_fit` | — | Drop fit / power results |
 | `simulate` | optional `n`, `seed` | Simulate from priors + fit |

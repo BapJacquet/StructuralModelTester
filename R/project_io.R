@@ -151,19 +151,23 @@ model_from_json <- function(json) {
 
   need_e <- c(
     "id", "from", "to", "type", "level", "to_port", "to_level", "rel_kind", "status",
-    "estimate", "se", "pvalue", "estimate_std", "label",
-    "prior_family", "prior_mean", "prior_sd"
+    "estimate", "se", "pvalue", "estimate_std", "ci_low", "ci_high",
+    "includes_zero", "label",
+    "prior_family", "prior_mean", "prior_sd",
+    "prior_mean2", "prior_sd2", "prior_mean3", "prior_sd3"
   )
   if (!nrow(edges) || is.null(payload$edges)) {
     edges <- state$edges
   } else {
     for (nm in need_e) {
       if (!nm %in% names(edges)) {
-        edges[[nm]] <- if (nm %in% c("estimate", "se", "pvalue", "estimate_std")) {
+        edges[[nm]] <- if (nm %in% c("estimate", "se", "pvalue", "estimate_std", "ci_low", "ci_high")) {
           NA_real_
-        } else if (nm == "prior_mean") {
+        } else if (nm == "includes_zero") {
+          NA
+        } else if (nm %in% c("prior_mean", "prior_mean2", "prior_mean3")) {
           0
-        } else if (nm == "prior_sd") {
+        } else if (nm %in% c("prior_sd", "prior_sd2", "prior_sd3")) {
           1
         } else if (nm == "prior_family") {
           "normal"
@@ -181,8 +185,15 @@ model_from_json <- function(json) {
     edges$se <- as.numeric(edges$se)
     edges$pvalue <- as.numeric(edges$pvalue)
     edges$estimate_std <- as.numeric(edges$estimate_std)
+    edges$ci_low <- as.numeric(edges$ci_low)
+    edges$ci_high <- as.numeric(edges$ci_high)
+    edges$includes_zero <- as.logical(edges$includes_zero)
     edges$prior_mean <- as.numeric(edges$prior_mean)
     edges$prior_sd <- as.numeric(edges$prior_sd)
+    edges$prior_mean2 <- as.numeric(edges$prior_mean2)
+    edges$prior_sd2 <- as.numeric(edges$prior_sd2)
+    edges$prior_mean3 <- as.numeric(edges$prior_mean3)
+    edges$prior_sd3 <- as.numeric(edges$prior_sd3)
     edges$prior_family <- as.character(edges$prior_family)
     edges$level <- as.character(edges$level)
     edges$to_port <- as.character(edges$to_port)

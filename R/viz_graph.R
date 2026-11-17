@@ -255,10 +255,24 @@ results_ui_signature <- function(state) {
 
 edge_color <- function(edge, alpha = NULL) {
   if (!is.null(edge$status) && identical(edge$status, "excluded")) return("#B0B0B0")
-  # P-value analysis: keep confirmatory links in the model, but mute color when p > α
-  if (!is.null(alpha) && is.finite(alpha) && identical(as.character(edge$type), "confirmatory")) {
-    pv <- suppressWarnings(as.numeric(edge$pvalue))
-    if (length(pv) && is.finite(pv[[1]]) && pv[[1]] > alpha) return("#B0B0B0")
+  if (identical(as.character(edge$type), "confirmatory")) {
+    # Bayesian HDI+ROPE: mute when the null is not rejected. Link stays in the model.
+    if (!is.null(edge$rope_decision) && length(edge$rope_decision)) {
+      dec <- as.character(edge$rope_decision[[1]])
+      if (!is.na(dec) && nzchar(dec) && !identical(dec, "reject")) {
+        return("#B0B0B0")
+      }
+    } else {
+      inc <- if (!is.null(edge$includes_zero)) edge$includes_zero else NULL
+      if (!is.null(inc) && length(inc) && !is.na(inc[[1]]) && isTRUE(as.logical(inc[[1]]))) {
+        return("#B0B0B0")
+      }
+    }
+    # P-value analysis: mute when p > α
+    if (!is.null(alpha) && is.finite(alpha)) {
+      pv <- suppressWarnings(as.numeric(edge$pvalue))
+      if (length(pv) && is.finite(pv[[1]]) && pv[[1]] > alpha) return("#B0B0B0")
+    }
   }
   if (identical(edge$type, "definitional")) return("#9B8FD4")
   est <- suppressWarnings(as.numeric(edge$estimate))

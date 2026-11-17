@@ -974,6 +974,66 @@ body.smt-resizing * {
   border-top: 1px solid #ececee !important;
 }
 
+/* APA 7 booktabs analysis tables (results + report) */
+.smt-apa-caption {
+  font-style: italic;
+  font-size: 12px;
+  margin: 0 0 6px 0;
+  color: var(--smt-text);
+}
+
+table.smt-apa-table,
+.smt-results table.dataTable.smt-apa-table,
+.smt-report-module-body table.smt-apa-table,
+.smt-report-module-body table {
+  border: none !important;
+  border-collapse: collapse !important;
+  border-top: 1.5px solid #222 !important;
+  border-bottom: 1.5px solid #222 !important;
+  width: 100% !important;
+  background: transparent !important;
+}
+
+table.smt-apa-table thead th,
+.smt-results table.dataTable.smt-apa-table thead th,
+.smt-report-module-body table thead th,
+.smt-report-module-body table th {
+  background: transparent !important;
+  border: none !important;
+  border-bottom: 1px solid #222 !important;
+  font-weight: 600 !important;
+  white-space: nowrap;
+  padding: 4px 8px !important;
+  vertical-align: bottom;
+}
+
+table.smt-apa-table tbody td,
+.smt-results table.dataTable.smt-apa-table tbody td,
+.smt-report-module-body table tbody td,
+.smt-report-module-body table td {
+  border: none !important;
+  border-top: none !important;
+  padding: 3px 8px !important;
+  vertical-align: top;
+  background: transparent !important;
+}
+
+/* Kill DT stripe / hover fills on APA tables */
+table.smt-apa-table.stripe tbody tr:nth-child(odd),
+table.smt-apa-table.stripe tbody tr:nth-child(even),
+table.smt-apa-table.hover tbody tr:hover,
+.smt-results table.dataTable.smt-apa-table.stripe tbody tr:nth-child(odd),
+.smt-results table.dataTable.smt-apa-table.stripe tbody tr:nth-child(even),
+.smt-results table.dataTable.smt-apa-table.hover tbody tr:hover {
+  background: transparent !important;
+}
+
+table.smt-apa-table em,
+.smt-report-module-body table em {
+  font-style: italic;
+  font-weight: inherit;
+}
+
 /* Graph host fills leftover space above the plot splitter */
 .smt-graph-host {
   flex: 1 1 0;
@@ -1033,8 +1093,8 @@ body.smt-resizing-v * {
 }
 
 .smt-edge-plot-panel {
-  flex: 0 0 220px;
-  height: 220px;
+  flex: 0 0 300px;
+  height: 300px;
   margin-top: 0;
   padding: 4px 0 0;
   background: transparent;
@@ -1110,27 +1170,73 @@ body.smt-resizing-v * {
 
 .smt-edge-prior-inline {
   display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 8px 12px;
-  margin-left: auto;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 4px;
+  margin-left: 0;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.smt-edge-prior-inline .smt-prior-row-lab {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--smt-muted);
+  margin-right: 2px;
+  white-space: nowrap;
+}
+
+.smt-edge-prior-inline > .smt-prior-term {
+  display: none;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 4px;
+  border: 1px solid var(--smt-border);
+  border-radius: 4px;
+  background: var(--smt-surface);
+  white-space: nowrap;
+}
+
+/* data-rel set by smt-panels.js from edge_rel_kind */
+.smt-edge-prior-inline > .smt-prior-term[data-deg="1"],
+.smt-edge-prior-inline[data-rel="quadratic"] > .smt-prior-term[data-deg="2"],
+.smt-edge-prior-inline[data-rel="cubic"] > .smt-prior-term[data-deg="2"],
+.smt-edge-prior-inline[data-rel="cubic"] > .smt-prior-term[data-deg="3"] {
+  display: inline-flex;
+}
+
+.smt-edge-prior-inline .smt-prior-term-lab {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--smt-text);
+  min-width: 1.1em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.smt-edge-prior-inline .smt-prior-pm {
+  font-size: 11px;
+  color: var(--smt-muted);
+  padding: 0;
 }
 
 .smt-edge-prior-inline .shiny-input-container {
   margin-bottom: 0;
+  width: auto !important;
+  max-width: 54px;
 }
 
 .smt-edge-prior-inline label.control-label {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--smt-muted);
-  margin-bottom: 2px;
+  display: none;
 }
 
 .smt-edge-prior-inline input {
-  height: 28px !important;
-  min-height: 28px !important;
-  font-size: 12px;
+  height: 24px !important;
+  min-height: 24px !important;
+  width: 100% !important;
+  max-width: 54px;
+  font-size: 11px;
+  padding: 1px 3px !important;
 }
 
 .smt-edge-link-controls {
@@ -1938,6 +2044,213 @@ body.smt-resizing-v * {
 .smt-example-card-btn {
   width: 100%;
   justify-content: center;
+}
+
+/* ---- Report tab / pin controls ---- */
+.smt-report-wrap {
+  min-height: 0;
+  overflow: auto;
+}
+
+.smt-report-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.smt-report-header .smt-center-title {
+  flex: 1 1 auto;
+  margin: 0;
+}
+
+.smt-report-export {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.smt-report-export-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.smt-report-section-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 12px 0 6px 0;
+}
+
+.smt-report-section-head h4 {
+  margin: 0;
+  flex: 1 1 auto;
+}
+
+.smt-report-pin {
+  flex: 0 0 auto;
+  width: 28px !important;
+  min-width: 28px !important;
+  height: 28px !important;
+  padding: 0 !important;
+  line-height: 1 !important;
+  border-radius: 6px !important;
+}
+
+.smt-report-pin-glyph {
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.smt-report-pin-on {
+  color: var(--smt-danger) !important;
+  border-color: #e0b4b4 !important;
+  background: #fbf0f0 !important;
+}
+
+.smt-report-pin-disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--smt-border);
+  border-radius: 6px;
+  background: var(--smt-surface);
+  color: var(--smt-muted);
+}
+
+.smt-report-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 10px;
+}
+
+.smt-report-module {
+  border: 1px solid var(--smt-border);
+  border-radius: 8px;
+  background: var(--smt-surface);
+  padding: 10px 12px 12px;
+}
+
+.smt-report-module-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.smt-report-module-title {
+  flex: 1 1 auto;
+  font-weight: 700;
+  font-size: 14px;
+  margin: 0;
+}
+
+.smt-report-tex {
+  flex: 0 0 auto;
+  min-width: 36px !important;
+  height: 28px !important;
+  padding: 0 8px !important;
+  line-height: 1 !important;
+  border-radius: 6px !important;
+  font-size: 11px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.02em;
+}
+
+.smt-report-tex-label {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.smt-copy-fallback {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  background: rgba(20, 24, 32, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.smt-copy-fallback-card {
+  background: var(--smt-surface, #fff);
+  color: var(--smt-text, #222);
+  border: 1px solid var(--smt-border, #ddd);
+  border-radius: 10px;
+  max-width: 640px;
+  width: 100%;
+  padding: 16px 18px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
+}
+
+.smt-copy-fallback-card h4 {
+  margin: 0 0 6px 0;
+}
+
+.smt-copy-fallback-card p {
+  margin: 0 0 10px 0;
+  color: var(--smt-muted, #666);
+  font-size: 13px;
+}
+
+.smt-copy-fallback-ta {
+  width: 100%;
+  min-height: 180px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  box-sizing: border-box;
+  margin-bottom: 10px;
+}
+
+.smt-copy-fallback-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.smt-copy-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%) translateY(12px);
+  z-index: 10001;
+  max-width: min(420px, calc(100vw - 32px));
+  padding: 10px 16px;
+  border-radius: 8px;
+  background: #1f2937;
+  color: #f9fafb;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.smt-copy-toast.is-visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.smt-copy-toast-error {
+  background: #7f1d1d;
+  color: #fff5f5;
+}
+
+.smt-report-empty {
+  color: var(--smt-muted);
+  padding: 24px 8px;
+  text-align: center;
+}
+
+.smt-report-module-body .datatables {
+  max-width: 100%;
+}
+
+.smt-edge-plot-header .smt-report-pin {
+  margin-right: 4px;
 }
 
 /* Default side widths are set in JS; keep a sensible fallback only */

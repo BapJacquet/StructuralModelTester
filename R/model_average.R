@@ -403,6 +403,14 @@ format_averaged_equations_html <- function(result, state) {
   ))
 }
 
+#' LaTeX equations using full model-averaged coefficients
+#' @keywords internal
+format_averaged_equations_latex <- function(result, state) {
+  html <- format_averaged_equations_html(result, state)
+  if (is.null(html)) return(NULL)
+  smt_eq_html_to_latex(html)
+}
+
 #' Average intercepts across candidate models (full: always present)
 #' @keywords internal
 full_average_intercepts <- function(comparison, coef_by_model) {

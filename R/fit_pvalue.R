@@ -94,6 +94,10 @@ fit_pvalue_model <- function(state, data, alpha = 0.05, mark_nonsig = TRUE,
 }
 
 #' Adjust confirmatory edge p-values for multiplicity
+#'
+#' Writes adjusted values into `pvalue` (used by canvas / power) and preserves
+#' the unadjusted values in `pvalue_raw` on confirmatory edges and matching
+#' estimate rows so results tables can show both.
 #' @keywords internal
 apply_confirmatory_p_adjust <- function(state, estimates, method = "none") {
   method <- as.character(method %||% "none")
@@ -110,13 +114,19 @@ apply_confirmatory_p_adjust <- function(state, estimates, method = "none") {
   if (!length(conf_idx)) return(list(state = state, estimates = estimates))
   raw <- as.numeric(state$edges$pvalue[conf_idx])
   adj <- stats::p.adjust(raw, method = method)
+  if (!"pvalue_raw" %in% names(state$edges)) {
+    state$edges$pvalue_raw <- NA_real_
+  }
+  state$edges$pvalue_raw[conf_idx] <- raw
   state$edges$pvalue[conf_idx] <- adj
 
   # Mirror onto estimate rows matched by edge endpoints when possible
   if (!is.null(estimates) && nrow(estimates) && "pvalue" %in% names(estimates)) {
+    if (!"pvalue_raw" %in% names(estimates)) {
+      estimates$pvalue_raw <- NA_real_
+    }
     for (j in seq_along(conf_idx)) {
       i <- conf_idx[[j]]
-      eid <- state$edges$id[[i]]
       from <- state$edges$from[[i]]
       to <- state$edges$to[[i]]
       from_nm <- tryCatch(lavaan_var_name(state, from), error = function(e) NA_character_)
@@ -132,7 +142,10 @@ apply_confirmatory_p_adjust <- function(state, estimates, method = "none") {
         hit2 <- hit[!is.na(estimates$level[hit]) & estimates$level[hit] == lv]
         if (length(hit2)) hit <- hit2
       }
-      if (length(hit)) estimates$pvalue[hit] <- adj[[j]]
+      if (length(hit)) {
+        estimates$pvalue_raw[hit] <- as.numeric(estimates$pvalue[hit])
+        estimates$pvalue[hit] <- adj[[j]]
+      }
     }
   }
   list(state = state, estimates = estimates)
@@ -473,6 +486,44 @@ format_est_se_tex <- function(est, se, digits = 2) {
   )
 }
 
+#' True if a TeX term fragment begins with a unary minus
+#' @keywords internal
+eta_tex_is_negative <- function(term) {
+  grepl("^\\s*-", as.character(term %||% ""))
+}
+
+#' Drop a leading unary minus from a TeX term (for "+ −x" → "− x")
+#' @keywords internal
+eta_tex_strip_leading_minus <- function(term) {
+  sub("^\\s*-\\s*", "", as.character(term %||% ""))
+}
+
+#' Join prefix before a term: `" + "` or `" - "` (never `+ -`)
+#' @keywords internal
+eta_tex_join_op <- function(term) {
+  if (eta_tex_is_negative(term)) " - " else " + "
+}
+
+#' Paste predictor/coefficient fragments with proper ± joining
+#' @keywords internal
+join_eta_tex_parts <- function(parts) {
+  parts <- as.character(parts %||% character())
+  parts <- parts[nzchar(parts)]
+  if (!length(parts)) return("")
+  out <- parts[[1]]
+  if (length(parts) == 1L) return(out)
+  for (i in 2:length(parts)) {
+    op <- eta_tex_join_op(parts[[i]])
+    body <- if (identical(op, " - ")) {
+      eta_tex_strip_leading_minus(parts[[i]])
+    } else {
+      parts[[i]]
+    }
+    out <- paste0(out, op, body)
+  }
+  out
+}
+
 # Back-compat aliases used by older call sites / averaged equations
 #' @keywords internal
 format_est_se_html <- format_est_se_tex
@@ -501,13 +552,9 @@ format_linear_predictor_html <- function(cf, se = NULL, digits = 2,
     piece <- format_est_se_tex(est, se_i, digits = digits)
     term <- pretty_term_tex(nm, abbrev_map = abbrev_map, state = state)
     body <- if (is.null(term)) piece else paste0(piece, " \\cdot ", term)
-    if (i == 1L) {
-      parts <- c(parts, body)
-    } else {
-      parts <- c(parts, paste0(" + ", body))
-    }
+    parts <- c(parts, body)
   }
-  paste(parts, collapse = "")
+  join_eta_tex_parts(parts)
 }
 
 #' Linear predictor LaTeX from estimate rows (includes poly levels)
@@ -530,9 +577,9 @@ format_eta_from_estimates <- function(est_rows, digits = 2, abbrev_map = NULL,
       est_rows$rhs[i], level = lv, abbrev_map = abbrev_map, state = state
     )
     body <- if (is.null(term)) piece else paste0(piece, " \\cdot ", term)
-    parts <- c(parts, if (!length(parts)) body else paste0(" + ", body))
+    parts <- c(parts, body)
   }
-  paste(parts, collapse = "")
+  join_eta_tex_parts(parts)
 }
 
 #' Random-effects formula fragment from a merMod fit (for equation tags)
@@ -850,7 +897,6 @@ smt_eq_outcome_tex <- function(wrap, eta) {
   # Multi-line: one predictor per row; ε on its own final row when generative
   rows <- character()
   for (i in seq_along(eta_lines)) {
-    pref <- if (i == 1L) "" else "+ "
     if (i == 1L) {
       rows <- c(rows, sprintf(
         "%s &= %s%s%s",
@@ -863,8 +909,13 @@ smt_eq_outcome_tex <- function(wrap, eta) {
           ""
         }
       ))
+    } else if (eta_tex_is_negative(eta_lines[[i]])) {
+      rows <- c(rows, sprintf(
+        "&\\quad - %s",
+        eta_tex_strip_leading_minus(eta_lines[[i]])
+      ))
     } else {
-      rows <- c(rows, sprintf("&\\quad %s%s", pref, eta_lines[[i]]))
+      rows <- c(rows, sprintf("&\\quad + %s", eta_lines[[i]]))
     }
   }
   if (nzchar(wrap$wrap_right %||% "") && !nzchar(eps_row)) {
@@ -960,6 +1011,42 @@ equation_link_wrapper <- function(fit, yname) {
       re_dist = NULL
     )
     return(equation_wrapper_add_re(wrap, fit))
+  }
+  if (inherits(fit, "brmsfit")) {
+    fam <- tryCatch(as.character(fit$family$family), error = function(e) "gaussian")
+    link <- tryCatch(as.character(fit$family$link), error = function(e) "identity")
+    sig <- if (fam %in% c("bernoulli", "binomial")) {
+      NA_real_
+    } else {
+      tryCatch({
+        s <- brms::posterior_summary(fit, variable = "sigma")
+        as.numeric(s[, "Estimate"])
+      }, error = function(e) NA_real_)
+    }
+    if (fam %in% c("bernoulli", "binomial") && identical(link, "logit")) {
+      return(list(
+        tag = "brms · bernoulli · logit",
+        lhs = sprintf("\\mathrm{P}(%s = 1)", y_tex),
+        wrap_left = "\\mathrm{logit}^{-1}(",
+        wrap_right = ")",
+        note = "Posterior mean \\(\\pm\\) posterior SD. Slope priors are the Expected coefficients.",
+        generative = FALSE,
+        sigma = NA_real_
+      ))
+    }
+    return(list(
+      tag = if (fam %in% c("bernoulli", "binomial")) {
+        sprintf("brms · %s · %s", fam, link)
+      } else {
+        "brms · gaussian"
+      },
+      lhs = y_tex,
+      wrap_left = "",
+      wrap_right = "",
+      note = "Posterior mean \\(\\pm\\) posterior SD. Slope priors are the Expected coefficients.",
+      generative = identical(link, "identity"),
+      sigma = sig
+    ))
   }
   if (inherits(fit, "glm")) {
     fam <- tryCatch(stats::family(fit), error = function(e) NULL)
@@ -1105,8 +1192,9 @@ format_measurement_equations_html <- function(result, state = NULL,
         )
         piece <- formatC(unname(ww[[j]]), digits = 2, format = "f")
         body <- paste0(piece, " \\cdot ", ind_tex)
-        parts <- c(parts, if (!length(parts)) body else paste0(" + ", body))
+        parts <- c(parts, body)
       }
+      weight_tex <- join_eta_tex_parts(parts)
       a_val <- if (!is.null(cronbach) && lat %in% names(cronbach)) {
         as.numeric(cronbach[[lat]])
       } else {
@@ -1169,7 +1257,7 @@ format_measurement_equations_html <- function(result, state = NULL,
         smt_eq_math_line(sprintf(
           "\\widehat{%s} = %s",
           lat_tex,
-          paste(parts, collapse = "")
+          weight_tex
         ))
       )
     }, character(1))
@@ -1215,10 +1303,20 @@ format_best_equations_html <- function(result, state = NULL) {
   if (is.null(result)) return(NULL)
   abbrev_map <- equation_abbrev_map(result, state)
   meas_html <- format_measurement_equations_html(result, state, abbrev_map)
-  caption <- paste0(
-    "<div class=\"smt-eq-caption\">Best model ",
-    "(estimate\\(^{\\pm\\mathrm{SE}}\\))</div>"
-  )
+  caption <- if (identical(result$sampler, "brms") ||
+                   identical(result$pvalue_kind, "hdi_rope") ||
+                   identical(result$pvalue_kind, "credible_interval") ||
+                   identical(result$pvalue_kind, "posterior_tail")) {
+    paste0(
+      "<div class=\"smt-eq-caption\">Bayesian model ",
+      "(posterior mean\\(^{\\pm\\mathrm{SD}}\\); HDI + ROPE)</div>"
+    )
+  } else {
+    paste0(
+      "<div class=\"smt-eq-caption\">Best model ",
+      "(estimate\\(^{\\pm\\mathrm{SE}}\\))</div>"
+    )
+  }
 
   # Path lm/glm: one fit object per DV
   if (identical(result$engine, "path") && is.list(result$fit) &&
@@ -1260,7 +1358,7 @@ format_best_equations_html <- function(result, state = NULL) {
           intercept_tex <- NULL
           if ("(Intercept)" %in% names(cf)) {
             se0 <- tryCatch({
-              V <- as.matrix(stats::vcov(fit))
+              V <- path_vcov(fit)
               sqrt(diag(V))[["(Intercept)"]]
             }, error = function(e) NA_real_)
             b0 <- unname(cf[["(Intercept)"]])
@@ -1277,7 +1375,7 @@ format_best_equations_html <- function(result, state = NULL) {
       }
       if (is.null(eta_lines) || !length(eta_lines)) {
         se_vec <- tryCatch({
-          V <- as.matrix(stats::vcov(fit))
+          V <- path_vcov(fit)
           stats::setNames(sqrt(diag(V)), colnames(V))
         }, error = function(e) setNames(rep(NA_real_, length(cf)), names(cf)))
         eta_lines <- format_eta_term_lines(
@@ -1445,6 +1543,73 @@ format_best_equations_html <- function(result, state = NULL) {
   ))
 }
 
+#' Convert MathJax equation HTML to a LaTeX body fragment
+#' @keywords internal
+smt_eq_html_to_latex <- function(html) {
+  s <- as.character(html %||% "")
+  if (!nzchar(s)) return(NULL)
+  s <- gsub("&lt;", "<", s, fixed = TRUE)
+  s <- gsub("&gt;", ">", s, fixed = TRUE)
+  s <- gsub("&amp;", "&", s, fixed = TRUE)
+  s <- gsub("&quot;", "\"", s, fixed = TRUE)
+  s <- gsub("&#39;", "'", s, fixed = TRUE)
+  s <- gsub("&#x2713;", "$\\\\checkmark$", s, fixed = TRUE)
+  s <- gsub("\u2713", "$\\\\checkmark$", s, fixed = TRUE)
+  s <- gsub("\u2019", "'", s, fixed = TRUE)
+  s <- gsub("\u2013", "--", s, fixed = TRUE)
+  s <- gsub("\u2014", "---", s, fixed = TRUE)
+  s <- gsub("\u00d7", "$\\\\times$", s, fixed = TRUE)
+  s <- gsub("\u2265", "$\\\\ge$", s, fixed = TRUE)
+  s <- gsub("\u03b1", "$\\\\alpha$", s, fixed = TRUE)
+  s <- gsub("\u03b5", "$\\\\varepsilon$", s, fixed = TRUE)
+  s <- gsub("\u03a3", "$\\\\Sigma$", s, fixed = TRUE)
+  # MathJax \\color{#rrggbb}{...} → xcolor \\textcolor[HTML]{rrggbb}{...}
+  s <- gsub(
+    "\\\\color\\{#([0-9A-Fa-f]{6})\\}\\{",
+    "\\\\textcolor[HTML]{\\1}{",
+    s,
+    perl = TRUE
+  )
+  s <- gsub(
+    "<div class=\"smt-eq-caption\">(.*?)</div>",
+    "\\\\subsubsection*{\\1}\n",
+    s,
+    perl = TRUE
+  )
+  s <- gsub(
+    "<div class=\"smt-eq-tag\">(.*?)</div>",
+    "\\\\textit{\\1}\\\\par\n",
+    s,
+    perl = TRUE
+  )
+  s <- gsub(
+    "<div class=\"smt-eq-line\">(.*?)</div>",
+    "\\1\n",
+    s,
+    perl = TRUE
+  )
+  s <- gsub(
+    "<div class=\"smt-eq-note\">(.*?)</div>",
+    "\\\\begin{quote}\\\\footnotesize \\1\\\\end{quote}\n",
+    s,
+    perl = TRUE
+  )
+  s <- gsub("<div class=\"smt-eq-block\">", "\n", s, fixed = TRUE)
+  s <- gsub("<div class=\"smt-equations\">", "", s, fixed = TRUE)
+  s <- gsub("</div>", "\n", s, fixed = TRUE)
+  s <- gsub("<[^>]+>", "", s)
+  s <- gsub("\n{3,}", "\n\n", s)
+  trimws(s)
+}
+
+#' LaTeX equations for the fitted (best) model
+#' @keywords internal
+format_best_equations_latex <- function(result, state = NULL) {
+  html <- format_best_equations_html(result, state)
+  if (is.null(html)) return(NULL)
+  smt_eq_html_to_latex(html)
+}
+
 #' Short predictor label for an edge (e.g. methode, ecole[B], V×Su)
 #' @keywords internal
 edge_predictor_label <- function(state, edge_id, abbrev_map = NULL) {
@@ -1520,18 +1685,46 @@ format_best_vs_confirmatory_display <- function(bvc, state = NULL) {
   format_comparison_display(bvc, state = state, include_role = TRUE)
 }
 
+#' Empty path-coefficient table schema (optional adjusted p column)
+#' @keywords internal
+estimates_table_empty <- function(conf_adjust = "none") {
+  out <- data.frame(
+    From = character(), Level = character(), To = character(),
+    Estimate = numeric(), SE = numeric(), p = character(),
+    stringsAsFactors = FALSE
+  )
+  pcol <- conf_pvalue_column_name(conf_adjust)
+  if (!identical(pcol, "p")) out[[pcol]] <- character()
+  out
+}
+
+#' Pick raw vs stored p for display (`pvalue_raw` when finite)
+#' @keywords internal
+coef_raw_pvalue <- function(pvalue, pvalue_raw = NULL) {
+  pvalue <- as.numeric(pvalue)
+  if (is.null(pvalue_raw)) return(pvalue)
+  raw <- as.numeric(pvalue_raw)
+  ifelse(is.finite(raw), raw, pvalue)
+}
+
+#' Whether estimate rows correspond to confirmatory adjusted paths
+#'
+#' True when `pvalue_raw` is finite (set by [apply_confirmatory_p_adjust()]),
+#' which marks rows that entered the multiplicity family.
+#' @keywords internal
+estimate_rows_have_adj_p <- function(est) {
+  if (is.null(est) || !nrow(est)) return(logical(0))
+  if (!"pvalue_raw" %in% names(est)) return(rep(FALSE, nrow(est)))
+  is.finite(as.numeric(est$pvalue_raw))
+}
+
 #' Simple two-path mediation (indirect) effects a×b from fitted edges
 #'
 #' For every chain X → M → Y of included structural paths with finite a, b and
 #' SEs, reports the product with a first-order Sobel SE / p-value.
 #' @keywords internal
-indirect_effects_table <- function(state) {
-  empty <- data.frame(
-    From = character(), Level = character(), To = character(),
-    Type = character(), Status = character(),
-    Estimate = numeric(), SE = numeric(), p = character(),
-    stringsAsFactors = FALSE
-  )
+indirect_effects_table <- function(state, conf_adjust = "none") {
+  empty <- estimates_table_empty(conf_adjust)
   if (is.null(state) || !nrow(state$edges)) return(empty)
   edges <- ensure_edge_to_port(state)$edges
   if (!"level" %in% names(edges)) edges$level <- NA_character_
@@ -1549,6 +1742,8 @@ indirect_effects_table <- function(state) {
   e <- edges[keep, , drop = FALSE]
   if (nrow(e) < 2L) return(empty)
 
+  pcol <- conf_pvalue_column_name(conf_adjust)
+  want_adj <- !identical(pcol, "p")
   rows <- list()
   for (i in seq_len(nrow(e))) {
     for (j in seq_len(nrow(e))) {
@@ -1568,17 +1763,17 @@ indirect_effects_table <- function(state) {
         NA_real_
       }
       med <- e$to[i]
-      rows[[length(rows) + 1L]] <- data.frame(
+      row <- data.frame(
         From = node_display_name(state, e$from[i]),
         Level = paste0("via ", node_display_name(state, med)),
         To = node_display_name(state, e$to[j]),
-        Type = "indirect",
-        Status = "derived",
         Estimate = round(ab, 3),
         SE = round(se_ab, 3),
         p = format_pvalue(pv, digits = 3),
         stringsAsFactors = FALSE
       )
+      if (want_adj) row[[pcol]] <- ""
+      rows[[length(rows) + 1L]] <- row
     }
   }
   if (!length(rows)) return(empty)
@@ -1599,16 +1794,14 @@ conf_pvalue_column_name <- function(method = "none") {
 
 #' Path coefficient table for results pane
 #'
-#' @param conf_adjust Multiplicity method used for confirmatory edges; names the
-#'   p-column `p`, `pHolm`, `pBonf`, or `pBH`.
+#' Columns: From, Level, To, Estimate, SE, p, and (when `conf_adjust` ≠
+#' `none`) an adjusted column (`pHolm` / `pBonf` / `pBH`) filled only for
+#' confirmatory paths that entered the multiplicity adjustment.
 #' @keywords internal
 estimates_table <- function(state, estimates = NULL, conf_adjust = "none") {
-  empty <- data.frame(
-    From = character(), Level = character(), To = character(),
-    Type = character(), Status = character(),
-    Estimate = numeric(), SE = numeric(), p = character(),
-    stringsAsFactors = FALSE
-  )
+  empty <- estimates_table_empty(conf_adjust)
+  pcol <- conf_pvalue_column_name(conf_adjust)
+  want_adj <- !identical(pcol, "p")
 
   # Prefer full estimate rows (includes polynomial powers)
   if (!is.null(estimates) && nrow(estimates)) {
@@ -1630,17 +1823,76 @@ estimates_table <- function(state, estimates = NULL, conf_adjust = "none") {
       if ("kind" %in% names(est)) {
         lv <- ifelse(est$kind == "omnibus", "omnibus", lv)
       }
+      raw_p <- coef_raw_pvalue(
+        est$pvalue,
+        if ("pvalue_raw" %in% names(est)) est$pvalue_raw else NULL
+      )
+      bayes_ci <- "ci_low" %in% names(est) && (
+        any(is.finite(est$ci_low)) ||
+          ("includes_zero" %in% names(est) && any(!is.na(est$includes_zero)))
+      )
       main <- data.frame(
         From = from_lab,
         Level = lv,
         To = to_lab,
-        Type = ifelse(est$op == "=~", "measurement", "path"),
-        Status = "included",
         Estimate = round(as.numeric(est$est), 3),
         SE = round(as.numeric(est$se), 3),
-        p = vapply(est$pvalue, format_pvalue, character(1), digits = 3),
         stringsAsFactors = FALSE
       )
+      if (bayes_ci && !any(is.finite(raw_p))) names(main)[names(main) == "SE"] <- "SD"
+      if (bayes_ci) {
+        lvl <- if ("ci_level" %in% names(est)) est$ci_level[is.finite(est$ci_level)] else numeric()
+        pct <- if (length(lvl)) round(100 * lvl[[1]]) else 95
+        cri <- ifelse(
+          is.finite(est$ci_low) & is.finite(est$ci_high),
+          sprintf("[%.3f, %.3f]", est$ci_low, est$ci_high),
+          ""
+        )
+        main[[sprintf("%d%% HDI", pct)]] <- cri
+        if ("pd" %in% names(est)) {
+          main$pd <- ifelse(
+            is.finite(est$pd),
+            sprintf("%.1f%%", 100 * est$pd),
+            ""
+          )
+        }
+        if ("rope_pct" %in% names(est)) {
+          main[["ROPE%"]] <- ifelse(
+            is.finite(est$rope_pct),
+            sprintf("%.1f%%", 100 * est$rope_pct),
+            ""
+          )
+        }
+        if ("rope_decision" %in% names(est)) {
+          main$ROPE <- ifelse(
+            is.na(est$rope_decision) | !nzchar(as.character(est$rope_decision)),
+            "",
+            as.character(est$rope_decision)
+          )
+        }
+        if ("log_bf10" %in% names(est)) {
+          # Natural log of Savage–Dickey BF10 vs θ = 0
+          main[["log BF10"]] <- vapply(est$log_bf10, function(b) {
+            if (is.infinite(b) && b > 0) return("Inf")
+            if (is.infinite(b) && b < 0) return("-Inf")
+            if (!is.finite(b)) return("")
+            sprintf("%+.2f", b)
+          }, character(1))
+        }
+      }
+      if (!bayes_ci || any(is.finite(raw_p))) {
+        main$p <- vapply(raw_p, format_pvalue, character(1), digits = 3)
+      }
+      if (want_adj) {
+        show_adj <- estimate_rows_have_adj_p(est)
+        adj_chr <- rep("", nrow(est))
+        if (any(show_adj)) {
+          adj_chr[show_adj] <- vapply(
+            est$pvalue[show_adj], format_pvalue, character(1), digits = 3
+          )
+        }
+        main[[pcol]] <- adj_chr
+      }
     }
   } else {
     edges <- state$edges
@@ -1655,32 +1907,49 @@ estimates_table <- function(state, estimates = NULL, conf_adjust = "none") {
       if (!nrow(edges)) {
         main <- empty
       } else {
+        raw_p <- coef_raw_pvalue(
+          edges$pvalue,
+          if ("pvalue_raw" %in% names(edges)) edges$pvalue_raw else NULL
+        )
         main <- data.frame(
           From = vapply(edges$from, function(id) node_display_name(state, id), character(1)),
           Level = ifelse(is.na(edges$level) | !nzchar(edges$level), "", edges$level),
           To = vapply(edges$to, function(id) node_display_name(state, id), character(1)),
-          Type = edges$type,
-          Status = edges$status,
           Estimate = round(edges$estimate, 3),
           SE = round(edges$se, 3),
-          p = vapply(edges$pvalue, format_pvalue, character(1), digits = 3),
+          p = vapply(raw_p, format_pvalue, character(1), digits = 3),
           stringsAsFactors = FALSE
         )
+        if (want_adj) {
+          show_adj <- if ("pvalue_raw" %in% names(edges)) {
+            edges$type == "confirmatory" &
+              is.finite(as.numeric(edges$pvalue_raw))
+          } else {
+            rep(FALSE, nrow(edges))
+          }
+          adj_chr <- rep("", nrow(edges))
+          if (any(show_adj)) {
+            adj_chr[show_adj] <- vapply(
+              edges$pvalue[show_adj], format_pvalue, character(1), digits = 3
+            )
+          }
+          main[[pcol]] <- adj_chr
+        }
       }
     }
   }
 
-  indir <- indirect_effects_table(state)
-  out <- if (!nrow(main)) {
+  bayes_main <- any(grepl("% HDI$", names(main))) || "pd" %in% names(main)
+  indir <- if (bayes_main) {
+    main[0, , drop = FALSE]
+  } else {
+    indirect_effects_table(state, conf_adjust = conf_adjust)
+  }
+  if (!nrow(main)) {
     indir
   } else if (!nrow(indir)) {
     main
   } else {
     rbind(main, indir)
   }
-  pcol <- conf_pvalue_column_name(conf_adjust)
-  if (!identical(pcol, "p") && "p" %in% names(out)) {
-    names(out)[names(out) == "p"] <- pcol
-  }
-  out
 }

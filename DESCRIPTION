@@ -1,6 +1,6 @@
 Package: StructuralModelTester
 Title: Visual Structural Model Tester
-Version: 0.2.4
+Version: 0.2.5
 Authors@R: person("Baptiste Jacquet", email = "contact@bjacquet.fr", role = c("aut", "cre"))
 Description: Shiny workbench for path / SEM models: draw
     confirmatory, exploratory, fixed, measurement, and interaction links on a
@@ -27,5 +27,8 @@ Imports:
     emmeans
 Suggests:
     shinytest2,
-    testthat (>= 3.0.0)
+    testthat (>= 3.0.0),
+    tinytex,
+    brms,
+    patchwork
 Config/testthat/edition: 3
