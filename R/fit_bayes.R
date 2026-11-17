@@ -17,6 +17,39 @@ bayes_backend_available <- function() {
   !is.na(brms_stan_backend(must = FALSE))
 }
 
+#' Detect a usable `make` on PATH (needed by rstan on Windows)
+#' @keywords internal
+stan_make_available <- function() {
+  # Sys.which is enough: Rtools puts make on PATH when configured correctly.
+  nzchar(Sys.which("make") %||% "")
+}
+
+#' Human-readable Windows / toolchain hint for Stan compilation failures
+#' @keywords internal
+stan_toolchain_hint <- function(err_msg = "") {
+  msg <- as.character(err_msg %||% "")
+  looks_make <- grepl("make'? not found|make not found|'make'|\"make\"", msg, ignore.case = TRUE) ||
+    grepl("sink\\(type = \"output\"\\).*connexion incorrecte|invalid connection", msg, ignore.case = TRUE) ||
+    grepl("Compilation ERROR|g\\+\\+.*not found", msg, ignore.case = TRUE)
+  if (!isTRUE(.Platform$OS.type == "windows") && !looks_make) {
+    return("")
+  }
+  if (!looks_make && stan_make_available()) return("")
+  paste0(
+    "\n\nStan could not compile the model (toolchain). On Windows with R 4.4.x:\n",
+    "1. Install Rtools 4.4 from https://cran.r-project.org/bin/windows/Rtools/\n",
+    "   (match Rtools major.minor to R, e.g. R 4.4 → Rtools44).\n",
+    "2. Ensure C:\\\\rtools44\\\\usr\\\\bin is on PATH (or set RTOOLS44_HOME),\n",
+    "   then fully restart R / RStudio.\n",
+    "3. Check with: Sys.which(\"make\")  and  pkgbuild::check_build_tools(debug = TRUE)\n",
+    "4. Prefer cmdstanr + CmdStan when possible:\n",
+    "     install.packages(\"cmdstanr\", repos = c(\"https://stan-dev.r-universe.dev\", getOption(\"repos\")))\n",
+    "     cmdstanr::install_cmdstan()\n",
+    "The secondary 'sink(...): invalid connection / connexion incorrecte' error is usually\n",
+    "a follow-on from the failed compile, not a separate Shiny bug."
+  )
+}
+
 #' cmdstanr when CmdStan is installed, otherwise rstan
 #' @keywords internal
 brms_stan_backend <- function(must = TRUE) {
@@ -27,10 +60,23 @@ brms_stan_backend <- function(must = TRUE) {
     }, error = function(e) FALSE)
     if (isTRUE(ok)) return("cmdstanr")
   }
-  if (requireNamespace("rstan", quietly = TRUE)) return("rstan")
+  if (requireNamespace("rstan", quietly = TRUE)) {
+    if (identical(.Platform$OS.type, "windows") && !stan_make_available()) {
+      if (isTRUE(must)) {
+        stop(
+          "Bayesian Run found rstan, but 'make' is not on PATH.",
+          stan_toolchain_hint("'make' not found"),
+          call. = FALSE
+        )
+      }
+      return(NA_character_)
+    }
+    return("rstan")
+  }
   if (isTRUE(must)) {
     stop(
       "Bayesian Run needs the brms package and a Stan backend (cmdstanr or rstan).",
+      stan_toolchain_hint("'make' not found"),
       call. = FALSE
     )
   }
@@ -250,7 +296,11 @@ fit_one_brms_equation <- function(yname, y_kind, formula, data, rhs, re = NULL,
       silent = 2
     ),
     error = function(e) {
-      stop("brms error: ", e$message, call. = FALSE)
+      stop(
+        "brms error: ", e$message,
+        stan_toolchain_hint(e$message),
+        call. = FALSE
+      )
     }
   )
   fit$smt_ci <- args$ci
@@ -413,7 +463,10 @@ fit_joint_brms_path <- function(jobs, state, brms_args = NULL) {
   if (inherits(fit, "error")) {
     return(list(
       ok = FALSE,
-      reason = paste0("brms joint error: ", fit$message),
+      reason = paste0(
+        "brms joint error: ", fit$message,
+        stan_toolchain_hint(fit$message)
+      ),
       fit = NULL,
       syntax = NULL
     ))
