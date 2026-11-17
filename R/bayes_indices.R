@@ -162,10 +162,18 @@ brms_term_draws <- function(fit, term) {
     error = function(e) NULL
   )
   if (is.null(dm) || !ncol(dm)) return(numeric())
-  col <- if (identical(term, "(Intercept)") || identical(term, "Intercept")) {
-    "b_Intercept"
+  resp <- fit$smt_response %||% ""
+  resp <- as.character(resp)
+  if (length(resp) != 1L || is.na(resp)) resp <- ""
+  base <- if (identical(term, "(Intercept)") || identical(term, "Intercept")) {
+    "Intercept"
   } else {
-    paste0("b_", term)
+    term
+  }
+  col <- if (nzchar(resp)) {
+    paste0("b_", resp, "_", base)
+  } else {
+    paste0("b_", base)
   }
   if (!col %in% colnames(dm)) return(numeric())
   as.numeric(dm[, col])

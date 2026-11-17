@@ -56,6 +56,8 @@ normalize_brms_args <- function(args = NULL) {
   rope_k <- as.numeric(args$rope_k %||% 0.1)
   if (!is.finite(rope_k) || rope_k <= 0) rope_k <- 0.1
   if (rope_k > 2) rope_k <- 2
+  structure <- as.character(args$structure %||% "independent")[[1]]
+  if (!structure %in% c("independent", "joint")) structure <- "independent"
   list(
     chains = chains,
     iter = iter,
@@ -63,6 +65,7 @@ normalize_brms_args <- function(args = NULL) {
     seed = seed,
     ci = ci,
     rope_k = rope_k,
+    structure = structure,
     cores = 1L,
     refresh = 0L
   )
@@ -152,7 +155,9 @@ edge_normal_prior <- function(state, preds, meta) {
 #' matching link. Intercept, sigma, and random-effect rows are left as brms
 #' set them.
 #' @keywords internal
-fill_brms_slope_priors <- function(prior_df, state, preds, term_meta) {
+fill_brms_slope_priors <- function(prior_df, state, preds, term_meta,
+                                   preds_by_resp = NULL,
+                                   term_meta_by_resp = NULL) {
   if (is.null(prior_df) || !nrow(prior_df) || !"class" %in% names(prior_df)) {
     return(prior_df)
   }
@@ -166,11 +171,23 @@ fill_brms_slope_priors <- function(prior_df, state, preds, term_meta) {
     }
     if (is.na(coef)) coef <- ""
     if (!nzchar(coef)) next
-    meta <- term_meta[[coef]]
+    resp <- if ("resp" %in% names(prior_df)) {
+      as.character(prior_df$resp[[i]] %||% "")
+    } else {
+      ""
+    }
+    if (is.na(resp)) resp <- ""
+    if (nzchar(resp) && !is.null(term_meta_by_resp)) {
+      meta <- term_meta_by_resp[[resp]][[coef]]
+      preds_i <- preds_by_resp[[resp]]
+    } else {
+      meta <- term_meta[[coef]]
+      preds_i <- preds
+    }
     sp <- if (is.null(meta)) {
       list(mean = 0, sd = 1)
     } else {
-      edge_normal_prior(state, preds, meta)
+      edge_normal_prior(state, preds_i, meta)
     }
     prior_df$prior[[i]] <- sprintf("normal(%.8g, %.8g)", sp$mean, sp$sd)
     if ("source" %in% names(prior_df)) prior_df$source[[i]] <- "user"
@@ -270,6 +287,169 @@ fit_one_brms_equation <- function(yname, y_kind, formula, data, rhs, re = NULL,
   list(fit = fit, syntax = syntax, engine = "brms")
 }
 
+#' Why a joint multivariate brms path fit is unavailable
+#'
+#' @return `NULL` if joint is feasible, else a short reason string.
+#' @keywords internal
+joint_brms_block_reason <- function(jobs) {
+  if (!length(jobs) || length(jobs) < 2L) {
+    return("need at least two outcome equations")
+  }
+  kinds <- vapply(jobs, function(j) as.character(j$y_kind %||% ""), character(1))
+  if (any(!kinds %in% c("continuous", ""))) {
+    return("joint mode currently requires continuous (gaussian) outcomes only")
+  }
+  if (any(vapply(jobs, function(j) length(j$slope_terms %||% character()) > 0, logical(1)))) {
+    return("joint mode does not yet support random slopes")
+  }
+  clusters <- lapply(jobs, function(j) j$cluster)
+  has_cl <- vapply(clusters, function(c) !is.null(c) && nzchar(as.character(c %||% "")), logical(1))
+  if (any(has_cl) && !all(has_cl)) {
+    return("joint mode needs the same clustering on every equation (or none)")
+  }
+  if (all(has_cl)) {
+    cl_nm <- unique(vapply(clusters, as.character, character(1)))
+    if (length(cl_nm) != 1L) {
+      return("joint mode needs one shared cluster column across equations")
+    }
+  }
+  ynames <- vapply(jobs, function(j) j$yname, character(1))
+  if (anyDuplicated(ynames)) {
+    return("joint mode cannot combine duplicate response names")
+  }
+  NULL
+}
+
+#' Tag a brmsfit view with the response used for path helpers
+#' @keywords internal
+tag_brms_equation_view <- function(fit, response, ci, rope_k, term_priors,
+                                   structure = "independent") {
+  resp <- as.character(response %||% "")
+  if (length(resp) != 1L || is.na(resp) || !nzchar(resp)) resp <- ""
+  fit$smt_response <- if (nzchar(resp)) resp else NULL
+  fit$smt_ci <- ci
+  fit$smt_rope_k <- rope_k
+  fit$smt_term_priors <- term_priors %||% list()
+  fit$smt_structure <- structure
+  fit
+}
+
+#' Fit one multivariate gaussian brms model for several path equations
+#' @keywords internal
+fit_joint_brms_path <- function(jobs, state, brms_args = NULL) {
+  args <- normalize_brms_args(brms_args)
+  backend <- brms_stan_backend(must = TRUE)
+  reason <- joint_brms_block_reason(jobs)
+  if (!is.null(reason)) {
+    return(list(ok = FALSE, reason = reason, fit = NULL, syntax = NULL))
+  }
+
+  # Shared analysis frame: union of columns (listwise deletion across outcomes)
+  dat <- jobs[[1]]$data
+  for (j in jobs[-1L]) {
+    extra <- setdiff(names(j$data), names(dat))
+    if (length(extra)) dat <- cbind(dat, j$data[extra])
+  }
+  ynames <- vapply(jobs, function(j) j$yname, character(1))
+  keep <- stats::complete.cases(dat[, ynames, drop = FALSE])
+  dat <- dat[keep, , drop = FALSE]
+  if (!nrow(dat)) {
+    return(list(ok = FALSE, reason = "no complete cases across joint outcomes",
+                fit = NULL, syntax = NULL))
+  }
+
+  forms <- list()
+  syntax_lines <- character()
+  term_meta_by_resp <- list()
+  preds_by_resp <- list()
+  for (j in jobs) {
+    rhs <- if (!length(j$term_names)) "1" else paste(j$term_names, collapse = " + ")
+    re <- NULL
+    if (!is.null(j$cluster) && nzchar(as.character(j$cluster))) {
+      dat[[j$cluster]] <- as.factor(dat[[j$cluster]])
+      re <- rm_re_term(j$cluster, NULL)
+      fml <- stats::as.formula(paste(j$yname, "~", rhs, "+", re))
+    } else {
+      fml <- stats::as.formula(paste(j$yname, "~", rhs))
+    }
+    forms[[length(forms) + 1L]] <- brms::bf(fml)
+    rhs_txt <- if (!is.null(re)) paste(rhs, re, sep = " + ") else rhs
+    syntax_lines <- c(
+      syntax_lines,
+      paste0("  ", j$yname, " ~ ", rhs_txt)
+    )
+    term_meta_by_resp[[j$yname]] <- j$term_meta %||% list()
+    preds_by_resp[[j$yname]] <- j$preds
+  }
+  mv_formula <- forms[[1]]
+  for (i in seq_along(forms)[-1L]) {
+    mv_formula <- mv_formula + forms[[i]]
+  }
+  mv_formula <- mv_formula + brms::set_rescor(TRUE)
+
+  prior_df <- brms::get_prior(mv_formula, data = dat, family = stats::gaussian())
+  prior_df <- fill_brms_slope_priors(
+    prior_df, state, preds = NULL, term_meta = list(),
+    preds_by_resp = preds_by_resp,
+    term_meta_by_resp = term_meta_by_resp
+  )
+  fit <- tryCatch(
+    brms::brm(
+      formula = mv_formula,
+      data = dat,
+      family = stats::gaussian(),
+      prior = prior_df,
+      chains = args$chains,
+      iter = args$iter,
+      warmup = args$warmup,
+      cores = args$cores,
+      seed = args$seed,
+      refresh = args$refresh,
+      backend = backend,
+      silent = 2
+    ),
+    error = function(e) e
+  )
+  if (inherits(fit, "error")) {
+    return(list(
+      ok = FALSE,
+      reason = paste0("brms joint error: ", fit$message),
+      fit = NULL,
+      syntax = NULL
+    ))
+  }
+
+  prior_bits <- character()
+  if (!is.null(prior_df) && nrow(prior_df)) {
+    for (i in seq_len(nrow(prior_df))) {
+      if (!identical(as.character(prior_df$class[[i]]), "b")) next
+      coef <- as.character(prior_df$coef[[i]] %||% "")
+      resp <- as.character(prior_df$resp[[i]] %||% "")
+      if (is.na(coef) || !nzchar(coef)) next
+      lab <- if (nzchar(resp)) paste0(resp, ":", coef) else coef
+      prior_bits <- c(prior_bits, paste0(lab, " ~ ", prior_df$prior[[i]]))
+    }
+  }
+  syntax <- paste0(
+    "brms(gaussian, joint + rescor):\n",
+    paste(syntax_lines, collapse = "\n")
+  )
+  if (length(prior_bits)) {
+    syntax <- paste0(syntax, "\n# priors: ", paste(prior_bits, collapse = "; "))
+  }
+  rh <- tryCatch(brms::rhat(fit), error = function(e) NULL)
+  if (!is.null(rh)) {
+    rh <- rh[is.finite(rh)]
+    if (length(rh) && max(rh) > 1.05) {
+      syntax <- paste0(
+        syntax,
+        sprintf("\n# warning: max Rhat %.3f (chains may not have mixed)", max(rh))
+      )
+    }
+  }
+  list(ok = TRUE, reason = NULL, fit = fit, syntax = syntax, data = dat)
+}
+
 #' Fit the structural model and mark links by HDI + ROPE
 #'
 #' Same graph and data contract as [fit_pvalue_model()]. `ci` is the HDI mass
@@ -278,13 +458,18 @@ fit_one_brms_equation <- function(yname, y_kind, formula, data, rhs, re = NULL,
 #' Exploratory links are excluded when the HDI is not entirely outside the
 #' ROPE. Confirmatory links stay in the model and are muted in that case.
 #'
+#' @param structure `"independent"` (one Stan model per equation, default) or
+#'   `"joint"` (single multivariate gaussian model with residual correlations
+#'   when the path equations are compatible; otherwise falls back).
 #' @param chains,iter,warmup,seed MCMC settings passed to brms. One core is
 #'   used so sampling stays inside the Shiny process.
 #' @export
 fit_bayes_model <- function(state, data, ci = 0.95, rope_k = 0.1,
+                            structure = c("independent", "joint"),
                             mark_nonsig = TRUE,
                             chains = 2L, iter = 2000L, warmup = 1000L, seed = 1L,
                             latent_score_method = "own") {
+  structure <- match.arg(structure)
   if (!requireNamespace("brms", quietly = TRUE)) {
     stop(
       "Bayesian Run needs the brms package (and cmdstanr or rstan).",
@@ -300,7 +485,7 @@ fit_bayes_model <- function(state, data, ci = 0.95, rope_k = 0.1,
   ]))
   brms_args <- normalize_brms_args(list(
     chains = chains, iter = iter, warmup = warmup, seed = seed,
-    ci = ci, rope_k = rope_k
+    ci = ci, rope_k = rope_k, structure = structure
   ))
   fitted <- fit_structural_model(
     state, data,
@@ -355,6 +540,7 @@ fit_bayes_model <- function(state, data, ci = 0.95, rope_k = 0.1,
     engine = fitted$engine,
     sampler = "brms",
     pvalue_kind = "hdi_rope",
+    bayes_structure = fitted$bayes_structure %||% brms_args$structure,
     ci_level = brms_args$ci,
     rope_k = brms_args$rope_k,
     uncertainty = list(method = "none"),

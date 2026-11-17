@@ -113,78 +113,78 @@ smt_ui <- function() {
             ),
             shiny::hr(class = "smt-hr"),
             shiny::h3("Analysis"),
-            shiny::div(
-              title = paste(
-                "p-values: classical tests.",
-                "Bayesian (brms): normal priors from Expected b ± SD; unsupported when the HDI is not outside the ROPE.",
-                "Model comparison: AIC/BIC search over exploratory links."
+            shiny::radioButtons(
+              "inference_mode",
+              label = smt_label_with_help("Framework", "inference_mode"),
+              choices = c(
+                "p-values" = "pvalue",
+                "Bayesian (brms)" = "bayes",
+                "Model comparison (AIC/BIC)" = "search"
               ),
-              shiny::radioButtons(
-                "inference_mode", "Framework",
-                choices = c(
-                  "p-values" = "pvalue",
-                  "Bayesian (brms)" = "bayes",
-                  "Model comparison (AIC/BIC)" = "search"
-                ),
-                selected = "pvalue"
-              )
+              selected = "pvalue"
             ),
             shiny::conditionalPanel(
               condition = "input.inference_mode == 'pvalue'",
-              shiny::div(
-                title = "Significance level used when marking non-significant exploratory links.",
-                shiny::numericInput(
-                  "alpha", "α for exploratory marking",
-                  value = 0.05, min = 0.001, max = 0.2, step = 0.01
-                )
+              shiny::numericInput(
+                "alpha", "α for exploratory marking",
+                value = 0.05, min = 0.001, max = 0.2, step = 0.01
               )
             ),
             shiny::conditionalPanel(
               condition = "input.inference_mode == 'pvalue' || input.inference_mode == 'bayes'",
-              shiny::div(
-                title = paste(
-                  "p-values: exploratory links with p > α are dashed.",
-                  "Bayesian: exploratory links are dashed when the HDI is not entirely outside the ROPE."
-                ),
-                shiny::checkboxInput(
-                  "mark_nonsig",
+              shiny::checkboxInput(
+                "mark_nonsig",
+                label = smt_label_with_help(
                   "Mark unsupported exploratory links",
-                  TRUE
-                )
+                  "mark_nonsig"
+                ),
+                value = TRUE
               )
             ),
             shiny::conditionalPanel(
               condition = "input.inference_mode == 'pvalue'",
-              shiny::div(
-                title = paste(
-                  "Adjusts confirmatory link p-values across all confirmatory paths",
-                  "(canvas / coefficients / power detection)."
-                ),
-                shiny::selectInput(
-                  "conf_p_adjust",
+              shiny::selectInput(
+                "conf_p_adjust",
+                label = smt_label_with_help(
                   "Confirmatory multiplicity correction",
-                  choices = c(
-                    "None" = "none",
-                    "Bonferroni" = "bonferroni",
-                    "Holm" = "holm",
-                    "Benjamini–Hochberg" = "BH"
-                  ),
-                  selected = "holm",
-                  width = "100%"
-                )
+                  "conf_p_adjust"
+                ),
+                choices = c(
+                  "None" = "none",
+                  "Bonferroni" = "bonferroni",
+                  "Holm" = "holm",
+                  "Benjamini–Hochberg" = "BH"
+                ),
+                selected = "holm",
+                width = "100%"
               )
             ),
             shiny::conditionalPanel(
               condition = "input.inference_mode == 'bayes'",
               shiny::helpText(
-                "Each equation is sampled with brms. Expected b ± SD is a normal prior. Results show the posterior mean, HDI, pd, and ROPE. A link is unsupported when the HDI is not entirely outside the ROPE."
+                "Expected b ± SD is the normal prior. Use the ? icons for HDI, ROPE, and joint vs independent equations."
+              ),
+              shiny::radioButtons(
+                "bayes_structure",
+                label = smt_label_with_help("Equations", "bayes_structure"),
+                choices = c(
+                  "Independent" = "independent",
+                  "Joint (residual correlations)" = "joint"
+                ),
+                selected = "independent",
+                inline = TRUE
               ),
               shiny::numericInput(
-                "bayes_ci", "HDI mass",
+                "bayes_ci",
+                label = smt_label_with_help("HDI mass", "bayes_ci"),
                 value = 0.95, min = 0.5, max = 0.99, step = 0.01
               ),
               shiny::numericInput(
-                "bayes_rope_k", "ROPE (± fraction of prior SD)",
+                "bayes_rope_k",
+                label = smt_label_with_help(
+                  "ROPE (± fraction of prior SD)",
+                  "bayes_rope_k"
+                ),
                 value = 0.1, min = 0.01, max = 1, step = 0.01
               ),
               shiny::numericInput(
@@ -206,63 +206,46 @@ smt_ui <- function() {
             ),
             shiny::conditionalPanel(
               condition = "input.inference_mode == 'search'",
-              shiny::div(
-                title = "Information criterion used to rank models in the exploratory search.",
-                shiny::radioButtons(
-                  "ic_criterion", "Criterion",
-                  choices = c("AIC" = "aic", "BIC" = "bic"),
-                  selected = "bic", inline = TRUE
-                )
+              shiny::radioButtons(
+                "ic_criterion",
+                label = smt_label_with_help("Criterion", "ic_criterion"),
+                choices = c("AIC" = "aic", "BIC" = "bic"),
+                selected = "bic", inline = TRUE
               ),
-              shiny::div(
-                title = paste(
-                  "Sum of Akaike/BIC weights across models that include the link.",
-                  "Default 0.95 is strict; lower toward 0.50 for more permissive retention."
-                ),
-                shiny::numericInput(
-                  "min_weight",
-                  "Min Σw to keep",
-                  value = 0.95,
-                  min = 0,
-                  max = 1,
-                  step = 0.05
-                )
+              shiny::numericInput(
+                "min_weight",
+                label = smt_label_with_help("Min Σw to keep", "min_weight"),
+                value = 0.95,
+                min = 0,
+                max = 1,
+                step = 0.05
               ),
-              shiny::div(
-                title = paste(
-                  "Below the Σw threshold, confirmatory and exploratory links are dashed (✕)",
-                  "and do not count as detected in power analysis."
-                ),
-                shiny::checkboxInput(
-                  "mark_low_weight",
+              shiny::checkboxInput(
+                "mark_low_weight",
+                label = smt_label_with_help(
                   "Reject links with Σw below threshold",
-                  value = TRUE
-                )
-              ),
-              shiny::div(
-                title = paste(
-                  "Full averaging sets missing predictors to 0 across models;",
-                  "canvas shows averaged estimates."
+                  "mark_low_weight"
                 ),
-                shiny::checkboxInput(
-                  "model_average",
+                value = TRUE
+              ),
+              shiny::checkboxInput(
+                "model_average",
+                label = smt_label_with_help(
                   "Model averaging (full)",
-                  value = FALSE
-                )
+                  "model_average"
+                ),
+                value = FALSE
               )
             ),
             shiny::hr(class = "smt-hr"),
             shiny::conditionalPanel(
               condition = "input.inference_mode != 'bayes'",
-            shiny::div(
-              title = paste(
-                "Applied only after the final model is chosen (not during AIC/BIC search).",
-                "Bootstrap resamples people; plausible values redraw latent scores then refit paths.",
-                "Inference is conditional on the selected model."
-              ),
               shiny::selectInput(
                 "uncertainty_method",
-                "Final-model uncertainty",
+                label = smt_label_with_help(
+                  "Final-model uncertainty",
+                  "uncertainty_method"
+                ),
                 choices = c(
                   "None" = "none",
                   "Bootstrap" = "bootstrap",
@@ -270,15 +253,9 @@ smt_ui <- function() {
                 ),
                 selected = "none",
                 width = "100%"
-              )
-            ),
-            shiny::conditionalPanel(
-              condition = "input.uncertainty_method != 'none'",
-              shiny::div(
-                title = paste(
-                  "Number of bootstrap or plausible-value draws for final-model uncertainty.",
-                  "Inference is conditional on the selected model."
-                ),
+              ),
+              shiny::conditionalPanel(
+                condition = "input.uncertainty_method != 'none'",
                 shiny::numericInput(
                   "uncertainty_draws",
                   "Draws",
@@ -288,7 +265,6 @@ smt_ui <- function() {
                   step = 1
                 )
               )
-            )
             ),
             shiny::uiOutput("latent_score_method_ui"),
             shiny::hr(class = "smt-hr"),
@@ -716,6 +692,8 @@ smt_server <- function(input, output, session) {
     if (is.null(sel$edges) || !length(sel$edges)) return(NULL)
     as.character(sel$edges[[1]])
   })
+
+  smt_register_field_help(input, session)
 
   smt_show_power_modal <- function() {
     ps <- power_settings_rv()
@@ -1380,23 +1358,15 @@ smt_server <- function(input, output, session) {
     if (is.null(cur) || !cur %in% c("own", "joint")) cur <- "own"
     shiny::tagList(
       shiny::hr(class = "smt-hr"),
-      shiny::div(
-        title = paste(
-          "Analysis-wide. Own indicators (default) score each latent from its",
-          "measurement links only. Joint Thomson/regression scores use the",
-          "multi-factor CFA and can weight items from other constructs when",
-          "factors correlate. With one latent both coincide."
+      shiny::radioButtons(
+        "latent_score_method",
+        label = smt_label_with_help("Latent scores", "latent_score_method"),
+        choices = c(
+          "Own indicators" = "own",
+          "Joint (Thomson)" = "joint"
         ),
-        shiny::radioButtons(
-          "latent_score_method",
-          "Latent scores",
-          choices = c(
-            "Own indicators" = "own",
-            "Joint (Thomson)" = "joint"
-          ),
-          selected = cur,
-          width = "100%"
-        )
+        selected = cur,
+        width = "100%"
       )
     )
   })
@@ -2083,14 +2053,23 @@ smt_server <- function(input, output, session) {
           latent_score_method = score_meth
         )
       } else if (identical(input$inference_mode, "bayes")) {
+        bayes_structure <- as.character(input$bayes_structure %||% "independent")[[1]]
+        if (!bayes_structure %in% c("independent", "joint")) {
+          bayes_structure <- "independent"
+        }
         shiny::setProgress(
           value = 0.25,
-          detail = "Sampling with brms (one Stan model per equation)"
+          detail = if (identical(bayes_structure, "joint")) {
+            "Sampling with brms (joint multivariate model when possible)"
+          } else {
+            "Sampling with brms (one Stan model per equation)"
+          }
         )
         fit_bayes_model(
           fit_st, dat,
           ci = input$bayes_ci,
           rope_k = input$bayes_rope_k,
+          structure = bayes_structure,
           mark_nonsig = isTRUE(input$mark_nonsig),
           chains = input$bayes_chains,
           iter = input$bayes_iter,
@@ -2154,7 +2133,11 @@ smt_server <- function(input, output, session) {
         ""
       }
       bayes_txt <- if (identical(res$sampler, "brms")) {
-        " Posterior means, HDI, pd, and ROPE are on the canvas and link plot."
+        struct <- as.character(res$bayes_structure %||% "independent")
+        sprintf(
+          " Bayesian (%s): posterior means, HDI, pd, ROPE, and log BF10 are on the canvas and link plot.",
+          struct
+        )
       } else {
         ""
       }

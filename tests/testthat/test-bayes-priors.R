@@ -167,3 +167,62 @@ test_that("brms fit uses the link prior and HDI + ROPE", {
   combo <- StructuralModelTester:::compose_edge_bayes_plot(p_eff, info)
   expect_true(inherits(combo, "patchwork") || inherits(combo, "ggplot"))
 })
+
+test_that("joint brms structure fits a multivariate gaussian path", {
+  skip_if_not(
+    StructuralModelTester:::bayes_backend_available(),
+    "brms + Stan backend not available"
+  )
+  set.seed(3)
+  n <- 50L
+  x <- rnorm(n)
+  y1 <- 0.4 * x + rnorm(n)
+  y2 <- 0.3 * x + 0.5 * y1 + rnorm(n)
+  st <- StructuralModelTester:::empty_model_state()
+  st <- StructuralModelTester:::add_node(st, "X", observed_column = "X")
+  st <- StructuralModelTester:::add_node(st, "Y1", observed_column = "Y1")
+  st <- StructuralModelTester:::add_node(st, "Y2", observed_column = "Y2")
+  st <- StructuralModelTester:::add_edge(
+    st, st$nodes$id[[1]], st$nodes$id[[2]], type = "confirmatory"
+  )
+  st <- StructuralModelTester:::add_edge(
+    st, st$nodes$id[[1]], st$nodes$id[[3]], type = "confirmatory"
+  )
+  st <- StructuralModelTester:::add_edge(
+    st, st$nodes$id[[2]], st$nodes$id[[3]], type = "confirmatory"
+  )
+  res <- StructuralModelTester:::fit_bayes_model(
+    st,
+    data.frame(X = x, Y1 = y1, Y2 = y2),
+    structure = "joint",
+    mark_nonsig = FALSE,
+    chains = 1L,
+    iter = 400L,
+    warmup = 200L,
+    seed = 3L
+  )
+  expect_identical(res$bayes_structure, "joint")
+  expect_match(res$syntax, "joint")
+  expect_true(any(res$estimates$rhs == "X" & res$estimates$lhs %in% c("Y1", "Y2")))
+  # Same joint fit object is reused per equation key
+  expect_true(inherits(res$fit[[st$nodes$id[[2]]]], "brmsfit"))
+  expect_identical(
+    res$fit[[st$nodes$id[[2]]]]$smt_response,
+    "Y1"
+  )
+  expect_identical(
+    res$fit[[st$nodes$id[[3]]]]$smt_response,
+    "Y2"
+  )
+})
+
+test_that("joint mode falls back when a binary outcome is present", {
+  jobs <- list(
+    list(yname = "Y", y_kind = "binary", slope_terms = character(), cluster = NULL),
+    list(yname = "Z", y_kind = "continuous", slope_terms = character(), cluster = NULL)
+  )
+  expect_match(
+    StructuralModelTester:::joint_brms_block_reason(jobs),
+    "continuous"
+  )
+})

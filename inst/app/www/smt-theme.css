@@ -2254,3 +2254,152 @@ body.smt-resizing-v * {
 }
 
 /* Default side widths are set in JS; keep a sensible fallback only */
+
+/* Field help "?" + pedagogical modal */
+.smt-field-label-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  max-width: 100%;
+}
+
+.smt-field-label-text {
+  line-height: 1.25;
+}
+
+.smt-help-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid var(--smt-border);
+  background: var(--smt-surface);
+  color: var(--smt-muted);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  text-decoration: none !important;
+  vertical-align: middle;
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+
+.smt-help-btn:hover,
+.smt-help-btn:focus {
+  color: var(--smt-accent);
+  border-color: var(--smt-accent);
+  background: var(--smt-accent-soft);
+  outline: none;
+}
+
+.smt-help-btn-glyph {
+  display: block;
+  transform: translateY(-0.5px);
+}
+
+.checkbox label .smt-field-label-row,
+.radio label .smt-field-label-row {
+  display: inline-flex;
+}
+
+.smt-help-modal {
+  padding: 22px 22px 10px;
+}
+
+.smt-help-hero {
+  margin-bottom: 14px;
+}
+
+.smt-help-kicker {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--smt-accent);
+  margin-bottom: 4px;
+}
+
+.smt-help-hero h3 {
+  margin: 0 0 8px 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--smt-text);
+}
+
+.smt-help-lead {
+  margin: 0;
+  color: var(--smt-muted);
+  line-height: 1.45;
+  max-width: 52em;
+}
+
+.smt-help-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin: 4px 0 8px;
+}
+
+.smt-help-option {
+  padding: 12px 14px;
+  border: 1px solid var(--smt-border);
+  border-radius: 8px;
+  background: var(--smt-surface);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 100%;
+}
+
+.smt-help-option-label {
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--smt-text);
+}
+
+.smt-help-option-summary {
+  margin: 0;
+  color: var(--smt-muted);
+  line-height: 1.4;
+}
+
+.smt-help-list-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.smt-help-pros .smt-help-list-title {
+  color: #2f6b3c;
+}
+
+.smt-help-cons .smt-help-list-title {
+  color: #8a4b16;
+}
+
+.smt-help-list ul {
+  margin: 0;
+  padding-left: 1.15em;
+  color: var(--smt-text);
+  line-height: 1.4;
+}
+
+.smt-help-list li + li {
+  margin-top: 3px;
+}
+
+.smt-help-note {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #f7f7f8;
+  border: 1px solid var(--smt-border);
+  color: var(--smt-muted);
+  line-height: 1.4;
+}
