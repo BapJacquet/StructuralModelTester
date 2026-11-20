@@ -209,7 +209,13 @@ pca_unidimensionality <- function(items) {
     ratio = NA_real_,
     pct1 = NA_real_,
     n_items = 0L,
-    n = 0L
+    n = 0L,
+    lambda1 = NA_real_,
+    lambda2 = NA_real_,
+    eigenvalues = numeric(),
+    loadings = NULL,
+    loadings_rotated = NULL,
+    n_rotated = 0L
   )
   if (is.null(items)) return(empty)
   if (!is.data.frame(items) && !is.matrix(items)) {
@@ -229,13 +235,64 @@ pca_unidimensionality <- function(items) {
   R <- tryCatch(stats::cor(items), error = function(e) NULL)
   if (is.null(R) || !is.matrix(R) || nrow(R) != k) return(empty)
   if (any(!is.finite(R))) return(empty)
-  ev <- tryCatch(
-    eigen(R, symmetric = TRUE, only.values = TRUE)$values,
+  eg <- tryCatch(
+    eigen(R, symmetric = TRUE, only.values = FALSE),
     error = function(e) NULL
   )
-  if (is.null(ev) || length(ev) < 2L) return(empty)
-  ev <- as.numeric(ev)
+  if (is.null(eg) || length(eg$values) < 2L) return(empty)
+  ev <- as.numeric(eg$values)
   if (!all(is.finite(ev[1:2])) || ev[[2]] <= .Machine$double.eps) return(empty)
+  # Component loadings = eigenvector × √eigenvalue (correlation PCA)
+  vec <- eg$vectors
+  if (is.null(dim(vec))) vec <- matrix(vec, ncol = 1L)
+  loadings <- vec
+  for (j in seq_len(ncol(vec))) {
+    s <- if (is.finite(ev[[j]]) && ev[[j]] > 0) sqrt(ev[[j]]) else 0
+    loadings[, j] <- vec[, j] * s
+    # Flip sign so the component loads mostly positive (readable)
+    if (sum(loadings[, j], na.rm = TRUE) < 0) {
+      loadings[, j] <- -loadings[, j]
+    }
+  }
+  item_nms <- names(items)
+  if (is.null(item_nms) || length(item_nms) != k) {
+    item_nms <- colnames(R)
+  }
+  if (is.null(item_nms) || length(item_nms) != k) {
+    item_nms <- paste0("item", seq_len(k))
+  }
+  rownames(loadings) <- item_nms
+  colnames(loadings) <- paste0("PC", seq_len(ncol(loadings)))
+
+  # Varimax only when Kaiser keeps ≥ 2 components (λ > 1). A single
+  # component makes rotation irrelevant / misleading.
+  n_rot <- as.integer(sum(ev > 1))
+  n_rot <- max(0L, min(n_rot, k, ncol(loadings)))
+  loadings_rot <- NULL
+  if (n_rot >= 2L) {
+    rot <- tryCatch(
+      stats::varimax(loadings[, seq_len(n_rot), drop = FALSE], normalize = TRUE),
+      error = function(e) NULL
+    )
+    if (!is.null(rot) && !is.null(rot$loadings)) {
+      loadings_rot <- matrix(
+        as.numeric(rot$loadings),
+        nrow = nrow(loadings),
+        ncol = n_rot,
+        dimnames = list(item_nms, paste0("RC", seq_len(n_rot)))
+      )
+      for (j in seq_len(n_rot)) {
+        if (sum(loadings_rot[, j], na.rm = TRUE) < 0) {
+          loadings_rot[, j] <- -loadings_rot[, j]
+        }
+      }
+    } else {
+      n_rot <- 0L
+    }
+  } else {
+    n_rot <- 0L
+  }
+
   ratio <- ev[[1]] / ev[[2]]
   pct1 <- ev[[1]] / sum(ev)
   status <- if (ratio >= 3) {
@@ -263,7 +320,11 @@ pca_unidimensionality <- function(items) {
     n_items = as.integer(k),
     n = as.integer(n),
     lambda1 = as.numeric(ev[[1]]),
-    lambda2 = as.numeric(ev[[2]])
+    lambda2 = as.numeric(ev[[2]]),
+    eigenvalues = ev,
+    loadings = loadings,
+    loadings_rotated = loadings_rot,
+    n_rotated = as.integer(n_rot)
   )
 }
 
@@ -381,9 +442,38 @@ empty_estimates <- function() {
     rope_decision = character(),
     log_bf10 = numeric(),
     kl_prior_post = numeric(),
+    post_narrow = numeric(),
     term = character(),
     stringsAsFactors = FALSE
   )
+}
+
+#' Bind estimate tables with a shared column schema
+#'
+#' Older CFA / lavaan builders sometimes omit CI / Bayes columns. Align both
+#' sides to [empty_estimates()] before `rbind` so two-step latent fits stay safe.
+#' @keywords internal
+bind_estimates <- function(...) {
+  tabs <- list(...)
+  tabs <- tabs[!vapply(tabs, is.null, logical(1))]
+  if (!length(tabs)) return(empty_estimates())
+  proto <- empty_estimates()
+  na_like <- function(template, n) {
+    if (is.logical(template)) return(rep(NA, n))
+    if (is.character(template)) return(rep(NA_character_, n))
+    if (is.integer(template)) return(rep(NA_integer_, n))
+    rep(NA_real_, n)
+  }
+  aligned <- lapply(tabs, function(x) {
+    if (!is.data.frame(x) || !nrow(x)) return(proto[0, , drop = FALSE])
+    for (nm in names(proto)) {
+      if (!nm %in% names(x)) x[[nm]] <- na_like(proto[[nm]], nrow(x))
+    }
+    x[, names(proto), drop = FALSE]
+  })
+  nonempty <- aligned[vapply(aligned, nrow, integer(1)) > 0L]
+  if (!length(nonempty)) return(proto[0, , drop = FALSE])
+  do.call(rbind, nonempty)
 }
 
 #' Append one estimate row
@@ -397,6 +487,7 @@ estimate_row <- function(lhs, op, rhs, est, se, pvalue,
                          rope_pct = NA_real_, rope_decision = NA_character_,
                          log_bf10 = NA_real_,
                          kl_prior_post = NA_real_,
+                         post_narrow = NA_real_,
                          term = NA_character_) {
   ci_low <- as.numeric(ci_low)
   ci_high <- as.numeric(ci_high)
@@ -435,6 +526,7 @@ estimate_row <- function(lhs, op, rhs, est, se, pvalue,
     rope_decision = rope_decision,
     log_bf10 = as.numeric(log_bf10),
     kl_prior_post = as.numeric(kl_prior_post),
+    post_narrow = as.numeric(post_narrow),
     term = as.character(term %||% NA_character_),
     stringsAsFactors = FALSE
   )
@@ -460,6 +552,11 @@ path_fixed_coefs <- function(fit) {
       }
     }
     nms[nms == "Intercept"] <- "(Intercept)"
+    # Restore SMT dummy names (Var__Level) after brms-safe rename
+    nms <- vapply(
+      nms, function(nm) brms_translate_term(fit, nm, "to_orig"),
+      character(1), USE.NAMES = FALSE
+    )
     names(est) <- nms
     return(est)
   }
@@ -486,6 +583,10 @@ path_vcov <- function(fit) {
       }
     }
     nms[nms == "Intercept"] <- "(Intercept)"
+    nms <- vapply(
+      nms, function(nm) brms_translate_term(fit, nm, "to_orig"),
+      character(1), USE.NAMES = FALSE
+    )
     colnames(V) <- nms
     rownames(V) <- nms
   }
@@ -548,6 +649,7 @@ path_coef_bayes_fields <- function(ct, term) {
     rope_decision = NA_character_,
     log_bf10 = NA_real_,
     kl_prior_post = NA_real_,
+    post_narrow = NA_real_,
     includes_zero = NA
   )
   if (is.null(ct) || !term %in% rownames(ct)) return(empty)
@@ -566,6 +668,7 @@ path_coef_bayes_fields <- function(ct, term) {
     },
     log_bf10 = as.numeric(pull("log_bf10")),
     kl_prior_post = as.numeric(pull("kl_prior_post")),
+    post_narrow = as.numeric(pull("post_narrow")),
     includes_zero = as.logical(pull("includes_zero"))
   )
 }
@@ -602,6 +705,7 @@ brms_coef_table <- function(fit, ci = 0.95, rope_k = 0.1, term_priors = NULL) {
     rope_decision = NA_character_,
     log_bf10 = NA_real_,
     kl_prior_post = NA_real_,
+    post_narrow = NA_real_,
     includes_zero = NA,
     row.names = nms,
     stringsAsFactors = FALSE
@@ -634,37 +738,102 @@ brms_coef_table <- function(fit, ci = 0.95, rope_k = 0.1, term_priors = NULL) {
     fx[nm, "rope_decision"] <- sm$rope_decision
     fx[nm, "log_bf10"] <- sm$log_bf10
     fx[nm, "kl_prior_post"] <- sm$kl_prior_post
+    fx[nm, "post_narrow"] <- sm$post_narrow
     fx[nm, "includes_zero"] <- sm$includes_null
   }
   fx
 }
 
-#' Standardized coefficients for lm / glm terms (excl. intercept)
+#' Design matrix used to compute predictor SDs for standardization
+#' @keywords internal
+path_design_matrix <- function(fit) {
+  mm <- tryCatch(stats::model.matrix(fit), error = function(e) NULL)
+  if (!is.null(mm)) return(mm)
+  if (inherits(fit, "brmsfit") && is.data.frame(fit$data)) {
+    fml <- path_fixed_formula(fit)
+    if (!is.null(fml)) {
+      mm <- tryCatch(
+        stats::model.matrix(fml, data = fit$data),
+        error = function(e) NULL
+      )
+    }
+  }
+  mm
+}
+
+#' Resolve a coef name to a column in the design matrix (brms-safe aliases)
+#' @keywords internal
+path_design_col_for_term <- function(fit, term, mm_names) {
+  term <- as.character(term %||% "")[[1]]
+  if (!nzchar(term) || identical(term, "(Intercept)")) return(NA_character_)
+  if (term %in% mm_names) return(term)
+  safe <- tryCatch(
+    brms_translate_term(fit, term, "to_safe"),
+    error = function(e) term
+  )
+  if (nzchar(safe) && safe %in% mm_names) return(safe)
+  # Fallback: collapse SMT __ dummies the same way brms_safe_name_one does
+  collapsed <- gsub("__+", "_", term, perl = TRUE)
+  collapsed <- sub("_+$", "", collapsed)
+  if (nzchar(collapsed) && collapsed %in% mm_names) return(collapsed)
+  NA_character_
+}
+
+#' Standardized coefficients for lm / glm / merMod / brms terms (excl. intercept)
 #'
-#' lm: b * sd(x) / sd(y).
-#' glm: b * sd(x) / sqrt(var(η) + π²/3) (latent-y style, logit/probit-friendly).
-#' Mixed models: left NA for now.
+#' Continuous / dummy predictors: `b * sd(x) / sd(y)` on the design matrix.
+#' glm / glmer: `b * sd(x) / sqrt(var(η) + π²/3)` (latent-y style).
+#' Mixed models use the same observed-y (or latent-η) scaling as the fixed part.
 #' @keywords internal
 standardized_term_coefs <- function(fit) {
   cf <- path_fixed_coefs(fit)
   out <- setNames(rep(NA_real_, length(cf)), names(cf))
-  if (inherits(fit, "merMod")) return(out)
-  mm <- tryCatch(stats::model.matrix(fit), error = function(e) NULL)
-  if (is.null(mm)) return(out)
+  mm <- path_design_matrix(fit)
+  if (is.null(mm) || !ncol(mm)) return(out)
+  mm_names <- colnames(mm)
 
-  if (inherits(fit, "glm")) {
+  if (inherits(fit, "glmerMod")) {
+    eta <- tryCatch(
+      stats::predict(fit, type = "link", re.form = NULL),
+      error = function(e) NULL
+    )
+    sy <- if (!is.null(eta) && length(eta)) {
+      sqrt(stats::var(as.numeric(eta), na.rm = TRUE) + (pi^2) / 3)
+    } else {
+      NA_real_
+    }
+  } else if (inherits(fit, "glm")) {
     eta <- fit$linear.predictors
     sy <- sqrt(stats::var(eta) + (pi^2) / 3)
+  } else if (inherits(fit, "brmsfit")) {
+    y <- brms_observed_y(fit)
+    sy <- if (length(y)) stats::sd(as.numeric(y), na.rm = TRUE) else NA_real_
+    # Bernoulli / binomial: latent-scale standardization when link is logit/probit
+    fam <- tryCatch(brms_view_family(fit), error = function(e) NULL)
+    fam_nm <- as.character(fam$family %||% "")[[1]]
+    if (identical(fam_nm, "bernoulli") || identical(fam_nm, "binomial")) {
+      pe <- tryCatch(
+        as.numeric(colMeans(brms::posterior_linpred(fit), na.rm = TRUE)),
+        error = function(e) NULL
+      )
+      if (!is.null(pe) && length(pe)) {
+        sy <- sqrt(stats::var(pe, na.rm = TRUE) + (pi^2) / 3)
+      }
+    }
   } else {
-    y <- tryCatch(stats::model.response(stats::model.frame(fit)), error = function(e) NULL)
-    sy <- if (is.null(y)) NA_real_ else stats::sd(as.numeric(y))
+    y <- tryCatch(
+      stats::model.response(stats::model.frame(fit)),
+      error = function(e) NULL
+    )
+    sy <- if (is.null(y)) NA_real_ else stats::sd(as.numeric(y), na.rm = TRUE)
   }
   if (!is.finite(sy) || sy <= 0) sy <- 1
 
   for (nm in names(cf)) {
     if (identical(nm, "(Intercept)")) next
-    if (!nm %in% colnames(mm)) next
-    sx <- stats::sd(mm[, nm])
+    col <- path_design_col_for_term(fit, nm, mm_names)
+    if (is.na(col)) next
+    sx <- stats::sd(mm[, col], na.rm = TRUE)
     if (!is.finite(sx) || sx <= 0) next
     out[[nm]] <- unname(cf[[nm]]) * sx / sy
   }
@@ -1231,19 +1400,23 @@ attach_latent_factor_scores <- function(state, dat, score_method = "own") {
       } else {
         NA_character_
       }
-      meas_est <- data.frame(
-        lhs = as.character(pe$lhs),
-        op = as.character(pe$op),
-        rhs = as.character(pe$rhs),
-        est = as.numeric(pe$est),
-        se = as.numeric(pe$se),
-        pvalue = as.numeric(pe$pvalue),
-        est_std = if (is.na(std_col)) NA_real_ else as.numeric(pe[[std_col]]),
-        df = NA_real_,
-        level = NA_character_,
-        kind = "effect",
-        stringsAsFactors = FALSE
-      )
+      # Use estimate_row so CFA loadings share the path-estimate schema
+      # (CI / Bayes columns); raw data.frame rbind breaks otherwise.
+      rows <- lapply(seq_len(nrow(pe)), function(i) {
+        estimate_row(
+          lhs = as.character(pe$lhs[[i]]),
+          op = as.character(pe$op[[i]]),
+          rhs = as.character(pe$rhs[[i]]),
+          est = as.numeric(pe$est[[i]]),
+          se = as.numeric(pe$se[[i]]),
+          pvalue = as.numeric(pe$pvalue[[i]]),
+          est_std = if (is.na(std_col)) NA_real_ else as.numeric(pe[[std_col]][[i]]),
+          df = NA_real_,
+          level = NA_character_,
+          kind = "effect"
+        )
+      })
+      meas_est <- do.call(rbind, rows)
     }
   }
 
@@ -1304,7 +1477,7 @@ fit_structural_model <- function(state, data, include_edge_ids = NULL,
     # Keep measurement loadings on the canvas; structural coeffs from path stage
     est <- path_res$estimates
     if (nrow(attached$measurement_estimates)) {
-      est <- rbind(attached$measurement_estimates, est)
+      est <- bind_estimates(attached$measurement_estimates, est)
     }
     path_res$estimates <- est
     score_note <- if (identical(attached$latent_score_method, "joint")) {
@@ -2009,18 +2182,46 @@ fit_one_path_equation <- function(yname, y_kind, rhs_terms, local_dat,
     fml <- stats::as.formula(paste(yname, "~", rhs))
   }
   if (identical(backend, "brms")) {
-    return(fit_one_brms_equation(
+    prep <- brms_prepare_path_input(
+      data = local_dat,
       yname = yname,
+      rhs_terms = rhs_terms,
+      slope_terms = slope_terms,
+      cluster = cluster,
+      term_meta = term_meta
+    )
+    rhs <- if (!length(prep$rhs_terms)) "1" else paste(prep$rhs_terms, collapse = " + ")
+    re <- NULL
+    if (!is.null(prep$cluster)) {
+      prep$data[[prep$cluster]] <- as.factor(prep$data[[prep$cluster]])
+      re <- rm_re_term(prep$cluster, prep$slope_terms)
+      fml <- stats::as.formula(paste(prep$yname, "~", rhs, "+", re))
+    } else {
+      fml <- stats::as.formula(paste(prep$yname, "~", rhs))
+    }
+    out <- fit_one_brms_equation(
+      yname = prep$yname,
       y_kind = y_kind,
       formula = fml,
-      data = local_dat,
+      data = prep$data,
       rhs = rhs,
       re = re,
       brms_args = brms_args,
       state = state,
       preds = preds,
-      term_meta = term_meta
-    ))
+      term_meta = prep$term_meta
+    )
+    out$fit <- brms_tag_name_maps(out$fit, prep$to_safe, prep$from_safe)
+    # Prefer SMT dummy names (Var__Level) in the printed syntax
+    syn <- out$syntax
+    orgs <- names(prep$to_safe)
+    orgs <- orgs[order(nchar(unname(prep$to_safe[orgs])), decreasing = TRUE)]
+    for (orig in orgs) {
+      safe <- unname(prep$to_safe[[orig]])
+      if (!identical(orig, safe)) syn <- gsub(safe, orig, syn, fixed = TRUE)
+    }
+    out$syntax <- syn
+    return(out)
   }
   if (!is.null(cluster)) {
     if (binary) {
@@ -2226,6 +2427,7 @@ append_path_job_estimates <- function(est_rows, job, fit) {
       rope_decision = bay$rope_decision,
       log_bf10 = bay$log_bf10,
       kl_prior_post = bay$kl_prior_post,
+      post_narrow = bay$post_narrow,
       term = tn
     )
   }
@@ -2235,8 +2437,9 @@ append_path_job_estimates <- function(est_rows, job, fit) {
 #' Equation-wise lm / glm / lmer / glmer path models (observed variables only)
 #'
 #' Bayesian backend: `brms_args$structure` may be `"independent"` (default) or
-#' `"joint"` (one multivariate gaussian model with residual correlations when
-#' feasible; otherwise falls back to independent equations).
+#' `"joint"` (one multivariate gaussian model; residual correlations when
+#' outcomes do not predict each other — mediation turns rescor off;
+#' otherwise falls back to independent equations).
 #'
 #' @param dv_ids Optional DV node ids (from the full graph). Ensures intercept-only
 #'   equations when a candidate omits all predictors for a DV.

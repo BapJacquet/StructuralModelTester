@@ -828,7 +828,179 @@ body.smt-resizing * {
   margin-bottom: 0;
 }
 
-.smt-resid-plot-wrap {
+.smt-cfa-inspector {
+  margin-top: 4px;
+}
+
+.smt-cfa-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--smt-text);
+  margin: 0 0 8px;
+}
+
+.smt-cfa-subtitle {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--smt-muted);
+  margin: 10px 0 4px;
+}
+
+.smt-cfa-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.smt-cfa-chip {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--smt-text);
+  background: #fff;
+  border: 1px solid var(--smt-border);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.smt-cfa-chip-ok {
+  color: #166534;
+  border-color: #86efac;
+  background: #f0fdf4;
+}
+
+.smt-cfa-chip-warn {
+  color: #9a3412;
+  border-color: #fdba74;
+  background: #fff7ed;
+}
+
+.smt-cfa-chip-fail {
+  color: #991b1b;
+  border-color: #fca5a5;
+  background: #fef2f2;
+}
+
+.smt-cfa-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 12px;
+  background: #fff;
+  border: 1px solid var(--smt-border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.smt-cfa-table th,
+.smt-cfa-table td {
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--smt-border);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.smt-cfa-table th {
+  font-weight: 600;
+  color: var(--smt-muted);
+  background: #f7f7f8;
+}
+
+.smt-cfa-table tr:last-child td {
+  border-bottom: none;
+}
+
+.smt-cfa-table th.smt-num,
+.smt-cfa-table td.smt-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.smt-cfa-pca-table {
+  margin-top: 6px;
+  table-layout: auto;
+}
+
+.smt-cfa-fitmeas {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--smt-text);
+  line-height: 1.4;
+}
+
+.smt-mcmc-health {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--smt-border);
+  border-left: 4px solid #9ca3af;
+  border-radius: 4px;
+  background: #f7f7f8;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--smt-text);
+}
+
+.smt-mcmc-health .smt-status-icon {
+  margin-top: 2px;
+}
+
+.smt-mcmc-health-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.smt-mcmc-health-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+
+.smt-mcmc-health-ok {
+  border-left-color: #16a34a;
+  background: #f0fdf4;
+  color: #166534;
+}
+
+.smt-mcmc-health-warn {
+  border-left-color: #ea580c;
+  background: #fff7ed;
+  color: #9a3412;
+}
+
+.smt-mcmc-health-bad {
+  border-left-color: var(--smt-danger);
+  background: #fdf2f2;
+  color: var(--smt-danger);
+}
+
+.smt-mcmc-dv-summary {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--smt-border);
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.smt-mcmc-dv-summary ul {
+  margin: 4px 0 0 1.1em;
+  padding: 0;
+}
+
+.smt-mcmc-dv-msg {
+  margin: 0;
+  font-weight: 600;
+}
+
+.smt-resid-plot-wrap,
+.smt-mcmc-plot-wrap {
   margin: 6px 0 4px;
   border: 1px solid var(--smt-border);
   border-radius: 4px;
@@ -836,7 +1008,12 @@ body.smt-resizing * {
   overflow: hidden;
 }
 
-.smt-resid-plot-wrap .shiny-plot-output {
+.smt-ppc-plot-wrap {
+  margin-top: 2px;
+}
+
+.smt-resid-plot-wrap .shiny-plot-output,
+.smt-mcmc-plot-wrap .shiny-plot-output {
   margin: 0;
 }
 
@@ -974,6 +1151,13 @@ body.smt-resizing * {
   border-top: 1px solid #ececee !important;
 }
 
+/* Weak Bayesian learning diagnostics in path-coef tables */
+.smt-results .smt-bayes-weak,
+.smt-report-module-body .smt-bayes-weak {
+  color: #c2410c;
+  font-weight: 600;
+}
+
 /* APA 7 booktabs analysis tables (results + report) */
 .smt-apa-caption {
   font-style: italic;
@@ -992,6 +1176,34 @@ table.smt-apa-table,
   border-bottom: 1.5px solid #222 !important;
   width: 100% !important;
   background: transparent !important;
+}
+
+/* DT scrollX splits header/body into two tables. Each got the full booktabs
+   frame, so midrule + header-table border-bottom (or body border-top) stacked
+   as a double line. Keep only the thin thead midrule above the values. */
+.smt-results .dataTables_scrollHead table.dataTable.smt-apa-table {
+  border-bottom: none !important;
+}
+.smt-results .dataTables_scrollBody,
+.smt-results .dataTables_scrollBody > table.dataTable.smt-apa-table {
+  border-top: none !important;
+}
+.smt-results .dataTables_scrollBody > table.dataTable.smt-apa-table > thead th {
+  border: none !important;
+  border-bottom: none !important;
+}
+
+/* Clickable path-coef headers → column help modal */
+.smt-apa-table-colhelp thead th .smt-col-help {
+  cursor: help;
+  border-bottom: 1px dotted rgba(0, 0, 0, 0.35);
+  padding-bottom: 1px;
+}
+.smt-apa-table-colhelp thead th .smt-col-help:hover,
+.smt-apa-table-colhelp thead th .smt-col-help:focus {
+  color: var(--smt-accent);
+  border-bottom-color: var(--smt-accent);
+  outline: none;
 }
 
 table.smt-apa-table thead th,
@@ -2081,9 +2293,17 @@ body.smt-resizing-v * {
   margin: 12px 0 6px 0;
 }
 
+.smt-report-section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .smt-report-section-head h4 {
   margin: 0;
-  flex: 1 1 auto;
+  flex: 0 1 auto;
 }
 
 .smt-report-pin {
@@ -2296,6 +2516,17 @@ body.smt-resizing-v * {
   outline: none;
 }
 
+.smt-help-details {
+  margin: 0 0 10px;
+}
+
+.smt-help-detail {
+  margin: 0 0 6px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--smt-text);
+}
+
 .smt-help-btn-glyph {
   display: block;
   transform: translateY(-0.5px);
@@ -2334,14 +2565,31 @@ body.smt-resizing-v * {
   margin: 0;
   color: var(--smt-muted);
   line-height: 1.45;
-  max-width: 52em;
+  /* Let lead use the modal width; avoid orphan-looking wraps from a short measure */
+  max-width: none;
 }
 
 .smt-help-options {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  /* Wider min track so prose does not wrap after every few words */
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
   gap: 12px;
   margin: 4px 0 8px;
+}
+
+/* One indicator (e.g. path-coef header help): full-width prose, not a card */
+.smt-help-options.smt-help-options-single {
+  display: block;
+  margin: 0 0 8px;
+}
+
+.smt-help-options-single .smt-help-option {
+  max-width: 42rem;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  min-height: 0;
 }
 
 .smt-help-option {
@@ -2353,6 +2601,7 @@ body.smt-resizing-v * {
   flex-direction: column;
   gap: 8px;
   min-height: 100%;
+  min-width: 0;
 }
 
 .smt-help-option-label {
@@ -2361,10 +2610,18 @@ body.smt-resizing-v * {
   color: var(--smt-text);
 }
 
+.smt-help-option-summary,
+.smt-help-detail,
+.smt-help-list li {
+  overflow-wrap: normal;
+  word-break: normal;
+  hyphens: manual;
+}
+
 .smt-help-option-summary {
   margin: 0;
   color: var(--smt-muted);
-  line-height: 1.4;
+  line-height: 1.45;
 }
 
 .smt-help-list-title {
@@ -2392,6 +2649,28 @@ body.smt-resizing-v * {
 
 .smt-help-list li + li {
   margin-top: 3px;
+}
+
+.smt-help-figure {
+  margin: 8px 0 10px;
+  padding: 6px;
+  border: 1px solid var(--smt-border);
+  border-radius: 4px;
+  background: #fff;
+}
+
+.smt-help-figure-img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 2px;
+}
+
+.smt-help-figure-caption {
+  margin: 6px 2px 0;
+  font-size: 11.5px;
+  color: var(--smt-muted);
+  line-height: 1.35;
 }
 
 .smt-help-note {

@@ -630,32 +630,41 @@ format_coef_with_re <- function(est_tex, u_sym = NULL) {
   sprintf("(%s + %s)", est_tex, u_sym)
 }
 
-#' Random-effect \(u\) map + distribution TeX from a merMod fit (first group)
+#' Build RE distribution TeX + \(u\) map from SDs / correlations
 #'
-#' @return list(group, u_map, dist_tex, n_terms) or NULL.
-#'   `u_map` is named by lme4 RE coef names → `u_{0j}`, `u_{1j}`, …
+#' Shared by lmer (`VarCorr`) and brms (posterior means of `sd_` / `cor_`).
 #' @keywords internal
-mer_re_equation_info <- function(fit, digits = 2) {
-  if (is.null(fit) || !inherits(fit, "merMod")) return(NULL)
-  vc <- tryCatch(lme4::VarCorr(fit), error = function(e) NULL)
-  if (is.null(vc) || !length(vc)) return(NULL)
-  grp <- names(vc)[[1]]
-  mat <- vc[[1]]
-  sds <- attr(mat, "stddev")
-  if (is.null(sds) || !length(sds)) return(NULL)
-  cors <- attr(mat, "correlation")
+re_equation_info_from_vc <- function(grp, sds, cors = NULL, singular = FALSE,
+                                     digits = 2, alias_map = NULL) {
   nms <- names(sds)
-  if (is.null(nms)) nms <- paste0("RE", seq_along(sds))
+  sds <- as.numeric(sds)
+  if (is.null(nms) || length(nms) != length(sds)) {
+    nms <- paste0("RE", seq_along(sds))
+  }
+  if (!length(sds) || !all(is.finite(sds))) return(NULL)
+  nms[nms == "Intercept"] <- "(Intercept)"
+  names(sds) <- nms
 
   u_syms <- vapply(seq_along(sds), function(i) {
     sprintf("u_{%dj}", i - 1L)
   }, character(1))
   u_map <- stats::setNames(u_syms, nms)
-
-  singular <- isTRUE(tryCatch(
-    lme4::isSingular(fit, tol = 1e-4),
-    error = function(e) FALSE
-  ))
+  # Aliases so fixed-effect names (e.g. Condition__Treat) match RE keys
+  alias_map <- alias_map %||% character()
+  if (length(alias_map)) {
+    for (orig in names(alias_map)) {
+      safe <- unname(alias_map[[orig]])
+      if (safe %in% names(u_map) && !orig %in% names(u_map)) {
+        u_map[[orig]] <- u_map[[safe]]
+      }
+      if (orig %in% names(u_map) && !safe %in% names(u_map)) {
+        u_map[[safe]] <- u_map[[orig]]
+      }
+    }
+  }
+  if ("(Intercept)" %in% names(u_map) && !"Intercept" %in% names(u_map)) {
+    u_map[["Intercept"]] <- u_map[["(Intercept)"]]
+  }
 
   sd_txt <- formatC(as.numeric(sds), digits = digits, format = "f")
   if (length(sds) == 1L) {
@@ -672,12 +681,21 @@ mer_re_equation_info <- function(fit, digits = 2) {
     )
     sd_vec <- paste(sd_txt, collapse = ",\\,")
     cor_bits <- character()
-    if (is.matrix(cors) && nrow(cors) >= 2L) {
+    if (is.matrix(cors) && nrow(cors) >= 2L && ncol(cors) >= 2L) {
+      cn <- colnames(cors)
+      rn <- rownames(cors)
+      if (!is.null(cn)) cn[cn == "Intercept"] <- "(Intercept)"
+      if (!is.null(rn)) rn[rn == "Intercept"] <- "(Intercept)"
+      colnames(cors) <- cn
+      rownames(cors) <- rn
+      # Align to sd name order when possible
+      if (all(nms %in% rownames(cors)) && all(nms %in% colnames(cors))) {
+        cors <- cors[nms, nms, drop = FALSE]
+      }
       for (i in seq_len(nrow(cors) - 1L)) {
         for (j in (i + 1L):ncol(cors)) {
           rij <- cors[i, j]
           if (!is.finite(rij)) next
-          # |ρ|≈1 or singular fit → color as boundary (not a trustworthy estimate)
           boundary <- isTRUE(singular) || abs(rij) >= 1 - 1e-3
           rho_txt <- sprintf(
             "\\rho_{%d%d}=%s",
@@ -685,7 +703,6 @@ mer_re_equation_info <- function(fit, digits = 2) {
             formatC(rij, digits = digits, format = "f")
           )
           if (boundary) {
-            # Match --smt-danger; MathJax \\color keeps the value readable without a text tag
             rho_txt <- sprintf("\\color{#b33b3b}{%s}", rho_txt)
           }
           cor_bits <- c(cor_bits, rho_txt)
@@ -712,7 +729,104 @@ mer_re_equation_info <- function(fit, digits = 2) {
     u_map = u_map,
     dist_tex = dist_tex,
     n_terms = length(sds),
-    singular = singular
+    singular = isTRUE(singular)
+  )
+}
+
+#' Random-effect \(u\) map + distribution TeX from a merMod fit (first group)
+#'
+#' @return list(group, u_map, dist_tex, n_terms) or NULL.
+#'   `u_map` is named by lme4 RE coef names → `u_{0j}`, `u_{1j}`, …
+#' @keywords internal
+mer_re_equation_info <- function(fit, digits = 2) {
+  if (is.null(fit) || !inherits(fit, "merMod")) return(NULL)
+  vc <- tryCatch(lme4::VarCorr(fit), error = function(e) NULL)
+  if (is.null(vc) || !length(vc)) return(NULL)
+  grp <- names(vc)[[1]]
+  mat <- vc[[1]]
+  sds <- attr(mat, "stddev")
+  if (is.null(sds) || !length(sds)) return(NULL)
+  cors <- attr(mat, "correlation")
+  singular <- isTRUE(tryCatch(
+    lme4::isSingular(fit, tol = 1e-4),
+    error = function(e) FALSE
+  ))
+  re_equation_info_from_vc(
+    grp = grp, sds = sds, cors = cors, singular = singular, digits = digits
+  )
+}
+
+#' Random-effects formula fragment from a brmsfit (for equation tags)
+#' @keywords internal
+brms_re_tag <- function(fit, fallback = "(1|cluster)") {
+  if (!inherits(fit, "brmsfit")) return(fallback)
+  fml <- tryCatch({
+    fr <- fit$formula$formula
+    if (is.null(fr)) fr <- stats::formula(fit)
+    paste(deparse(fr), collapse = " ")
+  }, error = function(e) "")
+  if (!nzchar(fml)) return(fallback)
+  m <- gregexpr("\\([^()]*\\|[^()]*\\)", fml, perl = TRUE)
+  parts <- regmatches(fml, m)[[1]]
+  if (!length(parts)) return(fallback)
+  parts <- gsub("\\s*\\|\\s*", "|", gsub("\\s+", " ", parts))
+  # Prefer SMT dummy names in the tag when we rewrote for brms
+  to_safe <- fit$smt_brms_to_safe
+  if (length(to_safe)) {
+    orgs <- names(to_safe)
+    orgs <- orgs[order(nchar(unname(to_safe[orgs])), decreasing = TRUE)]
+    for (orig in orgs) {
+      safe <- unname(to_safe[[orig]])
+      if (!identical(orig, safe)) {
+        parts <- gsub(safe, orig, parts, fixed = TRUE)
+      }
+    }
+  }
+  paste(parts, collapse = " + ")
+}
+
+#' Random-effect \(u\) map + distribution TeX from a brmsfit (first group)
+#'
+#' Uses posterior means of group-level SDs / correlations from [brms::VarCorr()].
+#' @keywords internal
+brms_re_equation_info <- function(fit, digits = 2) {
+  if (is.null(fit) || !inherits(fit, "brmsfit")) return(NULL)
+  if (!requireNamespace("brms", quietly = TRUE)) return(NULL)
+  vc <- tryCatch(brms::VarCorr(fit), error = function(e) NULL)
+  if (is.null(vc) || !length(vc)) return(NULL)
+  grps <- setdiff(names(vc), "residual__")
+  if (!length(grps)) return(NULL)
+  grp <- grps[[1]]
+  block <- vc[[grp]]
+  sd_tab <- block$sd
+  if (is.null(sd_tab) || !nrow(sd_tab)) return(NULL)
+  sds <- stats::setNames(
+    as.numeric(sd_tab[, "Estimate"]),
+    rownames(sd_tab)
+  )
+  cors <- NULL
+  cor_arr <- block$cor
+  if (!is.null(cor_arr) && is.array(cor_arr) && length(dim(cor_arr)) == 3L) {
+    # [term, summary, term] — pull Estimate slice
+    sum_names <- dimnames(cor_arr)[[2]]
+    est_i <- match("Estimate", sum_names)
+    if (is.finite(est_i)) {
+      cors <- cor_arr[, est_i, , drop = TRUE]
+      if (is.null(dim(cors))) {
+        cors <- matrix(cors, nrow = dim(cor_arr)[[1]], ncol = dim(cor_arr)[[3]])
+        dimnames(cors) <- list(dimnames(cor_arr)[[1]], dimnames(cor_arr)[[3]])
+      }
+    }
+  }
+  # Near-zero slope SD ≈ singular / unidentified boundary for display
+  singular <- any(is.finite(sds) & sds < 1e-3)
+  re_equation_info_from_vc(
+    grp = grp,
+    sds = sds,
+    cors = cors,
+    singular = singular,
+    digits = digits,
+    alias_map = fit$smt_brms_to_safe
   )
 }
 
@@ -949,16 +1063,63 @@ smt_eq_outcome_html <- function(wrap, eta) {
   lines
 }
 
-#' Attach merMod RE fragments onto an equation wrapper list
+#' Attach random-effect fragments onto an equation wrapper list
+#'
+#' Works for merMod (lme4) and brmsfit (posterior mean SDs / correlations).
 #' @keywords internal
 equation_wrapper_add_re <- function(wrap, fit) {
-  info <- mer_re_equation_info(fit)
+  info <- if (inherits(fit, "brmsfit")) {
+    brms_re_equation_info(fit)
+  } else {
+    mer_re_equation_info(fit)
+  }
   if (is.null(info)) return(wrap)
   wrap$re_u_map <- info$u_map
   wrap$re_dist <- info$dist_tex
   wrap$re_group <- info$group
   wrap$re_terms <- NULL
   wrap
+}
+
+#' Family / link for a (possibly multivariate) brmsfit view
+#'
+#' Joint SMT views set `smt_response`; multivariate `fit$family` is then a list
+#' of `brmsfamily` objects. Univariate fits keep a single `brmsfamily`.
+#' @keywords internal
+brms_view_family <- function(fit) {
+  fam_obj <- fit$family
+  resp <- as.character(fit$smt_response %||% "")[[1]]
+  if (is.list(fam_obj) && !inherits(fam_obj, "brmsfamily")) {
+    pick <- NULL
+    if (!is.na(resp) && nzchar(resp) && !is.null(fam_obj[[resp]])) {
+      pick <- fam_obj[[resp]]
+    } else if (length(fam_obj)) {
+      pick <- fam_obj[[1L]]
+    }
+    fam_obj <- pick
+  }
+  fam <- tryCatch(as.character(fam_obj$family %||% "gaussian"), error = function(e) "gaussian")
+  link <- tryCatch(as.character(fam_obj$link %||% "identity"), error = function(e) "identity")
+  if (!length(fam) || is.na(fam[[1]]) || !nzchar(fam[[1]])) fam <- "gaussian"
+  if (!length(link) || is.na(link[[1]]) || !nzchar(link[[1]])) link <- "identity"
+  list(family = fam[[1]], link = link[[1]])
+}
+
+#' Residual sigma (posterior mean) for a brms equation view
+#' @keywords internal
+brms_view_sigma <- function(fit) {
+  resp <- as.character(fit$smt_response %||% "")[[1]]
+  vars <- character()
+  if (!is.na(resp) && nzchar(resp)) vars <- c(vars, paste0("sigma_", resp))
+  vars <- c(vars, "sigma")
+  for (v in vars) {
+    s <- tryCatch({
+      sm <- brms::posterior_summary(fit, variable = v)
+      as.numeric(sm[1L, "Estimate"])
+    }, error = function(e) NA_real_)
+    if (length(s) == 1L && is.finite(s) && s >= 0) return(s)
+  }
+  NA_real_
 }
 
 #' Link / expectation / generative wrapper for an outcome equation (LaTeX)
@@ -1013,40 +1174,62 @@ equation_link_wrapper <- function(fit, yname) {
     return(equation_wrapper_add_re(wrap, fit))
   }
   if (inherits(fit, "brmsfit")) {
-    fam <- tryCatch(as.character(fit$family$family), error = function(e) "gaussian")
-    link <- tryCatch(as.character(fit$family$link), error = function(e) "identity")
-    sig <- if (fam %in% c("bernoulli", "binomial")) {
+    fl <- brms_view_family(fit)
+    fam <- fl$family
+    link <- fl$link
+    joint <- identical(as.character(fit$smt_structure %||% "")[[1]], "joint")
+    prefix <- if (joint) "brms · joint · " else "brms · "
+    re <- brms_re_tag(fit, fallback = "")
+    if (!nzchar(re)) {
+      info0 <- brms_re_equation_info(fit, digits = 2)
+      if (!is.null(info0)) re <- paste0("(1|", info0$group, ")")
+    }
+    has_re <- nzchar(re)
+    re_suffix <- if (has_re) paste0(" · ", re) else ""
+    sig <- if (identical(fam, "bernoulli") || identical(fam, "binomial")) {
       NA_real_
     } else {
-      tryCatch({
-        s <- brms::posterior_summary(fit, variable = "sigma")
-        as.numeric(s[, "Estimate"])
-      }, error = function(e) NA_real_)
+      brms_view_sigma(fit)
     }
-    if (fam %in% c("bernoulli", "binomial") && identical(link, "logit")) {
-      return(list(
-        tag = "brms · bernoulli · logit",
+    note <- paste(
+      "Posterior mean \\(\\pm\\) posterior SD. Slope priors are the Expected coefficients.",
+      if (has_re) {
+        "Group-level SDs / correlations are posterior means; \\(j\\) indexes the clustering factor."
+      } else {
+        NULL
+      }
+    )
+    if ((identical(fam, "bernoulli") || identical(fam, "binomial")) &&
+          identical(link, "logit")) {
+      wrap <- list(
+        tag = paste0(prefix, "bernoulli · logit", re_suffix),
         lhs = sprintf("\\mathrm{P}(%s = 1)", y_tex),
         wrap_left = "\\mathrm{logit}^{-1}(",
         wrap_right = ")",
-        note = "Posterior mean \\(\\pm\\) posterior SD. Slope priors are the Expected coefficients.",
+        note = note,
         generative = FALSE,
-        sigma = NA_real_
-      ))
+        sigma = NA_real_,
+        re_terms = NULL,
+        re_dist = NULL
+      )
+      return(equation_wrapper_add_re(wrap, fit))
     }
-    return(list(
-      tag = if (fam %in% c("bernoulli", "binomial")) {
-        sprintf("brms · %s · %s", fam, link)
+    wrap <- list(
+      tag = if (identical(fam, "bernoulli") || identical(fam, "binomial")) {
+        paste0(prefix, fam, " · ", link, re_suffix)
       } else {
-        "brms · gaussian"
+        paste0(prefix, "gaussian", re_suffix)
       },
       lhs = y_tex,
       wrap_left = "",
       wrap_right = "",
-      note = "Posterior mean \\(\\pm\\) posterior SD. Slope priors are the Expected coefficients.",
+      note = note,
       generative = identical(link, "identity"),
-      sigma = sig
-    ))
+      sigma = if (length(sig) == 1L) sig else NA_real_,
+      re_terms = NULL,
+      re_dist = NULL
+    )
+    return(equation_wrapper_add_re(wrap, fit))
   }
   if (inherits(fit, "glm")) {
     fam <- tryCatch(stats::family(fit), error = function(e) NULL)
@@ -1140,6 +1323,606 @@ display_name_from_lavaan <- function(state, lavaan_nm, abbrev_map = NULL) {
     }
   }
   abbreviate_lhs_display(lab, abbrev_map)
+}
+
+#' Per-latent CFA / measurement summary from a two-step fit result
+#'
+#' @return `NULL` when no measurement results are available for `latent_id`,
+#'   otherwise a list with loadings, alpha, uni, weights, score_method, and
+#'   optional joint CFA fit measures.
+#' @keywords internal
+latent_measurement_summary <- function(result, state, latent_id) {
+  if (is.null(result) || is.null(state) || is.null(latent_id)) return(NULL)
+  if (!isTRUE(result$two_step) && is.null(result$measurement_fit) &&
+        is.null(result$measurement_estimates)) {
+    return(NULL)
+  }
+  latent_id <- as.character(latent_id)[[1]]
+  if (!nzchar(latent_id) || !is_latent_node(state, latent_id)) return(NULL)
+  lat_nm <- tryCatch(
+    lavaan_var_name(state, latent_id),
+    error = function(e) NA_character_
+  )
+  if (is.na(lat_nm) || !nzchar(lat_nm)) return(NULL)
+
+  loadings <- NULL
+  est <- result$estimates
+  if (!is.null(est) && nrow(est) && all(c("op", "lhs", "rhs") %in% names(est))) {
+    hit <- est$op == "=~" & as.character(est$lhs) == lat_nm
+    if (any(hit)) {
+      loadings <- est[hit, , drop = FALSE]
+      loadings <- loadings[order(as.character(loadings$rhs)), , drop = FALSE]
+    }
+  }
+  if (is.null(loadings) || !nrow(loadings)) {
+    mest <- result$measurement_estimates
+    if (!is.null(mest) && nrow(mest) && all(c("op", "lhs") %in% names(mest))) {
+      hit <- mest$op == "=~" & as.character(mest$lhs) == lat_nm
+      if (any(hit)) {
+        loadings <- mest[hit, , drop = FALSE]
+        loadings <- loadings[order(as.character(loadings$rhs)), , drop = FALSE]
+      }
+    }
+  }
+
+  alpha <- NA_real_
+  cronbach <- result$measurement_cronbach_alpha
+  if (!is.null(cronbach) && length(cronbach)) {
+    if (lat_nm %in% names(cronbach)) {
+      alpha <- as.numeric(cronbach[[lat_nm]])
+    } else if (latent_id %in% names(cronbach)) {
+      alpha <- as.numeric(cronbach[[latent_id]])
+    }
+  }
+
+  uni <- NULL
+  uni_map <- result$measurement_unidimensionality
+  if (is.list(uni_map) && length(uni_map)) {
+    if (latent_id %in% names(uni_map)) {
+      uni <- uni_map[[latent_id]]
+    } else {
+      for (uid in names(uni_map)) {
+        slot <- uni_map[[uid]]
+        if (!is.list(slot)) next
+        lv_nm <- as.character(slot$lavaan_name %||% "")
+        if (identical(lv_nm, lat_nm) || identical(uid, lat_nm)) {
+          uni <- slot
+          break
+        }
+      }
+    }
+  }
+  if (is.null(uni) && nrow(state$nodes)) {
+    idx <- match(latent_id, state$nodes$id)
+    if (!is.na(idx) && "uni_status" %in% names(state$nodes)) {
+      ust <- as.character(state$nodes$uni_status[[idx]] %||% NA_character_)
+      if (!is.na(ust) && nzchar(ust)) {
+        uni <- list(
+          status = ust,
+          label = as.character(state$nodes$uni_label[[idx]] %||% ""),
+          ratio = suppressWarnings(as.numeric(state$nodes$uni_ratio[[idx]])),
+          pct1 = suppressWarnings(as.numeric(state$nodes$uni_pct1[[idx]]))
+        )
+      }
+    }
+  }
+
+  weights <- NULL
+  w_list <- result$measurement_score_weights
+  if (is.null(w_list) || !length(w_list)) {
+    fits <- result$measurement_score_fits
+    if (is.list(fits) && length(fits)) {
+      w_list <- list()
+      for (nm in names(fits)) {
+        ww <- cfa_regression_score_weights(fits[[nm]])
+        if (!is.null(ww) && length(ww)) {
+          w_list[[nm]] <- if (nm %in% names(ww)) ww[[nm]] else ww[[1]]
+        }
+      }
+    }
+  }
+  if (!is.null(w_list) && length(w_list)) {
+    if (lat_nm %in% names(w_list)) {
+      weights <- w_list[[lat_nm]]
+    } else if (latent_id %in% names(w_list)) {
+      weights <- w_list[[latent_id]]
+    }
+  }
+
+  fit_meas <- NULL
+  mfit <- result$measurement_fit
+  if (inherits(mfit, "lavaan")) {
+    want <- c("chisq", "df", "pvalue", "cfi", "tli", "rmsea", "srmr")
+    fm <- tryCatch(lavaan::fitMeasures(mfit, want), error = function(e) NULL)
+    if (!is.null(fm)) {
+      fit_meas <- data.frame(
+        measure = names(fm),
+        value = as.numeric(fm),
+        stringsAsFactors = FALSE
+      )
+      fit_meas <- fit_meas[is.finite(fit_meas$value), , drop = FALSE]
+    }
+  }
+
+  score_method <- normalize_latent_score_method(
+    result$latent_score_method %||% "own",
+    state
+  )
+
+  if (is.null(loadings) && !is.finite(alpha) && is.null(uni) && is.null(weights)) {
+    return(NULL)
+  }
+  list(
+    latent_id = latent_id,
+    lavaan_name = lat_nm,
+    display = node_display_name(state, latent_id),
+    loadings = loadings,
+    alpha = alpha,
+    uni = uni,
+    weights = weights,
+    score_method = score_method,
+    fit_measures = fit_meas
+  )
+}
+
+#' Compact HTML table of CFA loadings for one latent
+#' @keywords internal
+format_latent_loadings_html <- function(loadings, state = NULL) {
+  if (is.null(loadings) || !nrow(loadings)) return(NULL)
+  rows <- lapply(seq_len(nrow(loadings)), function(i) {
+    rhs <- as.character(loadings$rhs[[i]])
+    ind <- if (!is.null(state)) {
+      tryCatch(display_name_from_lavaan(state, rhs), error = function(e) rhs)
+    } else {
+      rhs
+    }
+    est <- suppressWarnings(as.numeric(loadings$est[[i]]))
+    se <- suppressWarnings(as.numeric(loadings$se[[i]]))
+    pv <- suppressWarnings(as.numeric(loadings$pvalue[[i]]))
+    std <- if ("est_std" %in% names(loadings)) {
+      suppressWarnings(as.numeric(loadings$est_std[[i]]))
+    } else {
+      NA_real_
+    }
+    sprintf(
+      paste0(
+        "<tr>",
+        "<td>%s</td>",
+        "<td class=\"smt-num\">%s</td>",
+        "<td class=\"smt-num\">%s</td>",
+        "<td class=\"smt-num\">%s</td>",
+        "<td class=\"smt-num\">%s</td>",
+        "</tr>"
+      ),
+      htmltools::htmlEscape(ind),
+      if (is.finite(est)) formatC(est, digits = 3, format = "f") else "—",
+      if (is.finite(se)) formatC(se, digits = 3, format = "f") else "—",
+      if (is.finite(std)) formatC(std, digits = 3, format = "f") else "—",
+      if (is.finite(pv)) format_pvalue(pv, digits = 3) else "—"
+    )
+  })
+  paste0(
+    "<table class=\"smt-cfa-table\">",
+    "<thead><tr>",
+    "<th>Indicator</th>",
+    "<th class=\"smt-num\">Loading</th>",
+    "<th class=\"smt-num\">SE</th>",
+    "<th class=\"smt-num\">Std</th>",
+    "<th class=\"smt-num\">p</th>",
+    "</tr></thead><tbody>",
+    paste(rows, collapse = ""),
+    "</tbody></table>"
+  )
+}
+
+#' Loadings table as a data frame for Report / export
+#' @keywords internal
+latent_loadings_df <- function(loadings, state = NULL) {
+  if (is.null(loadings) || !nrow(loadings)) {
+    return(data.frame(
+      Indicator = character(), Loading = numeric(), SE = numeric(),
+      Std = numeric(), p = character(), stringsAsFactors = FALSE
+    ))
+  }
+  data.frame(
+    Indicator = vapply(seq_len(nrow(loadings)), function(i) {
+      rhs <- as.character(loadings$rhs[[i]])
+      if (!is.null(state)) {
+        tryCatch(display_name_from_lavaan(state, rhs), error = function(e) rhs)
+      } else {
+        rhs
+      }
+    }, character(1)),
+    Loading = round(suppressWarnings(as.numeric(loadings$est)), 3),
+    SE = round(suppressWarnings(as.numeric(loadings$se)), 3),
+    Std = if ("est_std" %in% names(loadings)) {
+      round(suppressWarnings(as.numeric(loadings$est_std)), 3)
+    } else {
+      rep(NA_real_, nrow(loadings))
+    },
+    p = vapply(seq_len(nrow(loadings)), function(i) {
+      pv <- suppressWarnings(as.numeric(loadings$pvalue[[i]]))
+      if (is.finite(pv)) format_pvalue(pv, digits = 3) else "—"
+    }, character(1)),
+    stringsAsFactors = FALSE
+  )
+}
+
+#' PCA eigenvalue table as a data frame for Report / export
+#' @keywords internal
+latent_pca_eigen_df <- function(uni) {
+  empty <- data.frame(
+    Component = character(), Eigenvalue = numeric(),
+    PctVar = numeric(), stringsAsFactors = FALSE
+  )
+  if (!is.list(uni)) return(empty)
+  ev <- suppressWarnings(as.numeric(uni$eigenvalues))
+  ev <- ev[is.finite(ev)]
+  if (!length(ev)) {
+    lam1 <- suppressWarnings(as.numeric(uni$lambda1))
+    lam2 <- suppressWarnings(as.numeric(uni$lambda2))
+    ev <- c(lam1, lam2)
+    ev <- ev[is.finite(ev)]
+  }
+  if (!length(ev)) return(empty)
+  tot <- sum(ev)
+  data.frame(
+    Component = paste0("PC", seq_along(ev)),
+    Eigenvalue = round(ev, 3),
+    PctVar = if (is.finite(tot) && tot > 0) round(100 * ev / tot, 1) else rep(NA_real_, length(ev)),
+    stringsAsFactors = FALSE
+  )
+}
+
+#' PCA item×component loadings as a data frame for Report / export
+#'
+#' @param which `"unrotated"` (PC*) or `"rotated"` (varimax RC*).
+#' @keywords internal
+latent_pca_loadings_df <- function(uni, state = NULL,
+                                   which = c("unrotated", "rotated")) {
+  which <- match.arg(which)
+  empty <- data.frame(Item = character(), stringsAsFactors = FALSE)
+  if (!is.list(uni)) return(empty)
+  L <- if (identical(which, "rotated")) uni$loadings_rotated else uni$loadings
+  if (is.null(L) || !is.matrix(L) || !nrow(L) || !ncol(L)) return(empty)
+  items <- rownames(L)
+  if (is.null(items) || length(items) != nrow(L)) {
+    items <- paste0("item", seq_len(nrow(L)))
+  }
+  disp <- vapply(items, function(nm) {
+    if (!is.null(state)) {
+      tryCatch(display_name_from_lavaan(state, nm), error = function(e) nm)
+    } else {
+      nm
+    }
+  }, character(1))
+  out <- data.frame(Item = unname(disp), stringsAsFactors = FALSE)
+  prefix <- if (identical(which, "rotated")) "RC" else "PC"
+  for (j in seq_len(ncol(L))) {
+    pc <- colnames(L)[[j]]
+    if (is.null(pc) || !nzchar(pc)) pc <- paste0(prefix, j)
+    out[[pc]] <- round(as.numeric(L[, j]), 3)
+  }
+  out
+}
+
+#' Inspector / report block: CFA loadings, alpha, score, joint fit
+#' @keywords internal
+latent_cfa_block_ui <- function(result, state, latent_id) {
+  sm <- latent_measurement_summary(result, state, latent_id)
+  if (is.null(sm)) {
+    return(shiny::helpText(
+      "Run the analysis to see CFA loadings for this latent."
+    ))
+  }
+
+  chips <- list()
+  if (is.finite(sm$alpha)) {
+    chips[[length(chips) + 1L]] <- shiny::span(
+      class = "smt-cfa-chip",
+      sprintf("Cronbach \u03B1 = %.2f", sm$alpha)
+    )
+  }
+  score_tag <- if (identical(sm$score_method, "joint")) {
+    "score: joint Thomson"
+  } else {
+    "score: own indicators"
+  }
+  chips[[length(chips) + 1L]] <- shiny::span(class = "smt-cfa-chip", score_tag)
+
+  load_html <- format_latent_loadings_html(sm$loadings, state)
+  score_html <- NULL
+  if (!is.null(sm$weights) && length(sm$weights)) {
+    ww <- sm$weights
+    ww <- ww[is.finite(ww)]
+    if (length(ww)) {
+      lat_tex <- latex_var(sm$display)
+      parts <- character()
+      for (j in seq_along(ww)) {
+        ind_tex <- latex_var(
+          display_name_from_lavaan(state, names(ww)[[j]])
+        )
+        piece <- formatC(unname(ww[[j]]), digits = 2, format = "f")
+        parts <- c(parts, paste0(piece, " \\cdot ", ind_tex))
+      }
+      score_html <- shiny::HTML(paste0(
+        "<div class=\"smt-eq-tag\">factor score (", htmltools::htmlEscape(
+          if (identical(sm$score_method, "joint")) "joint Thomson" else "own indicators"
+        ), ")</div>",
+        smt_eq_math_line(sprintf(
+          "\\widehat{%s} = %s",
+          lat_tex,
+          join_eta_tex_parts(parts)
+        ))
+      ))
+    }
+  }
+
+  fit_bits <- NULL
+  if (!is.null(sm$fit_measures) && nrow(sm$fit_measures)) {
+    pick <- function(nm) {
+      hit <- match(nm, sm$fit_measures$measure)
+      if (is.na(hit)) return(NA_real_)
+      as.numeric(sm$fit_measures$value[[hit]])
+    }
+    bits <- character()
+    chisq <- pick("chisq"); df <- pick("df"); pv <- pick("pvalue")
+    if (is.finite(chisq) && is.finite(df)) {
+      bits <- c(bits, sprintf(
+        "\u03C7\u00B2(%s) = %s%s",
+        formatC(df, digits = 0, format = "f"),
+        formatC(chisq, digits = 2, format = "f"),
+        if (is.finite(pv)) paste0(", p = ", format_pvalue(pv, digits = 3)) else ""
+      ))
+    }
+    for (nm in c("cfi", "tli", "rmsea", "srmr")) {
+      v <- pick(nm)
+      if (is.finite(v)) {
+        bits <- c(bits, sprintf("%s = %s", toupper(nm), formatC(v, digits = 3, format = "f")))
+      }
+    }
+    if (length(bits)) {
+      fit_bits <- shiny::div(
+        class = "smt-cfa-fitmeas",
+        shiny::div(class = "smt-cfa-subtitle", "Joint CFA fit"),
+        shiny::div(paste(bits, collapse = " · "))
+      )
+    }
+  }
+
+  shiny::withMathJax(shiny::div(
+    class = "smt-cfa-inspector",
+    if (length(chips)) shiny::div(class = "smt-cfa-chips", chips),
+    if (!is.null(load_html)) {
+      shiny::tagList(
+        shiny::div(class = "smt-cfa-subtitle", "Loadings"),
+        shiny::HTML(load_html)
+      )
+    },
+    if (!is.null(score_html)) {
+      shiny::tagList(
+        shiny::div(class = "smt-cfa-subtitle", "Path-stage score"),
+        shiny::div(class = "smt-eq-block", score_html)
+      )
+    },
+    fit_bits,
+    shiny::helpText(
+      "Loadings come from the confirmatory CFA on this latent's indicators. ",
+      "Joint CFA fit indices describe the full measurement model."
+    )
+  ))
+}
+
+#' Inspector / report block: PCA unidimensionality for one latent
+#' @keywords internal
+latent_pca_block_ui <- function(result, state, latent_id) {
+  sm <- latent_measurement_summary(result, state, latent_id)
+  pca <- format_latent_pca_ui(sm$uni, state = state)
+  if (is.null(pca)) {
+    return(shiny::helpText(
+      "Run the analysis to see the PCA unidimensionality screen for this latent."
+    ))
+  }
+  shiny::div(class = "smt-cfa-inspector", pca)
+}
+
+#' @keywords internal
+#' @rdname latent_cfa_block_ui
+latent_cfa_inspector_ui <- function(result, state, latent_id) {
+  # Compatibility wrapper: both blocks stacked (tests / older callers)
+  shiny::tagList(
+    latent_cfa_block_ui(result, state, latent_id),
+    latent_pca_block_ui(result, state, latent_id)
+  )
+}
+
+#' HTML table of PCA item loadings (items × components)
+#' @keywords internal
+format_latent_pca_loadings_html <- function(uni, state = NULL,
+                                            which = c("unrotated", "rotated")) {
+  which <- match.arg(which)
+  tab <- latent_pca_loadings_df(uni, state = state, which = which)
+  if (!nrow(tab) || ncol(tab) < 2L) return(NULL)
+  pc_cols <- setdiff(names(tab), "Item")
+  head_cells <- paste0(
+    "<th>Item</th>",
+    paste(sprintf("<th class=\"smt-num\">%s</th>", htmltools::htmlEscape(pc_cols)), collapse = "")
+  )
+  rows <- lapply(seq_len(nrow(tab)), function(i) {
+    cells <- sprintf(
+      "<td>%s</td>",
+      htmltools::htmlEscape(as.character(tab$Item[[i]]))
+    )
+    for (pc in pc_cols) {
+      v <- suppressWarnings(as.numeric(tab[[pc]][[i]]))
+      cells <- paste0(
+        cells,
+        sprintf(
+          "<td class=\"smt-num\">%s</td>",
+          if (is.finite(v)) formatC(v, digits = 3, format = "f") else "—"
+        )
+      )
+    }
+    paste0("<tr>", cells, "</tr>")
+  })
+  paste0(
+    "<table class=\"smt-cfa-table smt-cfa-pca-table\">",
+    "<thead><tr>", head_cells, "</tr></thead><tbody>",
+    paste(rows, collapse = ""),
+    "</tbody></table>"
+  )
+}
+
+#' Inspector block: PCA unidimensionality screen for one latent
+#' @keywords internal
+format_latent_pca_ui <- function(uni, state = NULL) {
+  if (!is.list(uni)) return(NULL)
+  ust <- as.character(uni$status %||% "")
+  if (!nzchar(ust) || is.na(ust)) return(NULL)
+
+  ulab <- as.character(uni$label %||% ust)
+  ratio <- suppressWarnings(as.numeric(uni$ratio))
+  pct1 <- suppressWarnings(as.numeric(uni$pct1))
+  lam1 <- suppressWarnings(as.numeric(uni$lambda1))
+  lam2 <- suppressWarnings(as.numeric(uni$lambda2))
+  if (!is.finite(lam1) && is.finite(ratio) && is.finite(lam2)) {
+    lam1 <- ratio * lam2
+  }
+  if (!is.finite(lam2) && is.finite(ratio) && is.finite(lam1) && ratio > 0) {
+    lam2 <- lam1 / ratio
+  }
+  n_items <- suppressWarnings(as.integer(uni$n_items))
+  n_obs <- suppressWarnings(as.integer(uni$n))
+  ev <- suppressWarnings(as.numeric(uni$eigenvalues))
+  ev <- ev[is.finite(ev)]
+  if (!length(ev)) {
+    ev <- c(lam1, lam2)
+    ev <- ev[is.finite(ev)]
+  }
+
+  chip_class <- paste(
+    "smt-cfa-chip",
+    if (identical(ust, "ok")) "smt-cfa-chip-ok"
+    else if (identical(ust, "warn")) "smt-cfa-chip-warn"
+    else if (identical(ust, "fail")) "smt-cfa-chip-fail"
+    else NULL
+  )
+  status_chip <- shiny::span(
+    class = chip_class,
+    if (nzchar(ulab)) ulab else ust
+  )
+
+  metric_bits <- character()
+  if (is.finite(lam1)) {
+    metric_bits <- c(metric_bits, sprintf(
+      "\u03BB\u2081 = %s", formatC(lam1, digits = 2, format = "f")
+    ))
+  }
+  if (is.finite(lam2)) {
+    metric_bits <- c(metric_bits, sprintf(
+      "\u03BB\u2082 = %s", formatC(lam2, digits = 2, format = "f")
+    ))
+  }
+  if (is.finite(ratio)) {
+    metric_bits <- c(metric_bits, sprintf(
+      "\u03BB\u2081/\u03BB\u2082 = %s", formatC(ratio, digits = 2, format = "f")
+    ))
+  }
+  if (is.finite(pct1)) {
+    metric_bits <- c(metric_bits, sprintf(
+      "PC1 = %s%%", formatC(100 * pct1, digits = 1, format = "f")
+    ))
+  }
+  if (is.finite(n_items) && n_items > 0L) {
+    metric_bits <- c(metric_bits, sprintf("%d items", n_items))
+  }
+  if (is.finite(n_obs) && n_obs > 0L) {
+    metric_bits <- c(metric_bits, sprintf("n = %d", n_obs))
+  }
+
+  ev_html <- NULL
+  if (length(ev)) {
+    tot <- sum(ev)
+    rows <- lapply(seq_along(ev), function(i) {
+      pct <- if (is.finite(tot) && tot > 0) 100 * ev[[i]] / tot else NA_real_
+      sprintf(
+        paste0(
+          "<tr>",
+          "<td>PC%s</td>",
+          "<td class=\"smt-num\">%s</td>",
+          "<td class=\"smt-num\">%s</td>",
+          "</tr>"
+        ),
+        i,
+        formatC(ev[[i]], digits = 3, format = "f"),
+        if (is.finite(pct)) paste0(formatC(pct, digits = 1, format = "f"), "%") else "—"
+      )
+    })
+    ev_html <- paste0(
+      "<table class=\"smt-cfa-table smt-cfa-pca-table\">",
+      "<thead><tr>",
+      "<th>Component</th>",
+      "<th class=\"smt-num\">Eigenvalue</th>",
+      "<th class=\"smt-num\">% var</th>",
+      "</tr></thead><tbody>",
+      paste(rows, collapse = ""),
+      "</tbody></table>"
+    )
+  }
+
+  load_html <- format_latent_pca_loadings_html(
+    uni, state = state, which = "unrotated"
+  )
+  rot_html <- format_latent_pca_loadings_html(
+    uni, state = state, which = "rotated"
+  )
+  n_rot <- suppressWarnings(as.integer(uni$n_rotated %||% ncol(uni$loadings_rotated %||% NULL)))
+
+  rule_txt <- switch(
+    ust,
+    ok = "Ratio \u2265 3: essentially unidimensional.",
+    warn = "Ratio 2\u20133: weak / borderline unidimensionality.",
+    fail = "Ratio < 2: possible second dimension among these indicators.",
+    "Correlation-matrix PCA on this latent's indicators."
+  )
+
+  shiny::tagList(
+    shiny::div(class = "smt-cfa-chips", status_chip),
+    if (length(metric_bits)) {
+      shiny::div(class = "smt-cfa-fitmeas", paste(metric_bits, collapse = " · "))
+    },
+    if (!is.null(ev_html)) {
+      shiny::tagList(
+        shiny::div(class = "smt-cfa-subtitle", "Eigenvalues"),
+        shiny::HTML(ev_html)
+      )
+    },
+    if (!is.null(load_html)) {
+      shiny::tagList(
+        shiny::div(class = "smt-cfa-subtitle", "Item loadings (unrotated)"),
+        shiny::HTML(load_html)
+      )
+    },
+    if (!is.null(rot_html)) {
+      shiny::tagList(
+        shiny::div(
+          class = "smt-cfa-subtitle",
+          if (is.finite(n_rot) && n_rot > 0L) {
+            sprintf("Item loadings (varimax, %d component%s)", n_rot, if (n_rot == 1L) "" else "s")
+          } else {
+            "Item loadings (varimax)"
+          }
+        ),
+        shiny::HTML(rot_html)
+      )
+    },
+    shiny::helpText(
+      rule_txt,
+      " Unrotated loadings are correlation-PCA (eigenvector \u00D7 \u221A\u03BB);",
+      " PC1 often loads all items. Varimax is shown only when at least two",
+      " components have \u03BB > 1 (Kaiser)."
+    )
+  )
 }
 
 #' HTML for path-stage factor-score equations (measurement)
@@ -1689,13 +2472,263 @@ format_best_vs_confirmatory_display <- function(bvc, state = NULL) {
 #' @keywords internal
 estimates_table_empty <- function(conf_adjust = "none") {
   out <- data.frame(
-    From = character(), Level = character(), To = character(),
+    Path = character(), Level = character(),
     Estimate = numeric(), SE = numeric(), p = character(),
     stringsAsFactors = FALSE
   )
   pcol <- conf_pvalue_column_name(conf_adjust)
   if (!identical(pcol, "p")) out[[pcol]] <- character()
   out
+}
+
+#' Arrow glyph for a path-coef Level (direct / via / total)
+#'
+#' Direct: ← ; indirect (`via …`): ↜ ; total: ⇐.
+#' @keywords internal
+path_arrow_glyph <- function(level = "") {
+  lv <- as.character(level %||% "")
+  if (startsWith(lv, "via ")) return("\u219c")
+  if (identical(lv, "total")) return("\u21d0")
+  "\u2190"
+}
+
+#' Display label for a directed path: `Y ← X` (via: ↜, total: ⇐)
+#' @keywords internal
+path_arrow_label <- function(to, from, level = "") {
+  to <- as.character(to %||% "")
+  from <- as.character(from %||% "")
+  level <- as.character(level %||% "")
+  n <- max(length(to), length(from), length(level), 1L)
+  to <- rep_len(to, n)
+  from <- rep_len(from, n)
+  level <- rep_len(level, n)
+  glyph <- vapply(level, path_arrow_glyph, character(1))
+  paste0(to, " ", glyph, " ", from)
+}
+
+#' Split a Path label (`Y ← X` / `Y ↜ X` / `Y ⇐ X`) into to / from
+#' @keywords internal
+path_arrow_split <- function(path) {
+  path <- as.character(path %||% "")
+  if (!length(path)) {
+    return(list(to = character(), from = character()))
+  }
+  # ASCII <- or unicode ← / ↜ / ⇐
+  parts <- strsplit(path, "\u2190|\u219c|\u21d0|<-", perl = TRUE)
+  to <- vapply(parts, function(p) trimws(p[[1]] %||% ""), character(1))
+  from <- vapply(parts, function(p) {
+    if (length(p) < 2L) return("")
+    trimws(paste(p[-1L], collapse = "\u2190"))
+  }, character(1))
+  list(to = to, from = from)
+}
+
+#' Put path-coef identity columns in display order: Path, Level, …
+#' @keywords internal
+estimates_table_order_cols <- function(tab) {
+  if (is.null(tab) || !ncol(tab)) return(tab)
+  prefer <- c("Path", "To", "From", "Level", "Estimate", "SE", "SD", "Σw", "p")
+  rest <- setdiff(names(tab), prefer)
+  tab[, c(intersect(prefer, names(tab)), rest), drop = FALSE]
+}
+
+#' Collapse To/From into a single Path column (`Y ← X` / via ↜ / total ⇐)
+#' @keywords internal
+estimates_table_collapse_path <- function(tab) {
+  if (is.null(tab) || !ncol(tab)) return(tab)
+  if ("Path" %in% names(tab) && !("To" %in% names(tab) && "From" %in% names(tab))) {
+    return(estimates_table_order_cols(tab))
+  }
+  if (!("To" %in% names(tab) && "From" %in% names(tab))) {
+    return(estimates_table_order_cols(tab))
+  }
+  level <- if ("Level" %in% names(tab)) tab$Level else ""
+  tab$Path <- path_arrow_label(tab$To, tab$From, level)
+  tab$To <- NULL
+  tab$From <- NULL
+  estimates_table_order_cols(tab)
+}
+
+#' Σw (sum of Akaike/BIC weights) for path-coef rows when search result present
+#'
+#' Blank for derived via/total rows. Direct slopes look up `result$edge_weights`
+#' by matching From/To to graph edges.
+#' @keywords internal
+estimates_table_weight_sum_col <- function(state, result, to_lab, from_lab, level) {
+  wsums <- result$edge_weights %||% NULL
+  if (is.null(wsums) || !length(wsums)) return(NULL)
+  if (is.null(result$comparison)) return(NULL)
+  n <- length(to_lab)
+  out <- rep(NA_real_, n)
+  for (i in seq_len(n)) {
+    lv <- as.character(level[[i]] %||% "")
+    if (nzchar(lv) && (startsWith(lv, "via ") || identical(lv, "total"))) next
+    from_id <- mediation_match_node_id(state, from_lab[[i]])
+    to_id <- mediation_match_node_id(state, to_lab[[i]])
+    if (is.na(from_id) || is.na(to_id) || is.null(state) || !nrow(state$edges)) next
+    hit <- which(state$edges$from == from_id & state$edges$to == to_id)
+    if (!length(hit)) next
+    # Prefer blank-level structural edge when several share endpoints
+    if ("level" %in% names(state$edges) && length(hit) > 1L) {
+      elv <- as.character(state$edges$level[hit])
+      blank <- which(is.na(elv) | !nzchar(elv))
+      if (length(blank)) hit <- hit[blank]
+    }
+    eid <- as.character(state$edges$id[[hit[[1]]]])
+    if (eid %in% names(wsums)) out[[i]] <- as.numeric(wsums[[eid]])
+  }
+  out
+}
+
+#' Format Σw column values for display
+#' @keywords internal
+format_weight_sum_col <- function(ws) {
+  vapply(ws, function(w) {
+    if (!is.finite(w)) return("")
+    sprintf("%.2f", w)
+  }, character(1))
+}
+
+#' Sort path-coef rows: To → From → Level (direct, factor, via, total)
+#' @keywords internal
+estimates_table_order_rows <- function(tab) {
+  if (is.null(tab) || !nrow(tab)) return(tab)
+  if ("To" %in% names(tab) && "From" %in% names(tab)) {
+    to <- as.character(tab$To %||% "")
+    from <- as.character(tab$From %||% "")
+  } else {
+    sp <- path_arrow_split(tab$Path)
+    to <- sp$to
+    from <- sp$from
+  }
+  lv <- as.character(tab$Level %||% "")
+  lv[is.na(lv)] <- ""
+  lv_rank <- ifelse(
+    !nzchar(lv), 0L,
+    ifelse(startsWith(lv, "via "), 2L,
+           ifelse(lv == "total", 3L, 1L))
+  )
+  tab[order(to, from, lv_rank, lv, method = "radix"), , drop = FALSE]
+}
+
+#' Display / lavaan LHS labels that identify one DV in coef tables
+#' @keywords internal
+dv_coef_to_labels <- function(state, dv_id) {
+  dv_id <- as.character(dv_id)[[1]]
+  lav <- tryCatch(lavaan_var_name(state, dv_id), error = function(e) dv_id)
+  disp <- tryCatch(node_display_name(state, dv_id), error = function(e) dv_id)
+  tr <- node_dv_transform(state, dv_id)
+  unique(c(
+    lav,
+    disp,
+    dv_id,
+    dv_transform_lhs(lav, tr),
+    dv_transform_lhs(disp, tr)
+  ))
+}
+
+#' Build the path-coefficient table for Results / Report (optional DV scope)
+#' @keywords internal
+estimates_table_for_report <- function(state, result, dv_id = NULL) {
+  est <- if (!is.null(result) && !isTRUE(result$model_averaged)) {
+    result$estimates
+  } else {
+    NULL
+  }
+  tab <- estimates_table(
+    state,
+    estimates = est,
+    conf_adjust = result$conf_adjust %||% "none",
+    result = result
+  )
+  dv_id <- as.character(dv_id %||% "")[[1]]
+  if (nzchar(dv_id)) {
+    tab <- filter_estimates_table_for_dv(tab, state, dv_id)
+  }
+  tab
+}
+
+#' Keep path-coefficient rows for one structural DV
+#' @keywords internal
+filter_estimates_table_for_dv <- function(tab, state, dv_id) {
+  if (is.null(tab) || !nrow(tab) || is.null(dv_id)) {
+    return(tab[0, , drop = FALSE])
+  }
+  labels <- dv_coef_to_labels(state, dv_id)
+  if ("To" %in% names(tab) && "From" %in% names(tab)) {
+    to <- as.character(tab$To %||% "")
+    from <- as.character(tab$From %||% "")
+  } else {
+    sp <- path_arrow_split(tab$Path)
+    to <- sp$to
+    from <- sp$from
+  }
+  level <- as.character(tab$Level %||% "")
+  is_to <- to %in% labels
+  for (lab in labels) {
+    if (!nzchar(lab)) next
+    is_to <- is_to | startsWith(to, paste0(lab, "["))
+  }
+  is_derived <- startsWith(level, "via ") | identical(level, "total")
+  keep <- is_to | (is_derived & (from %in% labels | is_to))
+  tab[keep, , drop = FALSE]
+}
+
+#' Syntax lines / blocks relevant to one structural DV
+#' @keywords internal
+filter_result_syntax_for_dv <- function(syntax, state, dv_id) {
+  syntax <- as.character(syntax %||% "")[[1]]
+  if (!nzchar(syntax) || is.null(dv_id)) return("")
+  labels <- dv_coef_to_labels(state, dv_id)
+  labels <- labels[nzchar(labels)]
+  if (!length(labels)) return("")
+
+  lines <- strsplit(syntax, "\n", fixed = TRUE)[[1]]
+  out <- character()
+  in_measurement <- FALSE
+  kept_eq <- FALSE
+  for (ln in lines) {
+    trim <- sub("^\\s+", "", ln)
+    if (grepl("^#\\s*measurement\\b", trim, ignore.case = TRUE)) {
+      in_measurement <- TRUE
+      next
+    }
+    if (grepl("^#\\s*path\\b", trim, ignore.case = TRUE)) {
+      in_measurement <- FALSE
+      out <- c(out, ln)
+      next
+    }
+    if (in_measurement) next
+    # Drop standalone measurement equations outside a marked block
+    if (grepl("^[A-Za-z][A-Za-z0-9._]*\\s*=~", trim)) next
+
+    is_header <- startsWith(trim, "#")
+    if (is_header) {
+      out <- c(out, ln)
+      next
+    }
+    if (!nzchar(trim)) {
+      out <- c(out, ln)
+      next
+    }
+
+    lhs <- NA_character_
+    if (grepl("^(brms|glmer|glm|lmer|lm)\\b", trim)) {
+      # lm/glm/...: LHS ~ ...  or  brms(...): LHS ~ ...
+      rhs_side <- sub("^[^:]+:\\s*", "", trim)
+      lhs <- sub("\\s*[~\\[].*$", "", rhs_side)
+    } else if (grepl("~", trim, fixed = TRUE) &&
+                 !grepl("^(prior|warning)\\b", trim, ignore.case = TRUE)) {
+      # joint brms formula line: LHS ~ ...
+      lhs <- sub("\\s*~.*$", "", trim)
+    }
+    if (!is.na(lhs) && nzchar(lhs) && lhs %in% labels) {
+      out <- c(out, ln)
+      kept_eq <- TRUE
+    }
+  }
+  if (!kept_eq) return("")
+  paste(out, collapse = "\n")
 }
 
 #' Pick raw vs stored p for display (`pvalue_raw` when finite)
@@ -1718,66 +2751,480 @@ estimate_rows_have_adj_p <- function(est) {
   is.finite(as.numeric(est$pvalue_raw))
 }
 
-#' Simple two-path mediation (indirect) effects a×b from fitted edges
-#'
-#' For every chain X → M → Y of included structural paths with finite a, b and
-#' SEs, reports the product with a first-order Sobel SE / p-value.
+#' Map an estimate lhs/rhs label back to a node id
 #' @keywords internal
-indirect_effects_table <- function(state, conf_adjust = "none") {
-  empty <- estimates_table_empty(conf_adjust)
-  if (is.null(state) || !nrow(state$edges)) return(empty)
+mediation_match_node_id <- function(state, lab) {
+  lab <- as.character(lab %||% "")[[1]]
+  if (!nzchar(lab) || is.null(state) || !nrow(state$nodes)) return(NA_character_)
+  # Strip split-outcome suffix Y[level]
+  core <- sub("\\[.*$", "", lab)
+  for (id in state$nodes$id) {
+    cands <- unique(c(
+      tryCatch(lavaan_var_name(state, id), error = function(e) id),
+      tryCatch(node_display_name(state, id), error = function(e) id),
+      id,
+      tryCatch(
+        dv_transform_lhs(lavaan_var_name(state, id), node_dv_transform(state, id)),
+        error = function(e) NA_character_
+      ),
+      tryCatch(
+        dv_transform_lhs(node_display_name(state, id), node_dv_transform(state, id)),
+        error = function(e) NA_character_
+      )
+    ))
+    cands <- cands[!is.na(cands) & nzchar(cands)]
+    if (lab %in% cands || core %in% cands) return(as.character(id))
+  }
+  NA_character_
+}
+
+#' Single-slope structural paths for mediation products
+#'
+#' Prefers `estimates` (same source as the main coef table) when provided so
+#' totals stay consistent with displayed directs under AIC/BIC / averaging.
+#' @return data.frame with from, to, from_lab, to_lab, estimate, se, edge_id
+#' @keywords internal
+mediation_slope_rows <- function(state, estimates = NULL) {
+  empty <- data.frame(
+    from = character(), to = character(),
+    from_lab = character(), to_lab = character(),
+    estimate = numeric(), se = numeric(),
+    edge_id = character(),
+    stringsAsFactors = FALSE
+  )
+  if (!is.null(estimates) && nrow(estimates)) {
+    pe <- estimates[estimates$op == "~", , drop = FALSE]
+    if (!nrow(pe)) return(empty)
+    if ("kind" %in% names(pe)) {
+      pe <- pe[is.na(pe$kind) | as.character(pe$kind) == "effect", , drop = FALSE]
+    }
+    if ("level" %in% names(pe)) {
+      lv <- ifelse(is.na(pe$level), "", as.character(pe$level))
+      drop_lv <- lv == "omnibus" | vapply(
+        lv,
+        function(x) nzchar(x) && isTRUE(tryCatch(is_poly_level(x), error = function(e) FALSE)),
+        logical(1)
+      )
+      pe <- pe[!drop_lv, , drop = FALSE]
+    }
+    pe <- pe[is.finite(pe$est) & is.finite(pe$se) & pe$se >= 0, , drop = FALSE]
+    if (!nrow(pe)) return(empty)
+    from_id <- vapply(pe$rhs, function(x) mediation_match_node_id(state, x), character(1))
+    to_id <- vapply(pe$lhs, function(x) mediation_match_node_id(state, x), character(1))
+    ok <- !is.na(from_id) & !is.na(to_id)
+    pe <- pe[ok, , drop = FALSE]
+    from_id <- from_id[ok]
+    to_id <- to_id[ok]
+    if (!nrow(pe)) return(empty)
+    edge_id <- character(nrow(pe))
+    if (!is.null(state) && nrow(state$edges)) {
+      for (i in seq_len(nrow(pe))) {
+        hit <- which(state$edges$from == from_id[[i]] & state$edges$to == to_id[[i]])
+        edge_id[[i]] <- if (length(hit)) as.character(state$edges$id[[hit[[1]]]]) else NA_character_
+      }
+    }
+    return(data.frame(
+      from = from_id, to = to_id,
+      from_lab = as.character(pe$rhs),
+      to_lab = as.character(pe$lhs),
+      estimate = as.numeric(pe$est),
+      se = as.numeric(pe$se),
+      edge_id = edge_id,
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  e <- mediation_path_edges(state)
+  if (!nrow(e)) return(empty)
+  data.frame(
+    from = as.character(e$from),
+    to = as.character(e$to),
+    from_lab = vapply(e$from, function(id) node_display_name(state, id), character(1)),
+    to_lab = vapply(e$to, function(id) node_display_name(state, id), character(1)),
+    estimate = as.numeric(e$estimate),
+    se = as.numeric(e$se),
+    edge_id = as.character(e$id),
+    stringsAsFactors = FALSE
+  )
+}
+
+#' Structural edges usable for simple mediation products (single slopes)
+#' @keywords internal
+mediation_path_edges <- function(state) {
+  if (is.null(state) || !nrow(state$edges)) {
+    return(state$edges[0, , drop = FALSE])
+  }
   edges <- ensure_edge_to_port(state)$edges
   if (!"level" %in% names(edges)) edges$level <- NA_character_
   if (!"status" %in% names(edges)) edges$status <- "pending"
-
   keep <- !edges$type %in% c("definitional", "measurement") &
     !vapply(edges$to, function(id) is_interaction_node(state, id), logical(1)) &
     !vapply(edges$from, function(id) is_interaction_node(state, id), logical(1)) &
     !is.na(edges$estimate) & is.finite(edges$estimate) &
     !is.na(edges$se) & is.finite(edges$se) & edges$se >= 0 &
     (is.na(edges$status) | edges$status != "excluded")
-  # Skip omnibus / multi-level categorical edges (a×b not a single product)
-  keep <- keep & (is.na(edges$level) | !nzchar(edges$level) |
-                    !identical(as.character(edges$level), "omnibus"))
-  e <- edges[keep, , drop = FALSE]
+  # Skip omnibus / poly / multi-level categorical (a×b not a single product)
+  lv <- ifelse(is.na(edges$level), "", as.character(edges$level))
+  drop_lv <- lv == "omnibus" | vapply(
+    lv,
+    function(x) nzchar(x) && isTRUE(tryCatch(is_poly_level(x), error = function(e) FALSE)),
+    logical(1)
+  )
+  edges[keep & !drop_lv, , drop = FALSE]
+}
+
+#' Moments of the product of two independent normals (prior for a×b)
+#' @keywords internal
+prior_product_moments <- function(m1, s1, m2, s2) {
+  m1 <- as.numeric(m1 %||% 0); s1 <- as.numeric(s1 %||% 1)
+  m2 <- as.numeric(m2 %||% 0); s2 <- as.numeric(s2 %||% 1)
+  if (!is.finite(m1)) m1 <- 0
+  if (!is.finite(m2)) m2 <- 0
+  if (!is.finite(s1) || s1 <= 0) s1 <- 1
+  if (!is.finite(s2) || s2 <= 0) s2 <- 1
+  list(
+    mean = m1 * m2,
+    sd = sqrt(max(0, m1^2 * s2^2 + m2^2 * s1^2 + s1^2 * s2^2))
+  )
+}
+
+#' Align posterior draw vectors to a common length (independent or joint MCMC)
+#' @keywords internal
+align_posterior_draws <- function(...) {
+  xs <- list(...)
+  ns <- vapply(xs, function(x) sum(is.finite(as.numeric(x))), integer(1))
+  if (!length(ns) || any(ns < 2L)) return(NULL)
+  n <- min(ns)
+  lapply(xs, function(x) {
+    x <- as.numeric(x)
+    x <- x[is.finite(x)]
+    x[seq_len(n)]
+  })
+}
+
+#' Format one classical mediation-derived row
+#' @keywords internal
+mediation_freq_row <- function(to, from, level, est, se, conf_adjust = "none",
+                               weight_sum = NA_real_) {
+  pv <- if (is.finite(se) && se > 0 && is.finite(est)) {
+    2 * stats::pnorm(-abs(est / se))
+  } else {
+    NA_real_
+  }
+  pcol <- conf_pvalue_column_name(conf_adjust)
+  row <- data.frame(
+    To = to, From = from, Level = level,
+    Estimate = round(est, 3),
+    SE = round(se, 3),
+    p = format_pvalue(pv, digits = 3),
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+  if (is.finite(weight_sum)) {
+    row[["Σw"]] <- format_weight_sum_col(weight_sum)
+  }
+  if (!identical(pcol, "p")) row[[pcol]] <- ""
+  row
+}
+
+#' Format one Bayesian mediation-derived row from a draw summary
+#' @keywords internal
+mediation_bayes_row <- function(to, from, level, sm, ci = 0.95) {
+  pct <- round(100 * as.numeric(ci %||% 0.95))
+  if (!is.finite(pct)) pct <- 95
+  hdi_nm <- sprintf("%d%% HDI", pct)
+  cri <- if (is.finite(sm$hdi_low) && is.finite(sm$hdi_high)) {
+    sprintf("[%.3f, %.3f]", sm$hdi_low, sm$hdi_high)
+  } else {
+    ""
+  }
+  fmt_bf <- function(b) {
+    if (is.infinite(b) && b > 0) return("Inf")
+    if (is.infinite(b) && b < 0) return("-Inf")
+    if (!is.finite(b)) return("")
+    sprintf("%+.2f", b)
+  }
+  d <- data.frame(
+    To = to, From = from, Level = level,
+    Estimate = round(as.numeric(sm$est), 3),
+    SD = round(as.numeric(sm$se), 3),
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+  d[[hdi_nm]] <- cri
+  d$pd <- if (is.finite(sm$pd)) sprintf("%.1f%%", 100 * sm$pd) else ""
+  d[["ROPE%"]] <- if (is.finite(sm$rope_pct)) {
+    sprintf("%.1f%%", 100 * sm$rope_pct)
+  } else {
+    ""
+  }
+  d$ROPE <- if (!is.na(sm$rope_decision) && nzchar(as.character(sm$rope_decision))) {
+    as.character(sm$rope_decision)
+  } else {
+    ""
+  }
+  d[["log BF10"]] <- fmt_bf(sm$log_bf10)
+  d[["KL"]] <- format_bayes_kl(sm$kl_prior_post)
+  d[["SD\u2193"]] <- format_bayes_sd_narrow(sm$post_narrow)
+  d
+}
+
+#' Simple mediation derived rows: via M (a×b) and total (direct + indirects)
+#'
+#' Classical: Sobel SE/p for a×b; total uses an independence approximation
+#' `sqrt(SE_direct² + Σ SE_ab²)`. Under AIC/BIC search, via rows carry joint Σw
+#' (models containing both constituent edges). With model averaging on, via and
+#' total use full model averages of the products (absent → 0).
+#' Bayesian: posterior of a×b and of c′ + Σ a×b from MCMC draws.
+#' @param result Optional fit result (needed for Bayesian draws / IC weights).
+#' @param bayes When TRUE, emit Bayesian columns; otherwise classical SE/p.
+#' @keywords internal
+mediation_effects_table <- function(state, conf_adjust = "none",
+                                    result = NULL, bayes = FALSE,
+                                    estimates = NULL) {
+  empty <- estimates_table_empty(conf_adjust)
+  # Prefer the same coefficient source as the main table (estimates when present)
+  if (is.null(estimates) && !is.null(result) && !isTRUE(result$model_averaged)) {
+    estimates <- result$estimates %||% result$best_estimates
+  }
+  e <- mediation_slope_rows(state, estimates = estimates)
   if (nrow(e) < 2L) return(empty)
 
-  pcol <- conf_pvalue_column_name(conf_adjust)
-  want_adj <- !identical(pcol, "p")
-  rows <- list()
+  chains <- list()
   for (i in seq_len(nrow(e))) {
     for (j in seq_len(nrow(e))) {
       if (i == j) next
       if (!identical(e$to[i], e$from[j])) next
       if (identical(e$from[i], e$to[j])) next
-      a <- as.numeric(e$estimate[i])
-      b <- as.numeric(e$estimate[j])
-      se_a <- as.numeric(e$se[i])
-      se_b <- as.numeric(e$se[j])
-      ab <- a * b
-      # First-order delta method (Sobel)
-      se_ab <- sqrt(b^2 * se_a^2 + a^2 * se_b^2)
-      pv <- if (is.finite(se_ab) && se_ab > 0) {
-        2 * stats::pnorm(-abs(ab / se_ab))
-      } else {
-        NA_real_
-      }
-      med <- e$to[i]
-      row <- data.frame(
-        From = node_display_name(state, e$from[i]),
-        Level = paste0("via ", node_display_name(state, med)),
-        To = node_display_name(state, e$to[j]),
-        Estimate = round(ab, 3),
-        SE = round(se_ab, 3),
-        p = format_pvalue(pv, digits = 3),
-        stringsAsFactors = FALSE
+      chains[[length(chains) + 1L]] <- list(
+        from = e$from[i], med = e$to[i], to = e$to[j],
+        from_lab = e$from_lab[i], med_lab = e$to_lab[i], to_lab = e$to_lab[j],
+        edge_a = e$edge_id[i], edge_b = e$edge_id[j],
+        a = as.numeric(e$estimate[i]),
+        b = as.numeric(e$estimate[j]),
+        se_a = as.numeric(e$se[i]),
+        se_b = as.numeric(e$se[j])
       )
-      if (want_adj) row[[pcol]] <- ""
-      rows[[length(rows) + 1L]] <- row
     }
   }
-  if (!length(rows)) return(empty)
+  if (!length(chains)) return(empty)
+
+  if (isTRUE(bayes)) {
+    return(mediation_effects_table_bayes(state, chains, e, result))
+  }
+
+  use_avg <- isTRUE(result$model_averaged) &&
+    !is.null(result$comparison) &&
+    !is.null(result$coef_by_model)
+  always_ids <- as.character(result$always %||% character())
+  has_ic <- !is.null(result) && !is.null(result$comparison) &&
+    !is.null(result$edge_weights)
+
+  rows <- list()
+  # Indirects
+  for (ch in chains) {
+    sw <- NA_real_
+    if (use_avg && !is.na(ch$edge_a) && !is.na(ch$edge_b) &&
+          nzchar(as.character(ch$edge_a)) && nzchar(as.character(ch$edge_b))) {
+      avg <- full_average_mediation_product(
+        result$comparison, result$coef_by_model,
+        ch$edge_a, ch$edge_b, always_ids = always_ids
+      )
+      ab <- avg$est
+      se_ab <- avg$se
+      sw <- avg$weight_sum
+    } else {
+      ab <- ch$a * ch$b
+      se_ab <- sqrt(ch$b^2 * ch$se_a^2 + ch$a^2 * ch$se_b^2)
+      if (has_ic && !is.na(ch$edge_a) && !is.na(ch$edge_b) &&
+            nzchar(as.character(ch$edge_a)) && nzchar(as.character(ch$edge_b))) {
+        sw <- joint_edge_weight_sum(
+          result$comparison, c(ch$edge_a, ch$edge_b), always_ids = always_ids
+        )
+      }
+    }
+    rows[[length(rows) + 1L]] <- mediation_freq_row(
+      to = ch$to_lab,
+      from = ch$from_lab,
+      level = paste0("via ", ch$med_lab),
+      est = ab, se = se_ab, conf_adjust = conf_adjust,
+      weight_sum = sw
+    )
+  }
+  # Totals per (X, Y) with at least one mediator
+  pairs <- unique(lapply(chains, function(ch) c(ch$from, ch$to)))
+  for (pr in pairs) {
+    x_id <- pr[[1]]; y_id <- pr[[2]]
+    chs <- Filter(function(ch) identical(ch$from, x_id) && identical(ch$to, y_id), chains)
+    direct <- e[e$from == x_id & e$to == y_id, , drop = FALSE]
+    edge_direct <- if (nrow(direct) && !is.na(direct$edge_id[[1]])) {
+      as.character(direct$edge_id[[1]])
+    } else {
+      NA_character_
+    }
+    via_pairs <- lapply(chs, function(ch) c(ch$edge_a, ch$edge_b))
+    sw <- NA_real_
+    if (use_avg) {
+      avg <- full_average_mediation_total(
+        result$comparison, result$coef_by_model,
+        edge_direct = edge_direct,
+        via_pairs = via_pairs,
+        always_ids = always_ids
+      )
+      tot <- avg$est
+      se_tot <- avg$se
+      sw <- avg$weight_sum
+    } else {
+      indir_est <- sum(vapply(chs, function(ch) ch$a * ch$b, numeric(1)))
+      indir_var <- sum(vapply(chs, function(ch) {
+        se_ab <- ch$b^2 * ch$se_a^2 + ch$a^2 * ch$se_b^2
+        if (is.finite(se_ab)) se_ab else 0
+      }, numeric(1)))
+      d_est <- if (nrow(direct)) as.numeric(direct$estimate[[1]]) else 0
+      d_se <- if (nrow(direct)) as.numeric(direct$se[[1]]) else 0
+      if (!is.finite(d_est)) d_est <- 0
+      if (!is.finite(d_se) || d_se < 0) d_se <- 0
+      tot <- d_est + indir_est
+      se_tot <- sqrt(d_se^2 + indir_var)
+      if (has_ic) {
+        # Σw of models with direct or any complete via
+        need_sets <- list()
+        if (!is.na(edge_direct) && nzchar(edge_direct)) {
+          need_sets[[length(need_sets) + 1L]] <- edge_direct
+        }
+        for (ch in chs) {
+          if (!is.na(ch$edge_a) && !is.na(ch$edge_b) &&
+                nzchar(as.character(ch$edge_a)) && nzchar(as.character(ch$edge_b))) {
+            need_sets[[length(need_sets) + 1L]] <- c(ch$edge_a, ch$edge_b)
+          }
+        }
+        if (length(need_sets) && !is.null(result$comparison)) {
+          ok <- result$comparison$status == "ok" & is.finite(result$comparison$weight)
+          s <- 0
+          for (i in which(ok)) {
+            hit <- FALSE
+            for (need in need_sets) {
+              if (search_model_includes_edges(
+                result$comparison$edges[i], need, always_ids = always_ids
+              )) {
+                hit <- TRUE
+                break
+              }
+            }
+            if (hit) s <- s + as.numeric(result$comparison$weight[i])
+          }
+          sw <- s
+        }
+      }
+    }
+    rows[[length(rows) + 1L]] <- mediation_freq_row(
+      to = chs[[1]]$to_lab,
+      from = chs[[1]]$from_lab,
+      level = "total",
+      est = tot, se = se_tot, conf_adjust = conf_adjust,
+      weight_sum = sw
+    )
+  }
   do.call(rbind, rows)
+}
+
+#' Bayesian via / total rows from posterior draws
+#' @keywords internal
+mediation_effects_table_bayes <- function(state, chains, slopes, result) {
+  if (is.null(result) || !identical(result$sampler, "brms")) {
+    return(estimates_table_empty("none"))
+  }
+  rope_k <- as.numeric(result$rope_k %||% 0.1)
+  ci <- as.numeric(result$ci_level %||% 0.95)
+  rows <- list()
+  chain_draws <- list()
+
+  for (idx in seq_along(chains)) {
+    ch <- chains[[idx]]
+    if (is.na(ch$edge_a) || is.na(ch$edge_b) ||
+          !nzchar(as.character(ch$edge_a %||% "")) ||
+          !nzchar(as.character(ch$edge_b %||% ""))) {
+      next
+    }
+    info_a <- edge_bayes_param_info(result, state, ch$edge_a)
+    info_b <- edge_bayes_param_info(result, state, ch$edge_b)
+    if (is.null(info_a) || is.null(info_b)) next
+    aligned <- align_posterior_draws(info_a$draws, info_b$draws)
+    if (is.null(aligned)) next
+    draws_ab <- aligned[[1]] * aligned[[2]]
+    pr_ab <- prior_product_moments(
+      info_a$prior_mean, info_a$prior_sd,
+      info_b$prior_mean, info_b$prior_sd
+    )
+    rope <- rope_bounds_from_prior(pr_ab$sd, rope_k)
+    sm <- bayes_term_summary(
+      draws_ab, rope = rope, ci = ci,
+      prior_mean = pr_ab$mean, prior_sd = pr_ab$sd
+    )
+    rows[[length(rows) + 1L]] <- mediation_bayes_row(
+      to = ch$to_lab,
+      from = ch$from_lab,
+      level = paste0("via ", ch$med_lab),
+      sm = sm, ci = ci
+    )
+    chain_draws[[idx]] <- list(
+      from = ch$from, to = ch$to,
+      from_lab = ch$from_lab, to_lab = ch$to_lab,
+      draws_ab = draws_ab,
+      prior_mean = pr_ab$mean, prior_sd = pr_ab$sd
+    )
+  }
+  if (!length(rows)) return(estimates_table_empty("none"))
+
+  pairs <- unique(lapply(
+    Filter(Negate(is.null), chain_draws),
+    function(ch) c(ch$from, ch$to)
+  ))
+  for (pr in pairs) {
+    x_id <- pr[[1]]; y_id <- pr[[2]]
+    chs <- Filter(
+      function(ch) !is.null(ch) && identical(ch$from, x_id) && identical(ch$to, y_id),
+      chain_draws
+    )
+    if (!length(chs)) next
+    # Direct X→Y draws when the slope exists in the same source table
+    direct <- slopes[slopes$from == x_id & slopes$to == y_id, , drop = FALSE]
+    draws_parts <- lapply(chs, function(ch) ch$draws_ab)
+    prior_m <- sum(vapply(chs, function(ch) ch$prior_mean, numeric(1)))
+    prior_v <- sum(vapply(chs, function(ch) ch$prior_sd^2, numeric(1)))
+    if (nrow(direct) && !is.na(direct$edge_id[[1]]) &&
+          nzchar(as.character(direct$edge_id[[1]]))) {
+      info_d <- edge_bayes_param_info(result, state, direct$edge_id[[1]])
+      if (!is.null(info_d) && length(info_d$draws)) {
+        draws_parts <- c(list(info_d$draws), draws_parts)
+        prior_m <- prior_m + as.numeric(info_d$prior_mean)
+        prior_v <- prior_v + as.numeric(info_d$prior_sd)^2
+      }
+    }
+    aligned <- do.call(align_posterior_draws, draws_parts)
+    if (is.null(aligned)) next
+    draws_tot <- Reduce(`+`, aligned)
+    prior_sd <- sqrt(max(0, prior_v))
+    if (!is.finite(prior_sd) || prior_sd <= 0) prior_sd <- 1
+    rope <- rope_bounds_from_prior(prior_sd, rope_k)
+    sm <- bayes_term_summary(
+      draws_tot, rope = rope, ci = ci,
+      prior_mean = prior_m, prior_sd = prior_sd
+    )
+    rows[[length(rows) + 1L]] <- mediation_bayes_row(
+      to = chs[[1]]$to_lab,
+      from = chs[[1]]$from_lab,
+      level = "total",
+      sm = sm, ci = ci
+    )
+  }
+  do.call(rbind, rows)
+}
+
+#' @rdname mediation_effects_table
+#' @keywords internal
+indirect_effects_table <- function(state, conf_adjust = "none") {
+  mediation_effects_table(state, conf_adjust = conf_adjust, bayes = FALSE)
 }
 
 #' Column name for confirmatory-adjusted p-values in results tables
@@ -1794,27 +3241,27 @@ conf_pvalue_column_name <- function(method = "none") {
 
 #' Path coefficient table for results pane
 #'
-#' Columns: From, Level, To, Estimate, SE, p, and (when `conf_adjust` ≠
+#' Columns: Path (`Y ← X`, via `↜`, total `⇐`), Level, Estimate, SE, p, and (when `conf_adjust` ≠
 #' `none`) an adjusted column (`pHolm` / `pBonf` / `pBH`) filled only for
 #' confirmatory paths that entered the multiplicity adjustment.
+#'
+#' Structural paths only (`~`). Measurement loadings (`=~`) belong in the
+#' CFA / measurement Results block, not Path coefficients.
 #' @keywords internal
-estimates_table <- function(state, estimates = NULL, conf_adjust = "none") {
+estimates_table <- function(state, estimates = NULL, conf_adjust = "none",
+                            result = NULL) {
   empty <- estimates_table_empty(conf_adjust)
   pcol <- conf_pvalue_column_name(conf_adjust)
   want_adj <- !identical(pcol, "p")
 
   # Prefer full estimate rows (includes polynomial powers)
   if (!is.null(estimates) && nrow(estimates)) {
-    est <- estimates[estimates$op %in% c("~", "=~"), , drop = FALSE]
+    est <- estimates[estimates$op == "~", , drop = FALSE]
     if (!nrow(est)) {
       main <- empty
     } else {
-      from_lab <- vapply(seq_len(nrow(est)), function(i) {
-        if (identical(est$op[i], "=~")) est$lhs[i] else est$rhs[i]
-      }, character(1))
-      to_lab <- vapply(seq_len(nrow(est)), function(i) {
-        if (identical(est$op[i], "=~")) est$rhs[i] else est$lhs[i]
-      }, character(1))
+      from_lab <- as.character(est$rhs)
+      to_lab <- as.character(est$lhs)
       lv <- if ("level" %in% names(est)) {
         ifelse(is.na(est$level) | !nzchar(as.character(est$level)), "", as.character(est$level))
       } else {
@@ -1832,9 +3279,9 @@ estimates_table <- function(state, estimates = NULL, conf_adjust = "none") {
           ("includes_zero" %in% names(est) && any(!is.na(est$includes_zero)))
       )
       main <- data.frame(
+        To = to_lab,
         From = from_lab,
         Level = lv,
-        To = to_lab,
         Estimate = round(as.numeric(est$est), 3),
         SE = round(as.numeric(est$se), 3),
         stringsAsFactors = FALSE
@@ -1880,13 +3327,14 @@ estimates_table <- function(state, estimates = NULL, conf_adjust = "none") {
           }, character(1))
         }
         if ("kl_prior_post" %in% names(est)) {
-          # KL(posterior || prior) in nats: prior→posterior information gain
-          main[["KL"]] <- vapply(est$kl_prior_post, function(k) {
-            if (!is.finite(k)) return("")
-            if (k >= 100) sprintf("%.0f", k)
-            else if (k >= 10) sprintf("%.1f", k)
-            else sprintf("%.2f", k)
-          }, character(1))
+          # KL(posterior || prior) in nats; low values highlighted in Results
+          main[["KL"]] <- vapply(est$kl_prior_post, format_bayes_kl, character(1))
+        }
+        if ("post_narrow" %in% names(est)) {
+          # prior SD / posterior SD; little narrowing highlighted in Results
+          main[["SD\u2193"]] <- vapply(
+            est$post_narrow, format_bayes_sd_narrow, character(1)
+          )
         }
       }
       if (!bayes_ci || any(is.finite(raw_p))) {
@@ -1909,9 +3357,11 @@ estimates_table <- function(state, estimates = NULL, conf_adjust = "none") {
       main <- empty
     } else {
       if (!"level" %in% names(edges)) edges$level <- NA_character_
-      # Hide definitional wires into interaction operators
-      keep <- edges$type != "definitional" &
-        !vapply(edges$to, function(id) is_interaction_node(state, id), logical(1))
+      # Structural paths only — skip measurement / definitional / excluded / empty
+      keep <- !(edges$type %in% c("definitional", "measurement")) &
+        !vapply(edges$to, function(id) is_interaction_node(state, id), logical(1)) &
+        (is.na(edges$status) | edges$status != "excluded") &
+        is.finite(edges$estimate) & is.finite(edges$se)
       edges <- edges[keep, , drop = FALSE]
       if (!nrow(edges)) {
         main <- empty
@@ -1921,9 +3371,9 @@ estimates_table <- function(state, estimates = NULL, conf_adjust = "none") {
           if ("pvalue_raw" %in% names(edges)) edges$pvalue_raw else NULL
         )
         main <- data.frame(
+          To = vapply(edges$to, function(id) node_display_name(state, id), character(1)),
           From = vapply(edges$from, function(id) node_display_name(state, id), character(1)),
           Level = ifelse(is.na(edges$level) | !nzchar(edges$level), "", edges$level),
-          To = vapply(edges$to, function(id) node_display_name(state, id), character(1)),
           Estimate = round(edges$estimate, 3),
           SE = round(edges$se, 3),
           p = vapply(raw_p, format_pvalue, character(1), digits = 3),
@@ -1949,16 +3399,67 @@ estimates_table <- function(state, estimates = NULL, conf_adjust = "none") {
   }
 
   bayes_main <- any(grepl("% HDI$", names(main))) || "pd" %in% names(main)
-  indir <- if (bayes_main) {
-    main[0, , drop = FALSE]
-  } else {
-    indirect_effects_table(state, conf_adjust = conf_adjust)
-  }
-  if (!nrow(main)) {
+  indir <- mediation_effects_table(
+    state,
+    conf_adjust = conf_adjust,
+    result = result,
+    bayes = bayes_main,
+    estimates = estimates
+  )
+  out <- if (!nrow(main)) {
     indir
   } else if (!nrow(indir)) {
     main
   } else {
+    for (nm in setdiff(names(main), names(indir))) {
+      indir[[nm]] <- if (is.character(main[[nm]])) {
+        rep("", nrow(indir))
+      } else {
+        rep(NA, nrow(indir))
+      }
+    }
+    for (nm in setdiff(names(indir), names(main))) {
+      main[[nm]] <- if (is.character(indir[[nm]])) {
+        rep("", nrow(main))
+      } else {
+        rep(NA, nrow(main))
+      }
+    }
+    indir <- indir[names(main)]
     rbind(main, indir)
   }
+  # AIC/BIC search: Σw on links; via/total keep joint / path Σw from mediation rows
+  if (nrow(out) && !is.null(result) && !is.null(result$comparison) &&
+        !is.null(result$edge_weights) && length(result$edge_weights)) {
+    lv <- as.character(out$Level %||% "")
+    lv[is.na(lv)] <- ""
+    is_derived <- startsWith(lv, "via ") | lv == "total"
+    ws <- estimates_table_weight_sum_col(
+      state, result,
+      to_lab = as.character(out$To),
+      from_lab = as.character(out$From),
+      level = lv
+    )
+    if (!is.null(ws)) {
+      link_sw <- format_weight_sum_col(ws)
+      if ("Σw" %in% names(out)) {
+        # Keep joint Σw already set on via/total; fill links only
+        cur <- as.character(out[["Σw"]])
+        cur[is.na(cur)] <- ""
+        cur[!is_derived] <- link_sw[!is_derived]
+        out[["Σw"]] <- cur
+      } else {
+        out[["Σw"]] <- link_sw
+      }
+      if ("p" %in% names(out)) {
+        out$p[!is_derived] <- ""
+      }
+      for (acol in c("pHolm", "pBonf", "pBH")) {
+        if (acol %in% names(out)) out[[acol]][!is_derived] <- ""
+      }
+    }
+  }
+  estimates_table_collapse_path(
+    estimates_table_order_rows(estimates_table_order_cols(out))
+  )
 }

@@ -1,7 +1,8 @@
 test_that("report_module_types lists the v1 pin sources", {
   types <- StructuralModelTester:::report_module_types()
   expect_true(all(c(
-    "coef_table", "equations", "residual", "edge_plot", "power"
+    "coef_table", "equations", "cfa_measurement", "pca_screen",
+    "residual", "edge_plot", "power"
   ) %in% names(types)))
 })
 
@@ -16,7 +17,7 @@ test_that("report_add_module / report_remove_module round-trip", {
   expect_length(mods, 0L)
 })
 
-test_that("residual / edge modules require pin-time ids", {
+test_that("residual / edge / latent modules require pin-time ids", {
   mods <- StructuralModelTester:::empty_report_modules()
   expect_length(
     StructuralModelTester:::report_add_module(mods, "residual"),
@@ -34,6 +35,28 @@ test_that("residual / edge modules require pin-time ids", {
     list(edge_id = "e1")
   )
   expect_identical(mods2[[1]]$params$edge_id, "e1")
+
+  expect_length(
+    StructuralModelTester:::report_add_module(
+      StructuralModelTester:::empty_report_modules(), "cfa_measurement"
+    ),
+    0L
+  )
+  cfa <- StructuralModelTester:::report_add_module(
+    StructuralModelTester:::empty_report_modules(),
+    "cfa_measurement",
+    list(latent_id = "Uni")
+  )
+  expect_identical(cfa[[1]]$params$latent_id, "Uni")
+  pca <- StructuralModelTester:::report_add_module(
+    StructuralModelTester:::empty_report_modules(),
+    "pca_screen",
+    list(latent_id = "Multi")
+  )
+  expect_identical(pca[[1]]$params$latent_id, "Multi")
+  expect_false(StructuralModelTester:::report_has_module(
+    cfa, "cfa_measurement", list(latent_id = "Multi")
+  ))
 })
 
 test_that("report_has_module matches type and params", {
@@ -49,6 +72,46 @@ test_that("report_has_module matches type and params", {
     mods, "residual", list(dv_id = "Other")
   ))
   expect_false(StructuralModelTester:::report_has_module(mods, "coef_table"))
+})
+
+test_that("path coefficient pins can be global and per-DV", {
+  mods <- StructuralModelTester:::empty_report_modules()
+  mods <- StructuralModelTester:::report_add_module(mods, "coef_table", list())
+  mods <- StructuralModelTester:::report_add_module(
+    mods, "coef_table", list(dv_id = "z")
+  )
+  mods <- StructuralModelTester:::report_add_module(
+    mods, "coef_table", list(dv_id = "Y")
+  )
+  expect_length(mods, 3L)
+  expect_true(StructuralModelTester:::report_has_module(mods, "coef_table", list()))
+  expect_true(StructuralModelTester:::report_has_module(
+    mods, "coef_table", list(dv_id = "z")
+  ))
+  expect_true(StructuralModelTester:::report_has_module(
+    mods, "coef_table", list(dv_id = "Y")
+  ))
+  expect_false(StructuralModelTester:::report_has_module(
+    mods, "coef_table", list(dv_id = "Other")
+  ))
+  # Exact empty params must not match a DV-scoped pin
+  only_dv <- StructuralModelTester:::report_add_module(
+    StructuralModelTester:::empty_report_modules(),
+    "coef_table",
+    list(dv_id = "z")
+  )
+  expect_false(StructuralModelTester:::report_has_module(
+    only_dv, "coef_table", list()
+  ))
+  expect_match(
+    StructuralModelTester:::report_module_title(mods[[1]], NULL),
+    "all",
+    ignore.case = TRUE
+  )
+  expect_match(
+    StructuralModelTester:::report_module_title(mods[[2]], NULL),
+    "z"
+  )
 })
 
 test_that("smt_json_script_tag embeds JSON for clipboard buttons", {

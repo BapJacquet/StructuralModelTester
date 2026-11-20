@@ -1,15 +1,43 @@
+#' Normalize optional seed data for [run_app()]
+#'
+#' Accepts a data.frame / tibble; returns a plain data.frame copy.
+#' @keywords internal
+smt_normalize_seed_data <- function(data) {
+  if (is.null(data)) return(NULL)
+  if (!is.data.frame(data)) {
+    stop("`data` must be a data.frame (or tibble).", call. = FALSE)
+  }
+  if (!nrow(data) || !ncol(data)) {
+    stop("`data` must have at least one row and one column.", call. = FALSE)
+  }
+  # Plain copy; keep factors / numeric types (do not stringify).
+  as.data.frame(data, optional = TRUE, stringsAsFactors = FALSE)
+}
+
 #' Launch the Structural Model Tester app
 #'
 #' Opens the Structural Model Tester Shiny interface in the browser.
 #'
 #' @param launch.browser Logical; open in the system browser.
+#' @param data Optional data.frame (or tibble) to seed the Data tab. When
+#'   supplied, the welcome examples modal is skipped and the app starts with
+#'   this dataset already loaded (blank model).
+#' @param debug Logical; if `TRUE`, echo `[smt-debug]` lines to the R console.
+#'   The gitignored `smt-debug.log` file is still written either way.
 #' @param ... Passed to [shiny::runApp()].
 #' @export
 #' @examples
 #' \dontrun{
 #' StructuralModelTester::run_app()
+#'
+#' # Prep in R, then open the app with that frame (no examples modal):
+#' dat <- subset(iris, Species != "setosa")
+#' StructuralModelTester::run_app(data = dat)
+#'
+#' # Verbose console tracing while developing UI/plots:
+#' StructuralModelTester::run_app(debug = TRUE)
 #' }
-run_app <- function(launch.browser = TRUE, ...) {
+run_app <- function(launch.browser = TRUE, data = NULL, debug = FALSE, ...) {
   requireNamespace("StructuralModelTester", quietly = TRUE)
   # Prefer the source-tree app when developing (pkgload::load_all). The installed
   # copy under system.file() can lag behind and serve stale JS/CSS that breaks
@@ -45,6 +73,14 @@ run_app <- function(launch.browser = TRUE, ...) {
       options(smt.cmd.root = file.path(found, ".smt"))
     }
   }
+  # Seed analysis data for this launch (NULL clears a previous seed in-process)
+  options(smt.seed_data = smt_normalize_seed_data(data))
+  # Console debug echo (file log is independent)
+  options(smt.debug.console = isTRUE(debug))
+  message(
+    "Structural Model Tester: app is running. ",
+    "Stop it from this R console with Esc (RStudio / Positron) or Ctrl+C (terminal)."
+  )
   shiny::runApp(app_dir, launch.browser = launch.browser, ...)
 }
 

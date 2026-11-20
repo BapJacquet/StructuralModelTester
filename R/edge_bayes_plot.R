@@ -78,6 +78,7 @@ bayes_density_panel <- function(kind = c("prior", "posterior"),
                                 draws = NULL, rope = c(-0.1, 0.1),
                                 hdi = NULL, pd = NA_real_, rope_pct = NA_real_,
                                 log_bf10 = NA_real_, kl_prior_post = NA_real_,
+                                post_narrow = NA_real_,
                                 ci = 0.95, xlim = NULL) {
   kind <- match.arg(kind)
   rope <- as.numeric(rope)
@@ -131,8 +132,18 @@ bayes_density_panel <- function(kind = c("prior", "posterior"),
     } else {
       NULL
     }
+    narrow_txt <- if (is.finite(post_narrow) && post_narrow > 0) {
+      if (post_narrow >= 100) sprintf("SD\u2193=%.0f", post_narrow)
+      else if (post_narrow >= 10) sprintf("SD\u2193=%.1f", post_narrow)
+      else sprintf("SD\u2193=%.2f", post_narrow)
+    } else {
+      NULL
+    }
     cap <- paste(
-      c(sprintf("Posterior · %s · %s", pd_txt, rp_txt), bf_txt, kl_txt),
+      c(
+        sprintf("Posterior · %s · %s", pd_txt, rp_txt),
+        bf_txt, narrow_txt, kl_txt
+      ),
       collapse = " · "
     )
   }
@@ -226,6 +237,7 @@ compose_edge_bayes_plot <- function(effect_plot, info) {
     rope_pct = info$summary$rope_pct,
     log_bf10 = info$summary$log_bf10,
     kl_prior_post = info$summary$kl_prior_post,
+    post_narrow = info$summary$post_narrow,
     ci = info$ci,
     xlim = xlim
   )

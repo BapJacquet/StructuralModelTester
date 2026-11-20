@@ -553,6 +553,20 @@
   })(0);
 
   if (window.jQuery) {
+    // Path coefficients: clickable column headers → Shiny coef_help_col
+    $(document).on("click.smtCoefHelp", "table.smt-apa-table-colhelp .smt-col-help", function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      var col = this.getAttribute("data-smt-help-col");
+      if (!col || !window.Shiny || !Shiny.setInputValue) return;
+      Shiny.setInputValue("coef_help_col", col, { priority: "event" });
+    });
+    $(document).on("keydown.smtCoefHelp", "table.smt-apa-table-colhelp .smt-col-help", function (e) {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      e.preventDefault();
+      $(this).trigger("click");
+    });
+
     $(document).on("shiny:connected shiny:idle shiny:value", function () {
       boot();
     });

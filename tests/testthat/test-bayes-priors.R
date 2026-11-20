@@ -82,6 +82,17 @@ test_that("HDI, pd, ROPE, and log BF10 replace p on the canvas and in the table"
     prior_mean = 0, prior_sd = 1
   )
   expect_lt(kl_same, 0.2)
+  # Narrowing index: prior SD / posterior SD (precision gain, not location)
+  expect_equal(
+    StructuralModelTester:::post_narrow_of(0.5, prior_sd = 1),
+    2,
+    tolerance = 1e-9
+  )
+  sm_narrow <- StructuralModelTester:::bayes_term_summary(
+    rnorm(4000, mean = 0, sd = 0.25),
+    prior_mean = 0, prior_sd = 1
+  )
+  expect_true(is.finite(sm_narrow$post_narrow) && sm_narrow$post_narrow > 2)
 
   st <- StructuralModelTester:::empty_model_state()
   st <- StructuralModelTester:::add_node(st, "X", observed_column = "X")
@@ -125,6 +136,24 @@ test_that("HDI, pd, ROPE, and log BF10 replace p on the canvas and in the table"
   expect_equal(tab[["95% HDI"]][[1]], "[0.200, 0.600]")
   expect_equal(tab[["log BF10"]][[1]], sprintf("%+.2f", log(12.5)))
   expect_equal(tab[["KL"]][[1]], "1.25")
+
+  expect_equal(StructuralModelTester:::format_bayes_kl(1.25), "1.25")
+  expect_match(StructuralModelTester:::format_bayes_kl(0.05), "smt-bayes-weak", fixed = TRUE)
+  expect_match(StructuralModelTester:::format_bayes_kl(0.05), "0.05", fixed = TRUE)
+  expect_equal(StructuralModelTester:::format_bayes_sd_narrow(2), "2.00")
+  expect_match(StructuralModelTester:::format_bayes_sd_narrow(1.2), "smt-bayes-weak", fixed = TRUE)
+  expect_match(StructuralModelTester:::format_bayes_sd_narrow(1.2), "1.20", fixed = TRUE)
+
+  est_weak <- StructuralModelTester:::estimate_row(
+    "Y", "~", "X", 0.05, 0.9, NA_real_,
+    ci_low = -1.5, ci_high = 1.6, ci_level = 0.95,
+    pd = 0.55, rope_low = -0.1, rope_high = 0.1,
+    rope_pct = 0.1, rope_decision = "undecided",
+    log_bf10 = 0, kl_prior_post = 0.02, post_narrow = 1.1
+  )
+  tab_weak <- StructuralModelTester:::estimates_table(st, est_weak)
+  expect_match(tab_weak[["KL"]][[1]], "smt-bayes-weak", fixed = TRUE)
+  expect_match(tab_weak[["SD\u2193"]][[1]], "smt-bayes-weak", fixed = TRUE)
 })
 
 test_that("brms fit uses the link prior and HDI + ROPE", {
@@ -184,6 +213,34 @@ test_that("brms fit uses the link prior and HDI + ROPE", {
   expect_true(inherits(combo, "patchwork") || inherits(combo, "ggplot"))
 })
 
+test_that("joint rescor is off when outcomes predict each other", {
+  med_jobs <- list(
+    list(
+      key = "M", yname = "M", term_names = "X",
+      preds = data.frame(from = "X", to = "M", stringsAsFactors = FALSE)
+    ),
+    list(
+      key = "Y", yname = "Y", term_names = c("X", "M"),
+      preds = data.frame(from = c("X", "M"), to = c("Y", "Y"), stringsAsFactors = FALSE)
+    )
+  )
+  expect_true(StructuralModelTester:::joint_outcomes_predict_each_other(med_jobs))
+  expect_false(StructuralModelTester:::joint_brms_want_rescor(med_jobs))
+
+  sibling_jobs <- list(
+    list(
+      key = "Y1", yname = "Y1", term_names = "X",
+      preds = data.frame(from = "X", to = "Y1", stringsAsFactors = FALSE)
+    ),
+    list(
+      key = "Y2", yname = "Y2", term_names = "X",
+      preds = data.frame(from = "X", to = "Y2", stringsAsFactors = FALSE)
+    )
+  )
+  expect_false(StructuralModelTester:::joint_outcomes_predict_each_other(sibling_jobs))
+  expect_true(StructuralModelTester:::joint_brms_want_rescor(sibling_jobs))
+})
+
 test_that("joint brms structure fits a multivariate gaussian path", {
   skip_if_not(
     StructuralModelTester:::bayes_backend_available(),
@@ -219,6 +276,9 @@ test_that("joint brms structure fits a multivariate gaussian path", {
   )
   expect_identical(res$bayes_structure, "joint")
   expect_match(res$syntax, "joint")
+  # Mediation Y1 -> Y2: residual correlations must stay off
+  expect_match(res$syntax, "rescor off")
+  expect_false(isTRUE(res$fit[[st$nodes$id[[2]]]]$smt_rescor))
   expect_true(any(res$estimates$rhs == "X" & res$estimates$lhs %in% c("Y1", "Y2")))
   # Same joint fit object is reused per equation key
   expect_true(inherits(res$fit[[st$nodes$id[[2]]]], "brmsfit"))

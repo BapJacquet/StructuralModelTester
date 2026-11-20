@@ -1,19 +1,30 @@
 #' Registry of pin-able report module types
 #'
 #' @return Named list of lists with `id`, `label`, `needs`
-#'   (`needs` is a character vector among `result`, `dv`, `edge`, `power`).
+#'   (`needs` is a character vector among `result`, `dv`, `latent`, `edge`, `power`).
 #' @keywords internal
 report_module_types <- function() {
   list(
     coef_table = list(
       id = "coef_table",
       label = "Path coefficients",
+      # Optional `dv_id` scopes the table to one DV; omit for the full table.
       needs = "result"
     ),
     equations = list(
       id = "equations",
       label = "Model fit equations",
       needs = "result"
+    ),
+    cfa_measurement = list(
+      id = "cfa_measurement",
+      label = "CFA / measurement",
+      needs = c("result", "latent")
+    ),
+    pca_screen = list(
+      id = "pca_screen",
+      label = "PCA unidimensionality",
+      needs = c("result", "latent")
     ),
     residual = list(
       id = "residual",
@@ -74,9 +85,16 @@ report_module_params <- function(type, params = NULL) {
   if (is.null(info)) return(list())
   params <- as.list(params %||% list())
   out <- list()
-  if ("dv" %in% info$needs) {
+  # Required DV (residual) or optional DV scope (path coefficients)
+  if ("dv" %in% info$needs || identical(type, "coef_table")) {
     dv <- as.character(params$dv_id %||% params$dv %||% NA_character_)
     if (!is.na(dv) && nzchar(dv)) out$dv_id <- dv
+  }
+  if ("latent" %in% info$needs) {
+    lat <- as.character(
+      params$latent_id %||% params$latent %||% params$dv_id %||% NA_character_
+    )
+    if (!is.na(lat) && nzchar(lat)) out$latent_id <- lat
   }
   if ("edge" %in% info$needs) {
     eid <- as.character(params$edge_id %||% params$edge %||% NA_character_)
@@ -93,6 +111,10 @@ report_module_params_ok <- function(type, params = NULL) {
   p <- report_module_params(type, params)
   if ("dv" %in% info$needs &&
         (is.null(p$dv_id) || !nzchar(as.character(p$dv_id)))) {
+    return(FALSE)
+  }
+  if ("latent" %in% info$needs &&
+        (is.null(p$latent_id) || !nzchar(as.character(p$latent_id)))) {
     return(FALSE)
   }
   if ("edge" %in% info$needs &&
@@ -139,22 +161,28 @@ report_remove_module <- function(modules, uid) {
 }
 
 #' Find modules matching type (+ optional dv/edge params)
+#'
+#' `params = NULL` matches every module of `type`. A non-`NULL` `params`
+#' list (including empty `list()`) requires an exact match on identity keys
+#' (`dv_id`, `edge_id`): missing on both sides counts as a match, so the
+#' global path-coefficients pin is distinct from each DV-scoped pin.
 #' @keywords internal
 report_find_modules <- function(modules, type, params = NULL) {
   modules <- modules %||% empty_report_modules()
   type <- as.character(type %||% "")
   if (!nzchar(type) || !length(modules)) return(list())
+  if (is.null(params)) {
+    return(Filter(function(m) {
+      identical(as.character(m$type %||% ""), type)
+    }, modules))
+  }
   want <- report_module_params(type, params)
   Filter(function(m) {
     if (!identical(as.character(m$type %||% ""), type)) return(FALSE)
-    if (!length(want)) return(TRUE)
-    mp <- m$params %||% list()
-    for (nm in names(want)) {
-      if (!identical(as.character(mp[[nm]] %||% ""), as.character(want[[nm]]))) {
-        return(FALSE)
-      }
-    }
-    TRUE
+    mp <- report_module_params(type, m$params)
+    identical(as.character(mp$dv_id %||% ""), as.character(want$dv_id %||% "")) &&
+      identical(as.character(mp$latent_id %||% ""), as.character(want$latent_id %||% "")) &&
+      identical(as.character(mp$edge_id %||% ""), as.character(want$edge_id %||% ""))
   }, modules)
 }
 
@@ -170,12 +198,27 @@ report_module_title <- function(mod, state = NULL) {
   if (is.null(mod)) return("Module")
   lab <- as.character(mod$label %||% mod$type %||% "Module")
   p <- mod$params %||% list()
-  if (!is.null(state) && !is.null(p$dv_id) && nzchar(as.character(p$dv_id))) {
-    dv_lab <- tryCatch(
-      node_display_name(state, p$dv_id),
-      error = function(e) p$dv_id
-    )
-    return(sprintf("%s · %s", lab, dv_lab))
+  if (identical(as.character(mod$type %||% ""), "coef_table") &&
+        (is.null(p$dv_id) || !nzchar(as.character(p$dv_id)))) {
+    return(paste0(lab, " (all)"))
+  }
+  scope_id <- if (!is.null(p$latent_id) && nzchar(as.character(p$latent_id))) {
+    as.character(p$latent_id)
+  } else if (!is.null(p$dv_id) && nzchar(as.character(p$dv_id))) {
+    as.character(p$dv_id)
+  } else {
+    NA_character_
+  }
+  if (!is.na(scope_id) && nzchar(scope_id)) {
+    scope_lab <- if (!is.null(state)) {
+      tryCatch(
+        node_display_name(state, scope_id),
+        error = function(e) scope_id
+      )
+    } else {
+      scope_id
+    }
+    return(sprintf("%s · %s", lab, scope_lab))
   }
   if (!is.null(state) && !is.null(p$edge_id) && nzchar(as.character(p$edge_id))) {
     eid <- as.character(p$edge_id)
@@ -229,12 +272,18 @@ smt_report_pin_button <- function(input_id, pinned = FALSE, enabled = TRUE,
   )
 }
 
-#' Section heading with optional report pin
+#' Section heading with optional report pin and field-help "?"
 #' @keywords internal
-smt_report_section_head <- function(title, pin = NULL) {
+smt_report_section_head <- function(title, pin = NULL, help_topic = NULL) {
   shiny::div(
     class = "smt-report-section-head",
-    shiny::h4(title),
+    shiny::div(
+      class = "smt-report-section-title",
+      shiny::h4(title),
+      if (!is.null(help_topic) && nzchar(as.character(help_topic)[[1]])) {
+        smt_help_button(as.character(help_topic)[[1]])
+      }
+    ),
     pin
   )
 }

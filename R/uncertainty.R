@@ -218,7 +218,7 @@ fit_path_with_given_scores <- function(state, dat_with_scores, include_edge_ids,
   )
   est <- path_res$estimates
   if (!is.null(measurement_estimates) && nrow(measurement_estimates)) {
-    est <- rbind(measurement_estimates, est)
+    est <- bind_estimates(measurement_estimates, est)
   }
   path_res$estimates <- est
   path_res$syntax <- paste0(

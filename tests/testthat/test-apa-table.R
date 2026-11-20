@@ -27,6 +27,21 @@ test_that("smt_apa_datatable uses smt-apa-table class and HTML colnames", {
   expect_true(any(grepl("<em>p</em>", html_names, fixed = TRUE)))
 })
 
+test_that("header_help wraps colnames with smt-col-help data attributes", {
+  html <- StructuralModelTester:::apa_coef_help_col_html(
+    c("Path", "Estimate", "95% HDI", "KL")
+  )
+  expect_true(all(grepl("smt-col-help", html, fixed = TRUE)))
+  expect_match(html[[1]], 'data-smt-help-col="Path"', fixed = TRUE)
+  expect_match(html[[2]], "<em>Estimate</em>", fixed = TRUE)
+  expect_match(html[[3]], 'data-smt-help-col="95% HDI"', fixed = TRUE)
+  dt <- StructuralModelTester:::smt_apa_datatable(
+    data.frame(Path = "Y ← X", KL = "1.2", stringsAsFactors = FALSE),
+    header_help = TRUE
+  )
+  expect_true(any(grepl("smt-apa-table-colhelp", unlist(dt), fixed = TRUE)))
+})
+
 test_that("report_df_to_html_table uses APA caption and booktabs borders", {
   df <- data.frame(From = "X", Estimate = 0.2, p = ".04", stringsAsFactors = FALSE)
   html <- StructuralModelTester:::report_df_to_html_table(df, "Path coefficients")

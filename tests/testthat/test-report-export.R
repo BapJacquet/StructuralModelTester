@@ -3,6 +3,12 @@ test_that("latex_escape_text escapes specials", {
   expect_match(out, "\\\\_")
   expect_match(out, "\\\\&")
   expect_match(out, "\\\\%")
+  # Path glyphs must become TeX math (pdflatex cannot embed U+219C raw)
+  arrows <- StructuralModelTester:::latex_escape_text(
+    paste0("Y", "\u2190", "X · Y", "\u219c", "X · Y", "\u21d0", "X")
+  )
+  expect_match(arrows, "\\\\leftarrow", perl = TRUE)
+  expect_match(arrows, "\\\\Leftarrow", perl = TRUE)
 })
 
 test_that("report_df_to_latex_table emits booktabs", {

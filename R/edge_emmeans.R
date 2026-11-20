@@ -31,6 +31,26 @@ normalize_edge_plot_points <- function(mode) {
   "observed"
 }
 
+#' Plain fixed-effects formula for model.matrix (unwraps brmsformula + drops bars)
+#' @keywords internal
+path_fixed_formula <- function(fit) {
+  bf <- tryCatch(stats::formula(fit), error = function(e) NULL)
+  if (is.null(bf)) return(NULL)
+  fml <- if (inherits(bf, "brmsformula") || inherits(bf, "bform")) {
+    bf$formula
+  } else {
+    bf
+  }
+  if (is.null(fml)) return(NULL)
+  if (requireNamespace("reformulas", quietly = TRUE)) {
+    return(reformulas::nobars(fml))
+  }
+  if (requireNamespace("lme4", quietly = TRUE)) {
+    return(lme4::nobars(fml))
+  }
+  fml
+}
+
 #' Column names of the fixed-effect model matrix (lm/glm/merMod/brms)
 #' @keywords internal
 path_model_matrix_names <- function(fit) {
@@ -38,7 +58,8 @@ path_model_matrix_names <- function(fit) {
   if (length(mm)) return(mm)
   if (!inherits(fit, "brmsfit") || !is.data.frame(fit$data)) return(character())
   tryCatch({
-    fml <- lme4::nobars(stats::formula(fit))
+    fml <- path_fixed_formula(fit)
+    if (is.null(fml)) return(character())
     colnames(stats::model.matrix(fml, data = fit$data))
   }, error = function(e) character())
 }
@@ -50,6 +71,38 @@ path_model_frame <- function(fit) {
   if (!is.null(mf)) return(mf)
   if (inherits(fit, "brmsfit") && is.data.frame(fit$data)) return(fit$data)
   NULL
+}
+
+#' Dummy / 0–1 design columns for a categorical focal in the fitted model
+#'
+#' Handles SMT `Var__Level` names and brms-safe `Var_Level` renames.
+#' @keywords internal
+focal_dummy_columns <- function(fit, focal) {
+  focal <- as.character(focal %||% "")[[1]]
+  if (!nzchar(focal)) return(character())
+  mm <- setdiff(path_model_matrix_names(fit), "(Intercept)")
+  if (!length(mm)) return(character())
+  sx <- sanitize_id(focal)
+  pref_dum <- paste0(sx, "__")
+  poly_re <- paste0("^", sx, "_p[0-9]+$")
+  out <- mm[startsWith(mm, pref_dum)]
+  out <- c(out, mm[
+    startsWith(mm, paste0(sx, "_")) &
+      !grepl(poly_re, mm) &
+      !mm %in% c(focal, sx)
+  ])
+  to_safe <- tryCatch(fit$smt_brms_to_safe, error = function(e) NULL)
+  if (length(to_safe)) {
+    for (orig in names(to_safe)) {
+      if (startsWith(orig, pref_dum)) {
+        safe <- unname(to_safe[[orig]])
+        if (is.character(safe) && length(safe) == 1L && safe %in% mm) {
+          out <- c(out, safe)
+        }
+      }
+    }
+  }
+  unique(out[nzchar(out)])
 }
 
 #' Model-matrix / coef names belonging to a predictor node
@@ -64,9 +117,31 @@ predictor_fit_columns <- function(state, fit, node_id) {
   out <- character()
   if (xn %in% mm) out <- c(out, xn)
   if (sx %in% mm && !sx %in% out) out <- c(out, sx)
+  # SMT treatment dummies: Var__Level
   pref_dum <- paste0(sx, "__")
   out <- c(out, mm[startsWith(mm, pref_dum)])
-  out <- c(out, mm[grepl(paste0("^", sx, "_p[0-9]+$"), mm)])
+  # brms-safe rename collapses __ → _ (Condition__Treat → Condition_Treat)
+  poly_re <- paste0("^", sx, "_p[0-9]+$")
+  pref_brms <- paste0(sx, "_")
+  out <- c(out, mm[
+    startsWith(mm, pref_brms) &
+      !grepl(poly_re, mm) &
+      !mm %in% c(xn, sx)
+  ])
+  out <- c(out, mm[grepl(poly_re, mm)])
+  # Prefer mapped safe names stored on the fit when present
+  to_safe <- tryCatch(fit$smt_brms_to_safe, error = function(e) NULL)
+  if (length(to_safe)) {
+    for (orig in names(to_safe)) {
+      if (identical(orig, xn) || identical(orig, sx) ||
+            startsWith(orig, pref_dum)) {
+        safe <- unname(to_safe[[orig]])
+        if (is.character(safe) && length(safe) == 1L && safe %in% mm) {
+          out <- c(out, safe)
+        }
+      }
+    }
+  }
   # Continuous × continuous interaction product column named like the × node
   if (is_interaction_node(state, node_id) && xn %in% mm) {
     out <- c(out, xn)
@@ -100,7 +175,11 @@ emmeans_hold_specs <- function(state, data, fit, hold_ids) {
       NULL
     }
     kind <- if (!is.null(raw)) classify_variable(raw) else "continuous"
-    has_dummy <- any(grepl("__", cols, fixed = TRUE))
+    # Dummy columns: SMT Var__Level or brms-safe Var_Level (not poly Var_p2)
+    is_main <- cols %in% c(xn, sanitize_id(xn))
+    is_poly <- grepl("_p[0-9]+$", cols)
+    has_dummy <- any(grepl("__", cols, fixed = TRUE)) ||
+      any(!is_main & !is_poly)
 
     if (kind %in% c("binary", "categorical") || isTRUE(has_dummy)) {
       for (cn in cols) at[[cn]] <- 0
@@ -197,7 +276,10 @@ emmeans_edge_curve <- function(fit, focal, hold_at = list(),
   }
 
   use_response <- inherits(fit, "glm") || inherits(fit, "glmerMod") ||
-    (inherits(fit, "brmsfit") && fit$family$family %in% c("bernoulli", "binomial"))
+    (inherits(fit, "brmsfit") && {
+      fl <- brms_view_family(fit)
+      identical(fl$family, "bernoulli") || identical(fl$family, "binomial")
+    })
   em <- tryCatch(
     {
       rg <- emmeans::ref_grid(fit, at = at)
@@ -278,9 +360,18 @@ poly_edge_curve_data <- function(fit, focal, x_grid, y_binary = FALSE) {
   n <- length(x_grid)
   nd <- mf[rep(1L, n), , drop = FALSE]
   rownames(nd) <- NULL
-  # Drop response so predict() doesn't require it
-  resp <- tryCatch(as.character(stats::formula(fit)[[2L]]), error = function(e) NA_character_)
-  if (!is.na(resp) && nzchar(resp) && resp %in% names(nd)) {
+  # Drop response so predict() doesn't require it. brmsformula[[2]] is not the
+  # LHS — unwrap via path_fixed_formula() first.
+  resp <- NA_character_
+  fml <- path_fixed_formula(fit)
+  if (!is.null(fml)) {
+    lhs <- tryCatch(fml[[2L]], error = function(e) NULL)
+    if (!is.null(lhs)) {
+      resp <- as.character(lhs)[[1]]
+    }
+  }
+  if (length(resp) == 1L && !is.na(resp) && nzchar(resp) &&
+        resp %in% names(nd)) {
     nd[[resp]] <- NULL
   }
   nd[[focal]] <- x_grid
@@ -293,24 +384,55 @@ poly_edge_curve_data <- function(fit, focal, x_grid, y_binary = FALSE) {
   }
 
   use_response <- isTRUE(y_binary) || inherits(fit, "glm") || inherits(fit, "glmerMod")
-  pred <- tryCatch(
-    {
-      if (use_response) {
-        stats::predict(fit, newdata = nd, type = "response", se.fit = TRUE)
+  # brms::predict returns a summary matrix (Estimate / Est.Error / …), not
+  # list(fit=, se.fit=). Prefer posterior_epred when available.
+  if (inherits(fit, "brmsfit")) {
+    pe <- tryCatch(
+      brms::posterior_epred(fit, newdata = nd),
+      error = function(e) {
+        if (exists("smt_debug", mode = "function")) {
+          smt_debug("poly_edge_curve_data brms epred failed: ", e$message)
+        }
+        NULL
+      }
+    )
+    if (is.null(pe) || !is.matrix(pe) || ncol(pe) != n) return(NULL)
+    fit_y <- as.numeric(colMeans(pe, na.rm = TRUE))
+    se <- as.numeric(apply(pe, 2L, stats::sd, na.rm = TRUE))
+  } else {
+    pred <- tryCatch(
+      {
+        if (use_response) {
+          stats::predict(fit, newdata = nd, type = "response", se.fit = TRUE)
+        } else {
+          stats::predict(fit, newdata = nd, se.fit = TRUE)
+        }
+      },
+      error = function(e) {
+        if (exists("smt_debug", mode = "function")) {
+          smt_debug("poly_edge_curve_data failed: ", e$message)
+        }
+        NULL
+      }
+    )
+    if (is.null(pred)) return(NULL)
+    if (is.list(pred) && !is.null(pred$fit)) {
+      fit_y <- as.numeric(pred$fit)
+      se <- as.numeric(pred$se.fit)
+    } else if (is.matrix(pred) && "Estimate" %in% colnames(pred)) {
+      fit_y <- as.numeric(pred[, "Estimate"])
+      se <- if ("Est.Error" %in% colnames(pred)) {
+        as.numeric(pred[, "Est.Error"])
       } else {
-        stats::predict(fit, newdata = nd, se.fit = TRUE)
+        rep(NA_real_, length(fit_y))
       }
-    },
-    error = function(e) {
-      if (exists("smt_debug", mode = "function")) {
-        smt_debug("poly_edge_curve_data failed: ", e$message)
-      }
-      NULL
+    } else if (is.atomic(pred)) {
+      fit_y <- as.numeric(pred)
+      se <- rep(NA_real_, length(fit_y))
+    } else {
+      return(NULL)
     }
-  )
-  if (is.null(pred)) return(NULL)
-  fit_y <- as.numeric(pred$fit)
-  se <- as.numeric(pred$se.fit)
+  }
   if (!length(fit_y) || length(fit_y) != n) return(NULL)
   if (!length(se) || length(se) != n || any(!is.finite(se))) {
     se <- rep(0, n)

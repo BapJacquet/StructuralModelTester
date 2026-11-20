@@ -20,7 +20,11 @@ smt_debug_log_path <- function() {
   path
 }
 
-#' Append a structured debug line (also prints to console)
+#' Append a structured debug line (file always; console only if enabled)
+#'
+#' Console echo is gated by `options(smt.debug.console = TRUE)`, set by
+#' [run_app()] when `debug = TRUE`. File logging still runs unless
+#' `options(smt.quiet = TRUE)`.
 #' @keywords internal
 smt_debug <- function(...) {
   if (isTRUE(getOption("smt.quiet", FALSE))) return(invisible(NULL))
@@ -34,10 +38,16 @@ smt_debug <- function(...) {
   if (!is.null(path)) {
     tryCatch(
       cat(line, "\n", file = path, append = TRUE),
-      error = function(e) message("[smt-debug:file-error] ", e$message)
+      error = function(e) {
+        if (isTRUE(getOption("smt.debug.console", FALSE))) {
+          message("[smt-debug:file-error] ", e$message)
+        }
+      }
     )
   }
-  message("[smt-debug] ", msg)
+  if (isTRUE(getOption("smt.debug.console", FALSE))) {
+    message("[smt-debug] ", msg)
+  }
   invisible(line)
 }
 

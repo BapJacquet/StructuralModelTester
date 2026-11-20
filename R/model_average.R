@@ -82,6 +82,164 @@ intercepts_from_fits <- function(fits) {
   out
 }
 
+#' Free-edge id set stored on one AIC/BIC comparison row (+ always-in edges)
+#' @keywords internal
+search_model_edge_ids <- function(free_edges_str, always_ids = character()) {
+  free <- if (is.null(free_edges_str) || length(free_edges_str) < 1L ||
+               is.na(free_edges_str[[1]]) || !nzchar(as.character(free_edges_str[[1]]))) {
+    character()
+  } else {
+    strsplit(as.character(free_edges_str[[1]]), ",", fixed = TRUE)[[1]]
+  }
+  unique(c(as.character(always_ids %||% character()), free))
+}
+
+#' Does a candidate model include every requested edge?
+#' @keywords internal
+search_model_includes_edges <- function(free_edges_str, need_ids,
+                                        always_ids = character()) {
+  need_ids <- unique(as.character(need_ids %||% character()))
+  need_ids <- need_ids[!is.na(need_ids) & nzchar(need_ids)]
+  if (!length(need_ids)) return(FALSE)
+  have <- search_model_edge_ids(free_edges_str, always_ids)
+  all(need_ids %in% have)
+}
+
+#' Joint Σw: sum of model weights where all listed edges are present
+#' @keywords internal
+joint_edge_weight_sum <- function(comparison, need_ids, always_ids = character()) {
+  need_ids <- unique(as.character(need_ids %||% character()))
+  need_ids <- need_ids[!is.na(need_ids) & nzchar(need_ids)]
+  if (!length(need_ids) || is.null(comparison) || !nrow(comparison)) {
+    return(NA_real_)
+  }
+  ok <- comparison$status == "ok" & is.finite(comparison$weight)
+  if (!any(ok)) return(NA_real_)
+  s <- 0
+  for (i in which(ok)) {
+    if (search_model_includes_edges(comparison$edges[i], need_ids, always_ids)) {
+      s <- s + as.numeric(comparison$weight[i])
+    }
+  }
+  as.numeric(s)
+}
+
+#' Full model-average of a mediation product a×b (absent → 0)
+#'
+#' @return list(est, se, weight_sum) with joint Σw for both edges
+#' @keywords internal
+full_average_mediation_product <- function(comparison, coef_by_model,
+                                           edge_a, edge_b,
+                                           always_ids = character()) {
+  empty <- list(est = NA_real_, se = NA_real_, weight_sum = NA_real_)
+  edge_a <- as.character(edge_a %||% "")[[1]]
+  edge_b <- as.character(edge_b %||% "")[[1]]
+  if (!nzchar(edge_a) || !nzchar(edge_b) || is.null(comparison) || !nrow(comparison)) {
+    return(empty)
+  }
+  ok <- comparison$status == "ok" & is.finite(comparison$weight)
+  comp <- comparison[ok, , drop = FALSE]
+  if (!nrow(comp)) return(empty)
+
+  abs <- numeric(nrow(comp))
+  ses <- numeric(nrow(comp))
+  for (i in seq_len(nrow(comp))) {
+    mid <- as.character(comp$model[i])
+    slot <- coef_by_model[[mid]]
+    ea <- if (!is.null(slot)) slot$edges[[edge_a]] else NULL
+    eb <- if (!is.null(slot)) slot$edges[[edge_b]] else NULL
+    if (is.null(ea) || is.null(eb)) {
+      abs[i] <- 0
+      ses[i] <- 0
+    } else {
+      a <- as.numeric(ea$est); b <- as.numeric(eb$est)
+      sa <- as.numeric(ea$se); sb <- as.numeric(eb$se)
+      if (!is.finite(a)) a <- 0
+      if (!is.finite(b)) b <- 0
+      if (!is.finite(sa) || sa < 0) sa <- 0
+      if (!is.finite(sb) || sb < 0) sb <- 0
+      abs[i] <- a * b
+      ses[i] <- sqrt(b^2 * sa^2 + a^2 * sb^2)
+    }
+  }
+  w <- as.numeric(comp$weight)
+  beta_bar <- sum(w * abs)
+  se_bar <- sum(w * sqrt(ses^2 + (abs - beta_bar)^2))
+  list(
+    est = beta_bar,
+    se = se_bar,
+    weight_sum = joint_edge_weight_sum(
+      comparison, c(edge_a, edge_b), always_ids = always_ids
+    )
+  )
+}
+
+#' Full model-average of path-analytic total (direct + Σ via products)
+#'
+#' Missing direct / incomplete vias contribute 0 in each candidate (full MA).
+#' `weight_sum` = Σw of models with the direct edge or any complete via chain.
+#' @param via_pairs list of length-2 character vectors c(edge_a, edge_b)
+#' @keywords internal
+full_average_mediation_total <- function(comparison, coef_by_model,
+                                         edge_direct = NA_character_,
+                                         via_pairs = list(),
+                                         always_ids = character()) {
+  empty <- list(est = NA_real_, se = NA_real_, weight_sum = NA_real_)
+  if (is.null(comparison) || !nrow(comparison)) return(empty)
+  ok <- comparison$status == "ok" & is.finite(comparison$weight)
+  comp <- comparison[ok, , drop = FALSE]
+  if (!nrow(comp)) return(empty)
+
+  edge_direct <- as.character(edge_direct %||% "")[[1]]
+  if (is.na(edge_direct)) edge_direct <- ""
+
+  tots <- numeric(nrow(comp))
+  ses <- numeric(nrow(comp))
+  has_path <- logical(nrow(comp))
+  for (i in seq_len(nrow(comp))) {
+    mid <- as.character(comp$model[i])
+    slot <- coef_by_model[[mid]]
+    t <- 0
+    v_t <- 0
+    if (nzchar(edge_direct) && !is.null(slot) && !is.null(slot$edges[[edge_direct]])) {
+      ed <- slot$edges[[edge_direct]]
+      c0 <- as.numeric(ed$est); sc <- as.numeric(ed$se)
+      if (!is.finite(c0)) c0 <- 0
+      if (!is.finite(sc) || sc < 0) sc <- 0
+      t <- t + c0
+      v_t <- v_t + sc^2
+      has_path[i] <- TRUE
+    }
+    for (pr in via_pairs) {
+      ea_id <- as.character(pr[[1]] %||% "")
+      eb_id <- as.character(pr[[2]] %||% "")
+      if (!nzchar(ea_id) || !nzchar(eb_id) || is.null(slot)) next
+      ea <- slot$edges[[ea_id]]
+      eb <- slot$edges[[eb_id]]
+      if (is.null(ea) || is.null(eb)) next
+      a <- as.numeric(ea$est); b <- as.numeric(eb$est)
+      sa <- as.numeric(ea$se); sb <- as.numeric(eb$se)
+      if (!is.finite(a)) a <- 0
+      if (!is.finite(b)) b <- 0
+      if (!is.finite(sa) || sa < 0) sa <- 0
+      if (!is.finite(sb) || sb < 0) sb <- 0
+      t <- t + a * b
+      v_t <- v_t + b^2 * sa^2 + a^2 * sb^2
+      has_path[i] <- TRUE
+    }
+    tots[i] <- t
+    ses[i] <- sqrt(max(0, v_t))
+  }
+  w <- as.numeric(comp$weight)
+  beta_bar <- sum(w * tots)
+  se_bar <- sum(w * sqrt(ses^2 + (tots - beta_bar)^2))
+  list(
+    est = beta_bar,
+    se = se_bar,
+    weight_sum = sum(w[has_path])
+  )
+}
+
 #' Full model averaging for edge coefficients (absent → 0)
 #'
 #' @return data.frame with id, estimate, se, weight_sum

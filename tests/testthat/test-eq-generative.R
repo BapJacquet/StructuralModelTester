@@ -17,6 +17,29 @@ test_that("negative coefficients join with minus not plus-minus", {
   expect_false(grepl("\\+ -", tex, fixed = TRUE))
 })
 
+test_that("joint multivariate brms family does not crash equation wrapper", {
+  # Multivariate brms stores one brmsfamily per response in a plain list;
+  # fit$family$family is then NULL → character(0) → "argument of length zero".
+  fit <- structure(
+    list(
+      family = list(
+        A = brms::brmsfamily("gaussian"),
+        B = brms::brmsfamily("gaussian")
+      ),
+      smt_response = "B",
+      smt_structure = "joint"
+    ),
+    class = "brmsfit"
+  )
+  fl <- StructuralModelTester:::brms_view_family(fit)
+  expect_equal(fl$family, "gaussian")
+  expect_equal(fl$link, "identity")
+  w <- StructuralModelTester:::equation_link_wrapper(fit, "B")
+  expect_match(w$tag, "joint")
+  expect_true(isTRUE(w$generative))
+  expect_true(length(w$sigma) == 1L)
+})
+
 test_that("lm equation wrapper is generative with residual SD", {
   dat <- data.frame(Y = c(1, 2, 3, 4, 5, 6), X = c(0, 1, 0, 1, 0, 1))
   fit <- stats::lm(Y ~ X, data = dat)
@@ -133,4 +156,45 @@ test_that("lmer slopes merge into the Condition fixed term", {
   # Singular repeated_demo: rho shown in danger color (boundary), no text tag
   expect_match(w$re_dist, "\\\\color\\{#b33b3b\\}\\{\\\\rho_\\{01\\}=", perl = TRUE)
   expect_false(grepl("\\\\mathrm\\{boundary\\}", w$re_dist, perl = TRUE))
+})
+
+test_that("brms repeated_demo equations show random effects", {
+  skip_if_not(
+    StructuralModelTester:::bayes_backend_available(),
+    "brms + Stan backend not available"
+  )
+  csv <- StructuralModelTester:::smt_sample_path("repeated_demo.csv")
+  js <- StructuralModelTester:::smt_sample_path("repeated_demo_model.json")
+  skip_if_not(nzchar(csv) && nzchar(js), "repeated_demo sample files missing")
+  dat <- utils::read.csv(csv, stringsAsFactors = FALSE)
+  st <- StructuralModelTester:::model_from_json(
+    paste(readLines(js, warn = FALSE), collapse = "\n")
+  )
+  res <- StructuralModelTester:::fit_bayes_model(
+    st, dat, structure = "independent",
+    mark_nonsig = FALSE,
+    chains = 1L, iter = 400L, warmup = 200L, seed = 4L
+  )
+  fit <- res$fit[["Score"]]
+  expect_true(inherits(fit, "brmsfit"))
+  w <- StructuralModelTester:::equation_link_wrapper(fit, "Score")
+  expect_match(w$tag, "\\(1 \\+ Condition\\|subject\\)", perl = TRUE)
+  expect_true(length(w$re_u_map) >= 2L)
+  expect_true(nzchar(w$re_dist %||% ""))
+  expect_match(w$re_dist, "u_\\{0j\\}", perl = TRUE)
+  expect_match(w$re_dist, "\\\\mathrm\\{sd\\}\\(u\\)", perl = TRUE)
+
+  cf <- StructuralModelTester:::path_fixed_coefs(fit)
+  lines <- StructuralModelTester:::format_eta_term_lines(
+    cf, u_map = w$re_u_map
+  )
+  expect_match(lines[[1]], "u_\\{0j\\}", perl = TRUE)
+  cond_line <- lines[grepl("Condition", lines)]
+  expect_true(length(cond_line) >= 1L)
+  expect_match(cond_line[[1]], "u_\\{1j\\}", perl = TRUE)
+
+  html <- as.character(StructuralModelTester:::format_best_equations_html(res, st))
+  expect_match(html, "u_\\{0j\\}", perl = TRUE)
+  expect_match(html, "u_\\{1j\\}", perl = TRUE)
+  expect_match(html, "\\\\varepsilon", perl = TRUE)
 })

@@ -524,6 +524,22 @@ edge_relationship_plot <- function(state, data, edge_id,
     ))
   }
 
+  # Search / pruned models: don't overlay a DV fit that omitted this predictor
+  if (isTRUE(show_fit) && !is.null(fit) &&
+        !identical(etype, "measurement") &&
+        !identical(etype, "definitional")) {
+    foc_cols <- predictor_fit_columns(state, fit, from_id)
+    if (!length(foc_cols)) {
+      return(edge_plot_message(
+        "Not in selected model",
+        sprintf(
+          "This link is not in the fitted equation for %s. Pick an included link, or change framework / search settings.",
+          to_lab
+        )
+      ))
+    }
+  }
+
   # Co-predictors: emmeans holds when a fit is available; otherwise subset rows
   hold_ids <- co_predictor_ids_to_hold(
     state, from_id, to_id, to_level = to_level
@@ -1121,18 +1137,35 @@ edge_plot_group <- function(df, to_lab, y_kind, x_label, subtitle,
     y_lab <- to_lab
   }
 
-  # emmeans level means when the fit still has the focal as a numeric 0/1 column
+  # emmeans level means for 0/1 (or treatment-dummy) focals
   curve_df <- NULL
   if (isTRUE(show_fit) && !is.null(fit) && !is.null(focal) && nzchar(focal)) {
     lev <- levels(df$x_plot)
-    # Binary coded 0/1 in the model
-    if (focal %in% colnames(stats::model.matrix(fit)) &&
-          all(lev %in% c("0", "1"))) {
+    mm_names <- path_model_matrix_names(fit)
+    # Direct 0/1 column named like the focal
+    if (focal %in% mm_names && all(lev %in% c("0", "1"))) {
       curve_df <- emmeans_edge_curve(
         fit, focal, hold_at = hold_at, x_levels = as.numeric(lev)
       )
       if (!is.null(curve_df)) {
         curve_df$x_lab <- as.character(curve_df$x_lab)
+      }
+    }
+    # Treatment dummy (SMT Var__Level or brms-safe Var_Level): map base→0, level→1
+    if (is.null(curve_df) && length(lev) == 2L) {
+      dummies <- focal_dummy_columns(fit, focal)
+      if (length(dummies) >= 1L) {
+        curve_df <- emmeans_edge_curve(
+          fit, dummies[[1]], hold_at = hold_at, x_levels = c(0, 1)
+        )
+        if (!is.null(curve_df) && nrow(curve_df)) {
+          # x is 0/1; align labels to plot factor order (base, contrast)
+          idx <- match(as.numeric(curve_df$x), c(0, 1))
+          curve_df$x_lab <- ifelse(
+            is.finite(idx), as.character(lev[idx]), as.character(curve_df$x)
+          )
+          curve_df$x <- factor(curve_df$x_lab, levels = lev)
+        }
       }
     }
   }
@@ -1426,6 +1459,12 @@ edge_plot_subtitle <- function(est, est_std, etype, level, show_fit = FALSE,
     parts <- c(parts, etype)
   }
   if (!is.na(level) && nzchar(level)) parts <- c(parts, paste0("level: ", level))
+  prior_mean <- if (length(prior_mean) == 1L) as.numeric(prior_mean) else NA_real_
+  prior_sd <- if (length(prior_sd) == 1L) as.numeric(prior_sd) else NA_real_
+  prior_mean2 <- if (length(prior_mean2) == 1L) as.numeric(prior_mean2) else NA_real_
+  prior_mean3 <- if (length(prior_mean3) == 1L) as.numeric(prior_mean3) else NA_real_
+  est <- if (length(est) == 1L) as.numeric(est) else NA_real_
+  est_std <- if (length(est_std) == 1L) as.numeric(est_std) else NA_real_
   if (is.finite(prior_mean)) {
     if (is.finite(prior_sd) && prior_sd > 0) {
       parts <- c(parts, sprintf("expected b = %.2f ± %.2f", prior_mean, prior_sd))

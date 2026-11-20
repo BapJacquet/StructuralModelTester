@@ -191,6 +191,8 @@ brms_term_draws <- function(fit, term) {
   if (!inherits(fit, "brmsfit")) return(numeric())
   term <- as.character(term)
   if (!nzchar(term)) return(numeric())
+  # Estimates use SMT names; Stan parameters use brms-safe names
+  term <- brms_translate_term(fit, term, "to_safe")
   dm <- tryCatch(
     as.matrix(brms::as_draws_matrix(fit)),
     error = function(e) NULL
@@ -199,6 +201,8 @@ brms_term_draws <- function(fit, term) {
   resp <- fit$smt_response %||% ""
   resp <- as.character(resp)
   if (length(resp) != 1L || is.na(resp)) resp <- ""
+  # Joint fits tag smt_response with the SMT outcome name; Stan uses the safe name
+  if (nzchar(resp)) resp <- brms_translate_term(fit, resp, "to_safe")
   base <- if (identical(term, "(Intercept)") || identical(term, "Intercept")) {
     "Intercept"
   } else {
@@ -225,7 +229,81 @@ brms_rope_by_term <- function(state, preds, term_meta, rope_k = 0.1) {
   out
 }
 
-#' Summaries for one coefficient: mean, SD, HDI, pd, ROPE, log BF10, KL
+#' Posterior narrowing: prior SD / posterior SD
+#'
+#' Values near 1 mean the data barely tightened the Expected prior; 2 means the
+#' posterior is half as wide as the prior. Complements KL, which also mixes in
+#' location shift away from the prior mean.
+#' @keywords internal
+post_narrow_of <- function(post_sd, prior_sd = 1) {
+  post_sd <- as.numeric(post_sd)
+  prior_sd <- as.numeric(prior_sd)
+  if (!is.finite(post_sd) || post_sd <= 0) return(NA_real_)
+  if (!is.finite(prior_sd) || prior_sd <= 0) prior_sd <- 1
+  as.numeric(prior_sd / post_sd)
+}
+
+#' Flag KL below this (nats) as weak prior→posterior learning in Results
+#' @keywords internal
+bayes_kl_attention_max <- function() 0.1
+
+#' Flag SD↓ below this as little posterior narrowing in Results
+#' @keywords internal
+bayes_sd_narrow_attention_max <- function() 1.5
+
+#' Wrap a table cell when a Bayesian learning diagnostic is weak
+#' @keywords internal
+bayes_attention_html <- function(txt, title) {
+  txt <- as.character(txt %||% "")
+  if (!nzchar(txt)) return("")
+  sprintf(
+    '<span class="smt-bayes-weak" title="%s">%s</span>',
+    htmltools::htmlEscape(as.character(title %||% ""), attribute = TRUE),
+    htmltools::htmlEscape(txt)
+  )
+}
+
+#' Format KL for path-coef tables; highlight low learning
+#' @keywords internal
+format_bayes_kl <- function(k) {
+  k <- as.numeric(k)
+  if (!is.finite(k)) return("")
+  txt <- if (k >= 100) sprintf("%.0f", k)
+  else if (k >= 10) sprintf("%.1f", k)
+  else sprintf("%.2f", k)
+  if (k < bayes_kl_attention_max()) {
+    return(bayes_attention_html(
+      txt,
+      sprintf(
+        "Low prior\u2192posterior learning (KL < %.2f nats)",
+        bayes_kl_attention_max()
+      )
+    ))
+  }
+  txt
+}
+
+#' Format SD↓ for path-coef tables; highlight little narrowing
+#' @keywords internal
+format_bayes_sd_narrow <- function(r) {
+  r <- as.numeric(r)
+  if (!is.finite(r) || r <= 0) return("")
+  txt <- if (r >= 100) sprintf("%.0f", r)
+  else if (r >= 10) sprintf("%.1f", r)
+  else sprintf("%.2f", r)
+  if (r < bayes_sd_narrow_attention_max()) {
+    return(bayes_attention_html(
+      txt,
+      sprintf(
+        "Little posterior narrowing (SD\u2193 < %.1f)",
+        bayes_sd_narrow_attention_max()
+      )
+    ))
+  }
+  txt
+}
+
+#' Summaries for one coefficient: mean, SD, HDI, pd, ROPE, log BF10, KL, narrowing
 #' @keywords internal
 bayes_term_summary <- function(draws, rope = c(-0.1, 0.1), ci = 0.95,
                                prior_mean = 0, prior_sd = 1) {
@@ -239,14 +317,16 @@ bayes_term_summary <- function(draws, rope = c(-0.1, 0.1), ci = 0.95,
     rope_pct = NA_real_, rope_decision = NA_character_,
     log_bf10 = NA_real_,
     kl_prior_post = NA_real_,
+    post_narrow = NA_real_,
     includes_null = NA
   )
   if (!length(draws)) return(empty)
   hdi <- hdi_of(draws, ci)
   decision <- rope_hdi_decision(hdi, rope)
+  post_sd <- stats::sd(draws)
   list(
     est = mean(draws),
-    se = stats::sd(draws),
+    se = post_sd,
     hdi_low = unname(hdi[["low"]] %||% hdi[[1]]),
     hdi_high = unname(hdi[["high"]] %||% hdi[[2]]),
     pd = pd_of(draws),
@@ -260,6 +340,206 @@ bayes_term_summary <- function(draws, rope = c(-0.1, 0.1), ci = 0.95,
     kl_prior_post = kl_prior_post_of(
       draws, prior_mean = prior_mean, prior_sd = prior_sd
     ),
+    post_narrow = post_narrow_of(post_sd, prior_sd),
     includes_null = !identical(decision, "reject")
+  )
+}
+
+
+#' Highest-density interval from a sample
+#' @keywords internal
+hdi_bounds <- function(x, ci = 0.95) {
+  x <- sort(as.numeric(x[is.finite(x)]))
+  n <- length(x)
+  if (!n) return(c(low = NA_real_, high = NA_real_))
+  ci <- as.numeric(ci)
+  if (!is.finite(ci) || ci <= 0 || ci >= 1) ci <- 0.95
+  kn <- max(1L, floor(ci * n))
+  if (kn >= n) return(c(low = x[[1]], high = x[[n]]))
+  widths <- x[kn:n] - x[seq_len(n - kn + 1L)]
+  i <- which.min(widths)
+  c(low = x[[i]], high = x[[i + kn - 1L]])
+}
+
+#' Probability of Direction (pd): mass on the median's side of 0
+#' @keywords internal
+posterior_pd <- function(x) {
+  x <- as.numeric(x[is.finite(x)])
+  if (!length(x)) return(NA_real_)
+  med <- stats::median(x)
+  if (!is.finite(med) || med == 0) {
+    return(max(mean(x > 0), mean(x < 0)))
+  }
+  mean(sign(x) == sign(med))
+}
+
+#' Default ROPE half-width: `rope_k * prior_sd` around 0
+#' @keywords internal
+rope_from_prior_sd <- function(prior_sd, rope_k = 0.1) {
+  sd <- as.numeric(prior_sd)
+  k <- as.numeric(rope_k)
+  if (!is.finite(sd) || sd <= 0) sd <- 1
+  if (!is.finite(k) || k <= 0) k <- 0.1
+  half <- k * sd
+  c(low = -half, high = half)
+}
+
+#' Share of draws inside the ROPE
+#' @keywords internal
+rope_percentage <- function(x, rope_low, rope_high) {
+  x <- as.numeric(x[is.finite(x)])
+  if (!length(x) || !is.finite(rope_low) || !is.finite(rope_high)) return(NA_real_)
+  if (rope_low > rope_high) {
+    tmp <- rope_low
+    rope_low <- rope_high
+    rope_high <- tmp
+  }
+  mean(x >= rope_low & x <= rope_high)
+}
+
+#' Kruschke HDI+ROPE decision
+#'
+#' @return `"reject"`, `"accept"`, or `"undecided"`
+#' @keywords internal
+hdi_rope_decision <- function(hdi_low, hdi_high, rope_low, rope_high) {
+  if (!all(is.finite(c(hdi_low, hdi_high, rope_low, rope_high)))) {
+    return(NA_character_)
+  }
+  if (rope_low > rope_high) {
+    tmp <- rope_low
+    rope_low <- rope_high
+    rope_high <- tmp
+  }
+  if (hdi_high < rope_low || hdi_low > rope_high) return("reject")
+  if (hdi_low >= rope_low && hdi_high <= rope_high) return("accept")
+  "undecided"
+}
+
+#' Posterior / prior summaries for one coefficient sample
+#' @keywords internal
+bayes_coef_indices <- function(draws, ci = 0.95, prior_mean = 0, prior_sd = 1,
+                               rope_k = 0.1, rope_low = NULL, rope_high = NULL) {
+  draws <- as.numeric(draws[is.finite(draws)])
+  rope <- if (is.finite(rope_low %||% NA_real_) && is.finite(rope_high %||% NA_real_)) {
+    c(low = as.numeric(rope_low), high = as.numeric(rope_high))
+  } else {
+    rope_from_prior_sd(prior_sd, rope_k = rope_k)
+  }
+  hdi <- hdi_bounds(draws, ci = ci)
+  pd <- posterior_pd(draws)
+  rp <- rope_percentage(draws, rope[["low"]], rope[["high"]])
+  decision <- hdi_rope_decision(hdi[["low"]], hdi[["high"]], rope[["low"]], rope[["high"]])
+  list(
+    est = if (length(draws)) mean(draws) else NA_real_,
+    se = if (length(draws)) stats::sd(draws) else NA_real_,
+    ci_low = hdi[["low"]],
+    ci_high = hdi[["high"]],
+    ci_level = as.numeric(ci),
+    pd = pd,
+    rope_low = unname(rope[["low"]]),
+    rope_high = unname(rope[["high"]]),
+    rope_pct = rp,
+    rope_decision = decision,
+    includes_zero = if (is.na(decision)) NA else !identical(decision, "reject"),
+    prior_mean = as.numeric(prior_mean %||% 0),
+    prior_sd = as.numeric(prior_sd %||% 1)
+  )
+}
+
+#' Draw matrix of population-level slopes from a brms fit
+#' @keywords internal
+brms_slope_draws <- function(fit) {
+  if (!inherits(fit, "brmsfit")) return(NULL)
+  dm <- tryCatch(as.matrix(brms::as_draws_matrix(fit)), error = function(e) NULL)
+  if (is.null(dm) || !ncol(dm)) return(NULL)
+  keep <- grepl("^b_", colnames(dm))
+  if (!any(keep)) return(NULL)
+  out <- dm[, keep, drop = FALSE]
+  colnames(out) <- sub("^b_", "", colnames(out))
+  colnames(out)[colnames(out) == "Intercept"] <- "(Intercept)"
+  out
+}
+
+#' Enrich a brms fixef table with HDI, pd, and ROPE columns
+#'
+#' `term_priors` is an optional named list of lists with `mean`, `sd` for ROPE.
+#' @keywords internal
+brms_coef_table <- function(fit, ci = 0.95, rope_k = 0.1, term_priors = NULL) {
+  ci <- as.numeric(ci)
+  if (!is.finite(ci) || ci <= 0 || ci >= 1) ci <- 0.95
+  rope_k <- as.numeric(rope_k %||% 0.1)
+  if (!is.finite(rope_k) || rope_k <= 0) rope_k <- 0.1
+  fx <- as.data.frame(brms::fixef(fit))
+  draws <- brms_slope_draws(fit)
+  n <- nrow(fx)
+  fx$ci_low <- rep(NA_real_, n)
+  fx$ci_high <- rep(NA_real_, n)
+  fx$pd <- rep(NA_real_, n)
+  fx$rope_low <- rep(NA_real_, n)
+  fx$rope_high <- rep(NA_real_, n)
+  fx$rope_pct <- rep(NA_real_, n)
+  fx$rope_decision <- rep(NA_character_, n)
+  fx$includes_zero <- rep(NA, n)
+  fx$prior_mean <- rep(NA_real_, n)
+  fx$prior_sd <- rep(NA_real_, n)
+  for (i in seq_len(n)) {
+    nm <- rownames(fx)[[i]]
+    d <- if (!is.null(draws) && nm %in% colnames(draws)) draws[, nm] else numeric()
+    pr <- if (!is.null(term_priors) && nm %in% names(term_priors)) {
+      term_priors[[nm]]
+    } else {
+      list(mean = 0, sd = 1)
+    }
+    idx <- bayes_coef_indices(
+      d, ci = ci,
+      prior_mean = pr$mean %||% 0,
+      prior_sd = pr$sd %||% 1,
+      rope_k = rope_k
+    )
+    fx$ci_low[[i]] <- idx$ci_low
+    fx$ci_high[[i]] <- idx$ci_high
+    fx$pd[[i]] <- idx$pd
+    fx$rope_low[[i]] <- idx$rope_low
+    fx$rope_high[[i]] <- idx$rope_high
+    fx$rope_pct[[i]] <- idx$rope_pct
+    fx$rope_decision[[i]] <- idx$rope_decision
+    fx$includes_zero[[i]] <- idx$includes_zero
+    fx$prior_mean[[i]] <- idx$prior_mean
+    fx$prior_sd[[i]] <- idx$prior_sd
+  }
+  fx
+}
+
+#' Pull optional Bayesian columns from a coef table row
+#' @keywords internal
+path_coef_bayes_fields <- function(ct, term) {
+  empty <- list(
+    pd = NA_real_, rope_low = NA_real_, rope_high = NA_real_,
+    rope_pct = NA_real_, rope_decision = NA_character_,
+    prior_mean = NA_real_, prior_sd = NA_real_, includes_zero = NA
+  )
+  if (is.null(ct) || !term %in% rownames(ct)) return(empty)
+  getn <- function(col) {
+    if (!col %in% names(ct)) return(NA_real_)
+    as.numeric(ct[term, col])
+  }
+  getc <- function(col) {
+    if (!col %in% names(ct)) return(NA_character_)
+    as.character(ct[term, col])
+  }
+  inc <- if ("includes_zero" %in% names(ct)) {
+    as.logical(ct[term, "includes_zero"])
+  } else {
+    NA
+  }
+  list(
+    pd = getn("pd"),
+    rope_low = getn("rope_low"),
+    rope_high = getn("rope_high"),
+    rope_pct = getn("rope_pct"),
+    rope_decision = getc("rope_decision"),
+    prior_mean = getn("prior_mean"),
+    prior_sd = getn("prior_sd"),
+    includes_zero = inc
   )
 }

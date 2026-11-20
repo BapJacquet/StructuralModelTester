@@ -83,6 +83,138 @@ brms_stan_backend <- function(must = TRUE) {
   NA_character_
 }
 
+#' One name legal for brms (no `__`, no trailing `_`)
+#' @keywords internal
+brms_safe_name_one <- function(nm) {
+  nm <- as.character(nm %||% "")
+  if (!nzchar(nm)) return("x")
+  # brms reserves `__` in Stan parameter names; also bans trailing `_`
+  s <- gsub("__+", "_", nm, perl = TRUE)
+  s <- sub("_+$", "", s)
+  if (!nzchar(s)) s <- "x"
+  s
+}
+
+#' Map SMT design names → brms-safe names (unique)
+#'
+#' @param nms Names to rewrite.
+#' @param reserved Other names that must not be reused as targets.
+#' @return Named character vector: `names = original`, `values = safe`.
+#' @keywords internal
+brms_name_map <- function(nms, reserved = character()) {
+  nms <- unique(as.character(nms %||% character()))
+  nms <- nms[nzchar(nms) & !is.na(nms)]
+  if (!length(nms)) return(character())
+  reserved <- unique(as.character(reserved %||% character()))
+  used <- setdiff(reserved, nms)
+  out <- character(length(nms))
+  for (i in seq_along(nms)) {
+    cand <- brms_safe_name_one(nms[[i]])
+    if (cand %in% used) {
+      k <- 2L
+      while (paste0(cand, "_", k) %in% used) k <- k + 1L
+      cand <- paste0(cand, "_", k)
+    }
+    out[[i]] <- cand
+    used <- c(used, cand)
+  }
+  stats::setNames(out, nms)
+}
+
+#' Inverse map: safe → original
+#' @keywords internal
+brms_name_map_inverse <- function(to_safe) {
+  if (!length(to_safe)) return(character())
+  stats::setNames(names(to_safe), unname(to_safe))
+}
+
+#' Rename data columns / formula terms so brms accepts them
+#'
+#' SMT uses `Var__Level` for treatment dummies; brms rejects `__`. Returns
+#' remapped data, terms, and maps stored on the fit for coef recovery.
+#' @keywords internal
+brms_prepare_path_input <- function(data, yname, rhs_terms = NULL,
+                                    slope_terms = NULL, cluster = NULL,
+                                    term_meta = NULL) {
+  rhs_terms <- as.character(rhs_terms %||% character())
+  slope_terms <- as.character(slope_terms %||% character())
+  cluster <- if (is.null(cluster)) NULL else as.character(cluster[[1]] %||% "")
+  if (!nzchar(cluster %||% "")) cluster <- NULL
+  yname <- as.character(yname[[1]] %||% "")
+
+  need <- unique(c(rhs_terms, slope_terms, yname, cluster))
+  need <- need[nzchar(need) & !is.na(need)]
+  # Only rewrite names that violate brms rules
+  dirty <- need[grepl("__", need, fixed = TRUE) | grepl("_$", need)]
+  reserved <- unique(c(names(data), need))
+  to_safe <- brms_name_map(dirty, reserved = reserved)
+  clean <- setdiff(need, names(to_safe))
+  if (length(clean)) {
+    to_safe <- c(to_safe, stats::setNames(clean, clean))
+  }
+  from_safe <- brms_name_map_inverse(to_safe)
+
+  rename_one <- function(nm) {
+    nm <- as.character(nm %||% "")
+    if (!nzchar(nm)) return(nm)
+    if (nm %in% names(to_safe)) unname(to_safe[[nm]]) else nm
+  }
+
+  dat <- data
+  # Rename columns that change
+  for (orig in names(to_safe)) {
+    safe <- unname(to_safe[[orig]])
+    if (identical(orig, safe)) next
+    if (!orig %in% names(dat)) next
+    if (safe %in% names(dat) && !identical(orig, safe)) {
+      # Should not happen after unique map; drop duplicate target if identical content
+      dat[[orig]] <- NULL
+      next
+    }
+    names(dat)[names(dat) == orig] <- safe
+  }
+
+  term_meta <- term_meta %||% list()
+  meta_safe <- list()
+  for (nm in names(term_meta)) {
+    meta_safe[[rename_one(nm)]] <- term_meta[[nm]]
+  }
+
+  list(
+    data = dat,
+    yname = rename_one(yname),
+    rhs_terms = vapply(rhs_terms, rename_one, character(1), USE.NAMES = FALSE),
+    slope_terms = vapply(slope_terms, rename_one, character(1), USE.NAMES = FALSE),
+    cluster = if (is.null(cluster)) NULL else rename_one(cluster),
+    term_meta = meta_safe,
+    to_safe = to_safe,
+    from_safe = from_safe
+  )
+}
+
+#' Attach brms name maps on a fitted object
+#' @keywords internal
+brms_tag_name_maps <- function(fit, to_safe, from_safe) {
+  fit$smt_brms_to_safe <- to_safe %||% character()
+  fit$smt_brms_from_safe <- from_safe %||% character()
+  fit
+}
+
+#' Translate a coef / term name using a fit's brms maps
+#' @keywords internal
+brms_translate_term <- function(fit, term, direction = c("to_orig", "to_safe")) {
+  direction <- match.arg(direction)
+  term <- as.character(term %||% "")
+  if (!nzchar(term)) return(term)
+  map <- if (identical(direction, "to_orig")) {
+    fit$smt_brms_from_safe
+  } else {
+    fit$smt_brms_to_safe
+  }
+  if (is.null(map) || !length(map)) return(term)
+  if (term %in% names(map)) unname(map[[term]]) else term
+}
+
 #' MCMC settings for one brms equation
 #' @keywords internal
 normalize_brms_args <- function(args = NULL) {
@@ -337,6 +469,42 @@ fit_one_brms_equation <- function(yname, y_kind, formula, data, rhs, re = NULL,
   list(fit = fit, syntax = syntax, engine = "brms")
 }
 
+#' Whether joint equations include paths among outcomes (mediation / chain)
+#'
+#' If one response appears as a predictor of another, freely estimating residual
+#' correlations among those outcomes is (near-)nonidentified with the path —
+#' the same issue as freeing `M ~~ Y` alongside `Y ~ M` in lavaan.
+#' @keywords internal
+joint_outcomes_predict_each_other <- function(jobs) {
+  if (!length(jobs) || length(jobs) < 2L) return(FALSE)
+  ynames <- unique(vapply(jobs, function(j) as.character(j$yname %||% ""), character(1)))
+  ynames <- ynames[!is.na(ynames) & nzchar(ynames)]
+  key_roots <- unique(vapply(jobs, function(j) {
+    k <- as.character(j$key %||% j$yname %||% "")
+    sub("::.*$", "", k)
+  }, character(1)))
+  key_roots <- key_roots[!is.na(key_roots) & nzchar(key_roots)]
+  for (j in jobs) {
+    terms <- as.character(j$term_names %||% character())
+    if (length(terms) && any(terms %in% ynames)) return(TRUE)
+    preds <- j$preds
+    if (is.data.frame(preds) && nrow(preds) && "from" %in% names(preds)) {
+      fr <- as.character(preds$from)
+      if (any(fr %in% key_roots)) return(TRUE)
+    }
+  }
+  FALSE
+}
+
+#' Use residual correlations in a joint brms path fit?
+#'
+#' Enabled only when outcomes are "siblings" (no directed path among them).
+#' Mediation / causal chains force `set_rescor(FALSE)` automatically.
+#' @keywords internal
+joint_brms_want_rescor <- function(jobs) {
+  !isTRUE(joint_outcomes_predict_each_other(jobs))
+}
+
 #' Why a joint multivariate brms path fit is unavailable
 #'
 #' @return `NULL` if joint is feasible, else a short reason string.
@@ -408,34 +576,72 @@ fit_joint_brms_path <- function(jobs, state, brms_args = NULL) {
                 fit = NULL, syntax = NULL))
   }
 
+  # Sanitize dummy `__` names once across the shared frame / all equations
+  all_terms <- unique(unlist(lapply(jobs, function(j) j$term_names), use.names = FALSE))
+  all_slopes <- unique(unlist(lapply(jobs, function(j) j$slope_terms), use.names = FALSE))
+  all_clusters <- unique(vapply(jobs, function(j) {
+    cl <- as.character(j$cluster %||% "")
+    if (!nzchar(cl)) "" else cl
+  }, character(1)))
+  all_clusters <- all_clusters[nzchar(all_clusters)]
+  prep0 <- brms_prepare_path_input(
+    data = dat,
+    yname = ynames[[1]],
+    rhs_terms = all_terms,
+    slope_terms = all_slopes,
+    cluster = if (length(all_clusters)) all_clusters[[1]] else NULL,
+    term_meta = list()
+  )
+  dat <- prep0$data
+  to_safe <- prep0$to_safe
+  from_safe <- prep0$from_safe
+  rename_nm <- function(nm) {
+    nm <- as.character(nm %||% "")
+    if (nzchar(nm) && nm %in% names(to_safe)) unname(to_safe[[nm]]) else nm
+  }
+
   forms <- list()
   syntax_lines <- character()
   term_meta_by_resp <- list()
   preds_by_resp <- list()
   for (j in jobs) {
-    rhs <- if (!length(j$term_names)) "1" else paste(j$term_names, collapse = " + ")
+    y_safe <- rename_nm(j$yname)
+    terms_safe <- vapply(j$term_names, rename_nm, character(1), USE.NAMES = FALSE)
+    rhs <- if (!length(terms_safe)) "1" else paste(terms_safe, collapse = " + ")
     re <- NULL
-    if (!is.null(j$cluster) && nzchar(as.character(j$cluster))) {
-      dat[[j$cluster]] <- as.factor(dat[[j$cluster]])
-      re <- rm_re_term(j$cluster, NULL)
-      fml <- stats::as.formula(paste(j$yname, "~", rhs, "+", re))
+    cl <- as.character(j$cluster %||% "")
+    if (nzchar(cl)) {
+      cl_safe <- rename_nm(cl)
+      dat[[cl_safe]] <- as.factor(dat[[cl_safe]])
+      # Joint path currently forbids random slopes; intercept-only RE
+      re <- rm_re_term(cl_safe, NULL)
+      fml <- stats::as.formula(paste(y_safe, "~", rhs, "+", re))
     } else {
-      fml <- stats::as.formula(paste(j$yname, "~", rhs))
+      fml <- stats::as.formula(paste(y_safe, "~", rhs))
     }
     forms[[length(forms) + 1L]] <- brms::bf(fml)
-    rhs_txt <- if (!is.null(re)) paste(rhs, re, sep = " + ") else rhs
+    # Syntax keeps SMT dummy names
+    rhs_orig <- if (!length(j$term_names)) "1" else paste(j$term_names, collapse = " + ")
+    re_orig <- if (nzchar(cl)) rm_re_term(cl, NULL) else NULL
+    rhs_txt <- if (!is.null(re_orig)) paste(rhs_orig, re_orig, sep = " + ") else rhs_orig
     syntax_lines <- c(
       syntax_lines,
       paste0("  ", j$yname, " ~ ", rhs_txt)
     )
-    term_meta_by_resp[[j$yname]] <- j$term_meta %||% list()
-    preds_by_resp[[j$yname]] <- j$preds
+    meta <- j$term_meta %||% list()
+    meta_safe <- list()
+    for (nm in names(meta)) meta_safe[[rename_nm(nm)]] <- meta[[nm]]
+    term_meta_by_resp[[y_safe]] <- meta_safe
+    preds_by_resp[[y_safe]] <- j$preds
   }
   mv_formula <- forms[[1]]
   for (i in seq_along(forms)[-1L]) {
     mv_formula <- mv_formula + forms[[i]]
   }
-  mv_formula <- mv_formula + brms::set_rescor(TRUE)
+  # Residual correlations among outcomes are only identified when no outcome
+  # predicts another (sibling DVs). Mediation / chains → rescor off.
+  use_rescor <- joint_brms_want_rescor(jobs)
+  mv_formula <- mv_formula + brms::set_rescor(use_rescor)
 
   prior_df <- brms::get_prior(mv_formula, data = dat, family = stats::gaussian())
   prior_df <- fill_brms_slope_priors(
@@ -471,6 +677,8 @@ fit_joint_brms_path <- function(jobs, state, brms_args = NULL) {
       syntax = NULL
     ))
   }
+  fit <- brms_tag_name_maps(fit, to_safe, from_safe)
+  fit$smt_rescor <- use_rescor
 
   prior_bits <- character()
   if (!is.null(prior_df) && nrow(prior_df)) {
@@ -483,8 +691,13 @@ fit_joint_brms_path <- function(jobs, state, brms_args = NULL) {
       prior_bits <- c(prior_bits, paste0(lab, " ~ ", prior_df$prior[[i]]))
     }
   }
+  joint_tag <- if (isTRUE(use_rescor)) {
+    "joint + rescor"
+  } else {
+    "joint · rescor off (path among outcomes)"
+  }
   syntax <- paste0(
-    "brms(gaussian, joint + rescor):\n",
+    "brms(gaussian, ", joint_tag, "):\n",
     paste(syntax_lines, collapse = "\n")
   )
   if (length(prior_bits)) {
@@ -512,8 +725,9 @@ fit_joint_brms_path <- function(jobs, state, brms_args = NULL) {
 #' ROPE. Confirmatory links stay in the model and are muted in that case.
 #'
 #' @param structure `"independent"` (one Stan model per equation, default) or
-#'   `"joint"` (single multivariate gaussian model with residual correlations
-#'   when the path equations are compatible; otherwise falls back).
+#'   `"joint"` (single multivariate gaussian model; residual correlations when
+#'   outcomes do not predict each other — mediation / chains turn rescor off
+#'   automatically; falls back to independent if equations are incompatible).
 #' @param chains,iter,warmup,seed MCMC settings passed to brms. One core is
 #'   used so sampling stays inside the Shiny process.
 #' @export

@@ -611,7 +611,11 @@ smt_ui <- function() {
             shiny::h3(shiny::textOutput("right_panel_title", inline = TRUE)),
             shiny::uiOutput("sim_results_banner"),
             shiny::uiOutput("status_msg"),
+            shiny::uiOutput("mcmc_health_banner"),
             shiny::uiOutput("inspector_panel"),
+            # Latent CFA / PCA are peer Results blocks (not nested in DV inspector)
+            shiny::uiOutput("latent_cfa_section"),
+            shiny::uiOutput("latent_pca_section"),
             # Residual plot must stay outside renderUI — remounting plotOutput
             # leaves a blank panel even when renderPlot succeeds.
             shiny::uiOutput("dv_resid_controls"),
@@ -625,24 +629,44 @@ smt_ui <- function() {
                 shiny::plotOutput("dv_resid_plot", height = "320px")
               )
             ),
+            shiny::uiOutput("dv_mcmc_controls"),
+            shiny::conditionalPanel(
+              condition = "output.dv_mcmc_has_plot === true",
+              shiny::div(
+                class = "smt-mcmc-plot-wrap",
+                id = "smt_mcmc_plot_host",
+                shiny::plotOutput("dv_mcmc_plot", height = "280px")
+              )
+            ),
+            shiny::conditionalPanel(
+              condition = "output.dv_mcmc_has_plot === true",
+              shiny::div(
+                class = "smt-mcmc-plot-wrap smt-ppc-plot-wrap",
+                id = "smt_ppc_plot_host",
+                shiny::plotOutput("dv_ppc_plot", height = "280px")
+              )
+            ),
             shiny::uiOutput("report_section_power"),
             shiny::uiOutput("power_summary_msg"),
-            shiny::uiOutput("report_section_coef"),
-            DT::DTOutput("coef_table"),
             shiny::conditionalPanel(
-              condition = "input.inference_mode == 'search'",
-              shiny::h4("Best vs confirmatory"),
-              shiny::helpText(
-                "Confirmatory = best ∪ all confirmatory paths. ",
-                "Confirmatory only = all confirmatory, no exploratory. ",
-                "Null = no free paths; full = every free path."
+              condition = "output.show_path_results === true",
+              shiny::uiOutput("report_section_coef"),
+              DT::DTOutput("coef_table"),
+              shiny::conditionalPanel(
+                condition = "input.inference_mode == 'search'",
+                shiny::h4("Best vs confirmatory"),
+                shiny::helpText(
+                  "Confirmatory = best ∪ all confirmatory paths. ",
+                  "Confirmatory only = all confirmatory, no exploratory. ",
+                  "Null = no free paths; full = every free path."
+                ),
+                DT::DTOutput("best_vs_conf_table"),
+                shiny::h4("All models"),
+                DT::DTOutput("comparison_table")
               ),
-              DT::DTOutput("best_vs_conf_table"),
-              shiny::h4("All models"),
-              DT::DTOutput("comparison_table")
-            ),
-            shiny::h4("Model syntax"),
-            shiny::verbatimTextOutput("syntax_out")
+              shiny::h4("Model syntax"),
+              shiny::verbatimTextOutput("syntax_out")
+            )
           )
         )
       )
@@ -693,7 +717,25 @@ smt_server <- function(input, output, session) {
     as.character(sel$edges[[1]])
   })
 
-  smt_register_field_help(input, session)
+  smt_register_field_help(input, session, skip = "path_coefficients")
+
+  shiny::observeEvent(input$smt_help_path_coefficients, {
+    st <- shiny::isolate(state())
+    dv <- selected_dv_id()
+    scope_note <- if (!is.null(dv)) {
+      sprintf("Currently filtered to DV “%s”.", node_display_name(st, dv))
+    } else {
+      "Showing the full structural table (no DV selected)."
+    }
+    shiny::showModal(path_coefficients_help_modal(scope_note = scope_note))
+  }, ignoreInit = TRUE)
+
+  # Path-coef DT header click → per-column help (see smt-panels.js)
+  shiny::observeEvent(input$coef_help_col, {
+    col <- as.character(input$coef_help_col %||% "")[[1]]
+    if (!nzchar(col)) return()
+    shiny::showModal(path_coefficient_column_help_modal(col))
+  }, ignoreInit = TRUE)
 
   smt_show_power_modal <- function() {
     ps <- power_settings_rv()
@@ -801,11 +843,30 @@ smt_server <- function(input, output, session) {
     invisible(TRUE)
   }
 
-  # Welcome modal: no data until the user picks an example (or starts blank).
+  # Optional seed from run_app(data = …): load into Data and skip examples modal.
+  seed_dat <- getOption("smt.seed_data", NULL)
+  skip_examples_modal <- !is.null(seed_dat)
+  if (!is.null(seed_dat)) {
+    tryCatch({
+      set_raw_data(seed_dat, reset_prepare = TRUE)
+      last_data_file(list(datapath = NA_character_, name = "(from R)"))
+      status(sprintf(
+        "Loaded data from R (%d rows × %d columns).",
+        nrow(seed_dat), ncol(seed_dat)
+      ))
+      shiny::updateRadioButtons(session, "center_view", selected = "data")
+    }, error = function(e) {
+      status(paste("Seed data error:", e$message))
+    })
+  }
+
+  # Welcome modal unless run_app(data=…) already seeded the session.
   # Also probe git / GitHub for a newer revision (fails soft when offline).
   update_info <- shiny::reactiveVal(NULL)
   session$onFlushed(function() {
-    shiny::showModal(smt_examples_modal())
+    if (!isTRUE(skip_examples_modal)) {
+      shiny::showModal(smt_examples_modal())
+    }
     info <- tryCatch(
       smt_update_check(timeout_sec = 8),
       error = function(e) NULL
@@ -2954,6 +3015,16 @@ smt_server <- function(input, output, session) {
     nid
   })
 
+  # Selected latent (for CFA / PCA Results blocks)
+  selected_latent_id <- shiny::reactive({
+    nid <- selected_node_id()
+    if (is.null(nid)) return(NULL)
+    invisible(results_content_sig())
+    st <- shiny::isolate(state())
+    if (!is_latent_node(st, nid)) return(NULL)
+    nid
+  })
+
   output$right_panel_title <- shiny::renderText({
     invisible(results_content_sig())
     st <- shiny::isolate(state())
@@ -4042,6 +4113,123 @@ smt_server <- function(input, output, session) {
   })
   shiny::outputOptions(output, "dv_resid_plot", suspendWhenHidden = FALSE)
 
+  output$mcmc_health_banner <- shiny::renderUI({
+    res <- last_result()
+    if (is.null(res) || !identical(res$sampler, "brms")) return(NULL)
+    agg <- brms_mcmc_diagnostics_aggregate(res, state())
+    format_mcmc_health_html(agg)
+  })
+
+  output$dv_mcmc_has_plot <- shiny::reactive({
+    res <- last_result()
+    if (is.null(res) || !identical(res$sampler, "brms")) return(FALSE)
+    dv <- selected_dv_id()
+    fits_dv <- dv_result_fits(res, dv)
+    if (!length(fits_dv)) return(FALSE)
+    any(vapply(fits_dv, function(f) inherits(f, "brmsfit"), logical(1)))
+  })
+  shiny::outputOptions(output, "dv_mcmc_has_plot", suspendWhenHidden = FALSE)
+
+  output$dv_mcmc_controls <- shiny::renderUI({
+    res <- last_result()
+    if (is.null(res) || !identical(res$sampler, "brms")) return(NULL)
+    dv <- selected_dv_id()
+    if (is.null(dv)) return(NULL)
+    fits_dv <- dv_result_fits(res, dv)
+    bayes_fits <- Filter(function(f) inherits(f, "brmsfit"), fits_dv)
+    if (!length(bayes_fits)) {
+      return(shiny::tagList(
+        smt_report_section_head(
+          "Bayesian diagnostics",
+          help_topic = "bayes_diagnostics"
+        ),
+        shiny::helpText("Run a Bayesian analysis to see sampling diagnostics for this DV.")
+      ))
+    }
+    keys <- names(bayes_fits)
+    key <- if (length(keys) > 1L) {
+      input$dv_mcmc_equation %||% keys[[1]]
+    } else {
+      keys[[1]]
+    }
+    if (is.null(key) || !key %in% keys) key <- keys[[1]]
+    diag <- brms_mcmc_diagnostics(bayes_fits[[key]])
+    shiny::tagList(
+      smt_report_section_head(
+        "Bayesian diagnostics",
+        help_topic = "bayes_diagnostics"
+      ),
+      if (length(keys) > 1L) {
+        shiny::selectInput(
+          "dv_mcmc_equation",
+          "Equation",
+          choices = stats::setNames(
+            keys,
+            vapply(keys, function(k) dv_fit_key_label(state(), k), character(1))
+          ),
+          selected = key,
+          width = "100%"
+        )
+      },
+      format_mcmc_dv_summary_html(diag),
+      shiny::helpText(
+        "Rhat vs ESS (top) and PPC dens overlay (bottom). ",
+        "Use ? for interpretation examples."
+      )
+    )
+  })
+
+  output$dv_mcmc_plot <- shiny::renderPlot({
+    res <- last_result()
+    dv <- selected_dv_id()
+    fits_dv <- dv_result_fits(res, dv)
+    bayes_fits <- Filter(function(f) inherits(f, "brmsfit"), fits_dv)
+    if (!length(bayes_fits)) {
+      return(mcmc_diagnostics_plot(NULL))
+    }
+    keys <- names(bayes_fits)
+    key <- if (length(keys) > 1L) {
+      input$dv_mcmc_equation %||% keys[[1]]
+    } else {
+      keys[[1]]
+    }
+    if (is.null(key) || !key %in% keys) key <- keys[[1]]
+    tryCatch(
+      mcmc_diagnostics_plot(
+        bayes_fits[[key]],
+        title = paste0("MCMC — ", dv_fit_key_label(state(), key))
+      ),
+      error = function(e) mcmc_diagnostics_plot(NULL)
+    )
+  })
+  shiny::outputOptions(output, "dv_mcmc_plot", suspendWhenHidden = FALSE)
+
+  output$dv_ppc_plot <- shiny::renderPlot({
+    res <- last_result()
+    dv <- selected_dv_id()
+    fits_dv <- dv_result_fits(res, dv)
+    bayes_fits <- Filter(function(f) inherits(f, "brmsfit"), fits_dv)
+    if (!length(bayes_fits)) {
+      return(brms_ppc_plot(NULL))
+    }
+    keys <- names(bayes_fits)
+    key <- if (length(keys) > 1L) {
+      input$dv_mcmc_equation %||% keys[[1]]
+    } else {
+      keys[[1]]
+    }
+    if (is.null(key) || !key %in% keys) key <- keys[[1]]
+    tryCatch(
+      brms_ppc_plot(
+        bayes_fits[[key]],
+        title = paste0("PPC — ", dv_fit_key_label(state(), key)),
+        ndraws = 40L
+      ),
+      error = function(e) brms_ppc_plot(NULL)
+    )
+  })
+  shiny::outputOptions(output, "dv_ppc_plot", suspendWhenHidden = FALSE)
+
   # ---- Report pin controls + stack ----
   output$export_report_pdf_btn <- shiny::renderUI({
     mods <- report_modules()
@@ -4122,14 +4310,90 @@ smt_server <- function(input, output, session) {
     )
   })
 
+  output$latent_cfa_section <- shiny::renderUI({
+    lat <- selected_latent_id()
+    if (is.null(lat)) return(NULL)
+    invisible(results_content_sig())
+    st <- shiny::isolate(state())
+    res <- last_result()
+    mods <- report_modules()
+    params <- list(latent_id = lat)
+    pinned <- report_has_module(mods, "cfa_measurement", params)
+    sm <- latent_measurement_summary(res, st, lat)
+    enabled <- !is.null(sm) && !is.null(sm$loadings) && nrow(sm$loadings) > 0L
+    shiny::withMathJax(shiny::tagList(
+      smt_report_section_head(
+        paste0("CFA / measurement · ", node_display_name(st, lat)),
+        smt_report_pin_button(
+          "report_pin_cfa_btn",
+          pinned = pinned,
+          enabled = enabled,
+          title_add = "Add CFA / measurement for this latent to Report",
+          title_remove = "Remove this CFA / measurement from Report"
+        )
+      ),
+      latent_cfa_block_ui(res, st, lat)
+    ))
+  })
+
+  output$latent_pca_section <- shiny::renderUI({
+    lat <- selected_latent_id()
+    if (is.null(lat)) return(NULL)
+    invisible(results_content_sig())
+    st <- shiny::isolate(state())
+    res <- last_result()
+    mods <- report_modules()
+    params <- list(latent_id = lat)
+    pinned <- report_has_module(mods, "pca_screen", params)
+    sm <- latent_measurement_summary(res, st, lat)
+    enabled <- is.list(sm$uni) &&
+      nzchar(as.character(sm$uni$status %||% "")) &&
+      !is.na(sm$uni$status)
+    shiny::tagList(
+      smt_report_section_head(
+        paste0("PCA unidimensionality · ", node_display_name(st, lat)),
+        smt_report_pin_button(
+          "report_pin_pca_btn",
+          pinned = pinned,
+          enabled = enabled,
+          title_add = "Add PCA screen for this latent to Report",
+          title_remove = "Remove this PCA screen from Report"
+        )
+      ),
+      latent_pca_block_ui(res, st, lat)
+    )
+  })
+
   output$report_section_coef <- shiny::renderUI({
     mods <- report_modules()
     res <- last_result()
-    pinned <- report_has_module(mods, "coef_table")
+    dv <- selected_dv_id()
+    params <- if (!is.null(dv)) list(dv_id = dv) else list()
+    pinned <- report_has_module(mods, "coef_table", params)
     enabled <- !is.null(res)
+    head_title <- if (!is.null(dv)) {
+      paste0("Path coefficients · ", node_display_name(shiny::isolate(state()), dv))
+    } else {
+      "Path coefficients"
+    }
     smt_report_section_head(
-      "Path coefficients",
-      smt_report_pin_button("report_pin_coef_btn", pinned = pinned, enabled = enabled)
+      head_title,
+      pin = smt_report_pin_button(
+        "report_pin_coef_btn",
+        pinned = pinned,
+        enabled = enabled,
+        title_add = if (!is.null(dv)) {
+          "Add path coefficients for this DV to Report"
+        } else {
+          "Add full path coefficients to Report"
+        },
+        title_remove = if (!is.null(dv)) {
+          "Remove this DV path coefficients from Report"
+        } else {
+          "Remove full path coefficients from Report"
+        }
+      ),
+      help_topic = "path_coefficients"
     )
   })
 
@@ -4178,7 +4442,21 @@ smt_server <- function(input, output, session) {
   }, ignoreInit = TRUE)
 
   shiny::observeEvent(input$report_pin_coef_btn, {
-    report_toggle_module("coef_table")
+    dv <- selected_dv_id()
+    params <- if (!is.null(dv)) list(dv_id = dv) else list()
+    report_toggle_module("coef_table", params)
+  }, ignoreInit = TRUE)
+
+  shiny::observeEvent(input$report_pin_cfa_btn, {
+    lat <- selected_latent_id()
+    if (is.null(lat)) return()
+    report_toggle_module("cfa_measurement", list(latent_id = lat))
+  }, ignoreInit = TRUE)
+
+  shiny::observeEvent(input$report_pin_pca_btn, {
+    lat <- selected_latent_id()
+    if (is.null(lat)) return()
+    report_toggle_module("pca_screen", list(latent_id = lat))
   }, ignoreInit = TRUE)
 
   shiny::observeEvent(input$report_pin_equations_btn, {
@@ -4325,16 +4603,8 @@ smt_server <- function(input, output, session) {
               return(smt_apa_datatable(data.frame()))
             }
             res <- last_result()
-            est <- if (!is.null(res) && !isTRUE(res$model_averaged)) {
-              res$estimates
-            } else {
-              NULL
-            }
-            tab <- estimates_table(
-              state(),
-              estimates = est,
-              conf_adjust = res$conf_adjust %||% "none"
-            )
+            dv_id <- hit[[1]]$params$dv_id %||% NULL
+            tab <- estimates_table_for_report(state(), res, dv_id = dv_id)
             smt_apa_datatable(tab)
           })
           shiny::outputOptions(output, out_id, suspendWhenHidden = FALSE)
@@ -4351,8 +4621,8 @@ smt_server <- function(input, output, session) {
     if (!length(mods)) {
       return(shiny::div(
         class = "smt-report-empty",
-        "No modules yet. Use the + buttons next to Path coefficients, Model fit, ",
-        "Residual diagnostics, the edge plot, or Power analysis."
+        "No modules yet. Use the + buttons next to Path coefficients, CFA / PCA, ",
+        "Model fit, Residual diagnostics, the edge plot, or Power analysis."
       ))
     }
     st <- state()
@@ -4368,9 +4638,25 @@ smt_server <- function(input, output, session) {
             shiny::helpText("Run the analysis to populate path coefficients.")
           } else {
             shiny::tagList(
-              shiny::tags$p(class = "smt-apa-caption", shiny::em("Path coefficients")),
+              shiny::tags$p(class = "smt-apa-caption", shiny::em(title)),
               DT::DTOutput(paste0("report_tbl_", uid))
             )
+          }
+        },
+        cfa_measurement = {
+          lat <- m$params$latent_id %||% NULL
+          if (is.null(res) || is.null(lat)) {
+            shiny::helpText("Run the analysis with this latent selected to pin CFA.")
+          } else {
+            shiny::withMathJax(latent_cfa_block_ui(res, st, lat))
+          }
+        },
+        pca_screen = {
+          lat <- m$params$latent_id %||% NULL
+          if (is.null(res) || is.null(lat)) {
+            shiny::helpText("Run the analysis with this latent selected to pin PCA.")
+          } else {
+            latent_pca_block_ui(res, st, lat)
           }
         },
         equations = {
@@ -4445,31 +4731,41 @@ smt_server <- function(input, output, session) {
     shiny::div(class = "smt-report-stack", cards)
   })
 
+  # Path coefs / syntax: full when nothing selected; DV-filtered in DV inspector;
+  # hidden for other node selections (latent CFA, predictors, etc.).
+  show_path_results <- shiny::reactive({
+    invisible(results_content_sig())
+    nid <- selected_node_id()
+    dv <- selected_dv_id()
+    is.null(nid) || !is.null(dv)
+  })
+  output$show_path_results <- shiny::reactive({ show_path_results() })
+  shiny::outputOptions(output, "show_path_results", suspendWhenHidden = FALSE)
+
   output$coef_table <- DT::renderDT({
     invisible(results_content_sig())
+    if (!isTRUE(show_path_results())) {
+      return(smt_apa_datatable(estimates_table_empty()))
+    }
     res <- last_result()
+    st <- shiny::isolate(state())
     # When averaging, coefficients live on state edges already
     est <- if (!is.null(res) && !isTRUE(res$model_averaged)) res$estimates else NULL
     tab <- estimates_table(
-      shiny::isolate(state()),
+      st,
       estimates = est,
-      conf_adjust = res$conf_adjust %||% "none"
+      conf_adjust = res$conf_adjust %||% "none",
+      result = res
     )
     dv <- selected_dv_id()
     if (!is.null(dv) && nrow(tab)) {
-      dv_lab <- node_display_name(state(), dv)
-      tr_lab <- dv_transform_lhs(dv_lab, node_dv_transform(state(), dv))
-      # Match Y, transform log(Y), and split outcomes Y[level]
-      is_to <- tab$To %in% c(dv_lab, tr_lab) |
-        startsWith(as.character(tab$To), paste0(dv_lab, "["))
-      is_indirect <- startsWith(as.character(tab$Level %||% ""), "via ")
-      keep <- is_to | (is_indirect & (tab$From == dv_lab | is_to))
-      tab <- tab[keep, , drop = FALSE]
+      tab <- filter_estimates_table_for_dv(tab, st, dv)
     }
-    smt_apa_datatable(tab)
+    smt_apa_datatable(tab, header_help = TRUE)
   })
 
   output$best_vs_conf_table <- DT::renderDT({
+    if (!isTRUE(show_path_results())) return(NULL)
     res <- last_result()
     if (is.null(res) || is.null(res$best_vs_confirmatory)) return(NULL)
     tab <- format_best_vs_confirmatory_display(res$best_vs_confirmatory, state())
@@ -4478,6 +4774,7 @@ smt_server <- function(input, output, session) {
   })
 
   output$comparison_table <- DT::renderDT({
+    if (!isTRUE(show_path_results())) return(NULL)
     res <- last_result()
     if (is.null(res) || is.null(res$comparison)) return(NULL)
     smt_apa_datatable(
@@ -4487,9 +4784,13 @@ smt_server <- function(input, output, session) {
   })
 
   output$syntax_out <- shiny::renderText({
+    invisible(results_content_sig())
+    if (!isTRUE(show_path_results())) return("")
     res <- last_result()
     if (is.null(res)) return("")
-    res$syntax
+    dv <- selected_dv_id()
+    if (is.null(dv)) return(res$syntax %||% "")
+    filter_result_syntax_for_dv(res$syntax, shiny::isolate(state()), dv)
   })
 }
 

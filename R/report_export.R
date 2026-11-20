@@ -19,16 +19,32 @@ latex_escape_text <- function(x) {
     s <- gsub("\u2019", "'", s, fixed = TRUE)
     s <- gsub("\u2013", "--", s, fixed = TRUE)
     s <- gsub("\u2014", "---", s, fixed = TRUE)
-    s <- gsub("\u00d7", "$\\times$", s, fixed = TRUE)
-    s <- gsub("\u2265", "$\\ge$", s, fixed = TRUE)
-    s <- gsub("\u03b1", "$\\alpha$", s, fixed = TRUE)
-    s <- gsub("\u03b5", "$\\varepsilon$", s, fixed = TRUE)
+    # Placeholder tokens for TeX math (restored after \\/$ escaping)
+    s <- gsub("\u00d7", "\u0002", s, fixed = TRUE)       # ×
+    s <- gsub("\u2265", "\u0003", s, fixed = TRUE)       # ≥
+    s <- gsub("\u03b1", "\u0004", s, fixed = TRUE)       # α
+    s <- gsub("\u03b5", "\u0005", s, fixed = TRUE)       # ε
+    s <- gsub("\u03a3", "\u0006", s, fixed = TRUE)       # Σ
+    s <- gsub("\u03b2", "\u0007", s, fixed = TRUE)       # β
+    s <- gsub("\u2190", "\u000e", s, fixed = TRUE)       # ←
+    s <- gsub("\u219c", "\u000e", s, fixed = TRUE)       # ↜ via ≈ ←
+    s <- gsub("\u21d0", "\u000f", s, fixed = TRUE)       # ⇐ total
+    s <- gsub("\u2193", "\u0010", s, fixed = TRUE)       # ↓ SD↓
     # Placeholder so later brace escaping does not break \\textbackslash{}
     s <- gsub("\\", "\u0001", s, fixed = TRUE)
     s <- gsub("([#$%&_{}])", "\\\\\\1", s)
     s <- gsub("~", "\\textasciitilde{}", s, fixed = TRUE)
     s <- gsub("^", "\\textasciicircum{}", s, fixed = TRUE)
     s <- gsub("\u0001", "\\textbackslash{}", s, fixed = TRUE)
+    s <- gsub("\u0002", "$\\times$", s, fixed = TRUE)
+    s <- gsub("\u0003", "$\\ge$", s, fixed = TRUE)
+    s <- gsub("\u0004", "$\\alpha$", s, fixed = TRUE)
+    s <- gsub("\u0005", "$\\varepsilon$", s, fixed = TRUE)
+    s <- gsub("\u0006", "$\\Sigma$", s, fixed = TRUE)
+    s <- gsub("\u0007", "$\\beta$", s, fixed = TRUE)
+    s <- gsub("\u000e", "$\\leftarrow$", s, fixed = TRUE)
+    s <- gsub("\u000f", "$\\Leftarrow$", s, fixed = TRUE)
+    s <- gsub("\u0010", "$\\downarrow$", s, fixed = TRUE)
     s
   }, character(1), USE.NAMES = FALSE)
 }
@@ -62,7 +78,7 @@ report_df_to_latex_table <- function(df, caption, table_no) {
         if (!is.finite(v)) return("")
         formatC(v, digits = 3, format = "f")
       } else {
-        latex_escape_text(v)
+        latex_escape_text(smt_plain_cell_text(v))
       }
     }, character(1))
     paste(cells, collapse = " & ")
@@ -355,17 +371,94 @@ report_module_to_latex <- function(mod, state, result, power,
     if (is.null(result)) {
       tex <- paste0(tex, "\\textit{Run the analysis to populate path coefficients.}\n")
     } else {
-      est <- if (!isTRUE(result$model_averaged)) result$estimates else NULL
-      tab <- estimates_table(
-        state,
-        estimates = est,
-        conf_adjust = result$conf_adjust %||% "none"
+      tab <- estimates_table_for_report(
+        state, result, dv_id = mod$params$dv_id %||% NULL
       )
       tex <- paste0(
         tex,
-        report_df_to_latex_table(tab, "Path coefficients", table_no)
+        report_df_to_latex_table(tab, title, table_no)
       )
       table_no <- table_no + 1L
+    }
+  } else if (identical(typ, "cfa_measurement")) {
+    lat <- mod$params$latent_id %||% NA_character_
+    sm <- latent_measurement_summary(result, state, lat)
+    if (is.null(sm) || is.null(sm$loadings) || !nrow(sm$loadings)) {
+      tex <- paste0(tex, "\\textit{No CFA loadings available for this latent.}\n")
+    } else {
+      bits <- character()
+      if (is.finite(sm$alpha)) {
+        bits <- c(bits, sprintf("Cronbach $\\alpha$ = %.2f", sm$alpha))
+      }
+      bits <- c(bits, sprintf(
+        "score = %s",
+        if (identical(sm$score_method, "joint")) "joint Thomson" else "own indicators"
+      ))
+      if (length(bits)) {
+        tex <- paste0(tex, paste(bits, collapse = "; "), "\n\n")
+      }
+      tab <- latent_loadings_df(sm$loadings, state)
+      tex <- paste0(tex, report_df_to_latex_table(tab, title, table_no))
+      table_no <- table_no + 1L
+      if (!is.null(sm$fit_measures) && nrow(sm$fit_measures)) {
+        fm <- sm$fit_measures
+        fm_lab <- paste(
+          sprintf("%s = %s", fm$measure, formatC(fm$value, digits = 3, format = "f")),
+          collapse = "; "
+        )
+        tex <- paste0(tex, "\n\\textit{Joint CFA fit:} ", latex_escape_text(fm_lab), "\n")
+      }
+    }
+  } else if (identical(typ, "pca_screen")) {
+    lat <- mod$params$latent_id %||% NA_character_
+    sm <- latent_measurement_summary(result, state, lat)
+    uni <- if (is.null(sm)) NULL else sm$uni
+    ust <- if (is.list(uni)) as.character(uni$status %||% NA_character_) else NA_character_
+    if (!is.list(uni) || is.na(ust) || !nzchar(ust)) {
+      tex <- paste0(tex, "\\textit{No PCA unidimensionality screen for this latent.}\n")
+    } else {
+      bits <- character()
+      if (nzchar(as.character(uni$label %||% ""))) {
+        bits <- c(bits, as.character(uni$label))
+      }
+      if (is.finite(uni$ratio)) {
+        bits <- c(bits, sprintf("$\\lambda_1/\\lambda_2$ = %.2f", uni$ratio))
+      }
+      if (is.finite(uni$pct1)) {
+        bits <- c(bits, sprintf("PC1 = %.1f\\%%", 100 * uni$pct1))
+      }
+      if (length(bits)) {
+        tex <- paste0(tex, paste(bits, collapse = "; "), "\n\n")
+      }
+      tab <- latent_pca_eigen_df(uni)
+      if (nrow(tab)) {
+        names(tab)[names(tab) == "PctVar"] <- "% var"
+        tex <- paste0(
+          tex,
+          report_df_to_latex_table(tab, paste(title, "— eigenvalues"), table_no)
+        )
+        table_no <- table_no + 1L
+      }
+      ld <- latent_pca_loadings_df(uni, state, which = "unrotated")
+      if (nrow(ld) && ncol(ld) > 1L) {
+        tex <- paste0(
+          tex,
+          report_df_to_latex_table(
+            ld, paste(title, "— item loadings (unrotated)"), table_no
+          )
+        )
+        table_no <- table_no + 1L
+      }
+      ld_rot <- latent_pca_loadings_df(uni, state, which = "rotated")
+      if (nrow(ld_rot) && ncol(ld_rot) > 1L) {
+        tex <- paste0(
+          tex,
+          report_df_to_latex_table(
+            ld_rot, paste(title, "— item loadings (varimax)"), table_no
+          )
+        )
+        table_no <- table_no + 1L
+      }
     }
   } else if (identical(typ, "equations")) {
     if (is.null(result)) {
@@ -482,6 +575,13 @@ report_module_tex_clipboard <- function(mod, state, result = NULL, power = NULL,
   chunk$tex
 }
 
+#' Strip HTML tags from table cells (e.g. attention spans) for export
+#' @keywords internal
+smt_plain_cell_text <- function(x) {
+  x <- as.character(x %||% "")
+  gsub("<[^>]*>", "", x, perl = TRUE)
+}
+
 #' Escape plain text for HTML
 #' @keywords internal
 html_escape_text <- function(x) {
@@ -530,7 +630,7 @@ report_df_to_html_table <- function(df, caption) {
       txt <- if (is.numeric(v)) {
         if (!is.finite(v)) "" else formatC(v, digits = 3, format = "f")
       } else {
-        html_escape_text(v)
+        html_escape_text(smt_plain_cell_text(v))
       }
       sprintf(
         "<td style=\"border:none;padding:2pt 8pt;vertical-align:top;\">%s</td>",
@@ -588,13 +688,76 @@ report_module_html_clipboard <- function(mod, state, result = NULL, power = NULL
     if (is.null(result)) {
       parts <- c(parts, "<p><em>Run the analysis to populate path coefficients.</em></p>\n")
     } else {
-      est <- if (!isTRUE(result$model_averaged)) result$estimates else NULL
-      tab <- estimates_table(
-        state,
-        estimates = est,
-        conf_adjust = result$conf_adjust %||% "none"
+      tab <- estimates_table_for_report(
+        state, result, dv_id = mod$params$dv_id %||% NULL
       )
-      parts <- c(parts, report_df_to_html_table(tab, "Table. Path coefficients"))
+      parts <- c(parts, report_df_to_html_table(tab, paste("Table.", title)))
+    }
+  } else if (identical(typ, "cfa_measurement")) {
+    lat <- mod$params$latent_id %||% NA_character_
+    sm <- latent_measurement_summary(result, state, lat)
+    if (is.null(sm) || is.null(sm$loadings) || !nrow(sm$loadings)) {
+      parts <- c(parts, "<p><em>No CFA loadings available for this latent.</em></p>\n")
+    } else {
+      bits <- character()
+      if (is.finite(sm$alpha)) {
+        bits <- c(bits, sprintf("Cronbach α = %.2f", sm$alpha))
+      }
+      bits <- c(bits, sprintf(
+        "score = %s",
+        if (identical(sm$score_method, "joint")) "joint Thomson" else "own indicators"
+      ))
+      if (length(bits)) {
+        parts <- c(parts, "<p>", html_escape_text(paste(bits, collapse = " · ")), "</p>\n")
+      }
+      tab <- latent_loadings_df(sm$loadings, state)
+      parts <- c(parts, report_df_to_html_table(tab, paste("Table.", title)))
+    }
+  } else if (identical(typ, "pca_screen")) {
+    lat <- mod$params$latent_id %||% NA_character_
+    sm <- latent_measurement_summary(result, state, lat)
+    uni <- if (is.null(sm)) NULL else sm$uni
+    ust <- if (is.list(uni)) as.character(uni$status %||% NA_character_) else NA_character_
+    if (!is.list(uni) || is.na(ust) || !nzchar(ust)) {
+      parts <- c(parts, "<p><em>No PCA unidimensionality screen for this latent.</em></p>\n")
+    } else {
+      bits <- character()
+      if (nzchar(as.character(uni$label %||% ""))) bits <- c(bits, as.character(uni$label))
+      if (is.finite(uni$ratio)) {
+        bits <- c(bits, sprintf("λ₁/λ₂ = %.2f", uni$ratio))
+      }
+      if (is.finite(uni$pct1)) {
+        bits <- c(bits, sprintf("PC1 = %.1f%%", 100 * uni$pct1))
+      }
+      if (length(bits)) {
+        parts <- c(parts, "<p>", html_escape_text(paste(bits, collapse = " · ")), "</p>\n")
+      }
+      tab <- latent_pca_eigen_df(uni)
+      if (nrow(tab)) {
+        names(tab)[names(tab) == "PctVar"] <- "% var"
+        parts <- c(
+          parts,
+          report_df_to_html_table(tab, paste("Table.", title, "— eigenvalues"))
+        )
+      }
+      ld <- latent_pca_loadings_df(uni, state, which = "unrotated")
+      if (nrow(ld) && ncol(ld) > 1L) {
+        parts <- c(
+          parts,
+          report_df_to_html_table(
+            ld, paste("Table.", title, "— item loadings (unrotated)")
+          )
+        )
+      }
+      ld_rot <- latent_pca_loadings_df(uni, state, which = "rotated")
+      if (nrow(ld_rot) && ncol(ld_rot) > 1L) {
+        parts <- c(
+          parts,
+          report_df_to_html_table(
+            ld_rot, paste("Table.", title, "— item loadings (varimax)")
+          )
+        )
+      }
     }
   } else if (identical(typ, "equations")) {
     if (is.null(result)) {
