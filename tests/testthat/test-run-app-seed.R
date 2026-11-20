@@ -56,3 +56,29 @@ test_that("smt_debug console echo is gated by smt.debug.console", {
     fixed = TRUE
   )
 })
+
+test_that("smt_launch_browser soft-fails when options(browser) is unset", {
+  old_br <- getOption("browser")
+  on.exit(options(browser = old_br), add = TRUE)
+  options(browser = NULL)
+
+  # Bare browseURL aborts on Unix when browser is NULL — that was the startup bug
+  if (.Platform$OS.type != "windows") {
+    expect_error(utils::browseURL("http://127.0.0.1:9"), "browser")
+  }
+
+  url <- "http://127.0.0.1:9"
+  expect_message(
+    expect_error(
+      StructuralModelTester:::smt_launch_browser(url),
+      NA
+    ),
+    url,
+    fixed = TRUE
+  )
+})
+
+test_that("smt_launch_browser ignores empty urls", {
+  expect_false(StructuralModelTester:::smt_launch_browser(""))
+  expect_false(StructuralModelTester:::smt_launch_browser(character()))
+})

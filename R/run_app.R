@@ -14,11 +14,92 @@ smt_normalize_seed_data <- function(data) {
   as.data.frame(data, optional = TRUE, stringsAsFactors = FALSE)
 }
 
+#' Open a URL without aborting when no browser is configured
+#'
+#' Soft-fails so [shiny::runApp()] keeps running even if `options("browser")`
+#' is unset or the opener is missing. Always prints the URL for manual open.
+#' @keywords internal
+smt_launch_browser <- function(url) {
+  url <- if (length(url)) as.character(url[[1]]) else ""
+  if (!nzchar(url)) return(invisible(FALSE))
+  message("Structural Model Tester: open ", url, " in your browser.")
+
+  opened <- FALSE
+  # Prefer R's configured browser when it is usable
+  br <- getOption("browser")
+  if (is.function(br) || (is.character(br) && length(br) == 1L && nzchar(br) &&
+        !identical(br, "false"))) {
+    opened <- isTRUE(tryCatch({
+      utils::browseURL(url)
+      TRUE
+    }, error = function(e) FALSE))
+  }
+
+  if (!opened) {
+    opened <- isTRUE(tryCatch(
+      smt_launch_browser_fallback(url),
+      error = function(e) FALSE
+    ))
+  }
+
+  if (!opened) {
+    warning(
+      "Could not open a system browser. Paste the URL above into any browser, ",
+      "or set options(browser = \"firefox\") / the BROWSER env var.",
+      call. = FALSE
+    )
+  }
+  invisible(opened)
+}
+
+#' Platform fallbacks when utils::browseURL cannot run
+#' @keywords internal
+smt_launch_browser_fallback <- function(url) {
+  if (.Platform$OS.type == "windows") {
+    ok <- tryCatch({
+      utils::shell.exec(url)
+      TRUE
+    }, error = function(e) FALSE)
+    return(isTRUE(ok))
+  }
+
+  candidates <- character()
+  if (identical(Sys.info()[["sysname"]], "Darwin")) {
+    candidates <- c("open")
+  } else {
+    candidates <- c(
+      "xdg-open",
+      "firefox",
+      "google-chrome",
+      "chromium",
+      "chromium-browser",
+      "microsoft-edge"
+    )
+  }
+
+  for (cmd in candidates) {
+    path <- Sys.which(cmd)
+    if (!nzchar(path)) next
+    status <- tryCatch(
+      system2(path, shQuote(url), wait = FALSE, stdout = FALSE, stderr = FALSE),
+      error = function(e) 1L
+    )
+    # system2(..., wait = FALSE) returns 0 when the process was spawned
+    if (is.null(status) || identical(as.integer(status)[[1]], 0L)) {
+      return(TRUE)
+    }
+  }
+  FALSE
+}
+
 #' Launch the Structural Model Tester app
 #'
 #' Opens the Structural Model Tester Shiny interface in the browser.
 #'
-#' @param launch.browser Logical; open in the system browser.
+#' @param launch.browser Logical; open in the system browser. When `TRUE`
+#'   (default), a soft-fail launcher is used so a missing default browser does
+#'   not abort startup — the app URL is always printed. Pass `FALSE` to skip
+#'   opening, or a function(url) for a custom opener.
 #' @param data Optional data.frame (or tibble) to seed the Data tab. When
 #'   supplied, the welcome examples modal is skipped and the app starts with
 #'   this dataset already loaded (blank model).
@@ -81,7 +162,9 @@ run_app <- function(launch.browser = TRUE, data = NULL, debug = FALSE, ...) {
     "Structural Model Tester: app is running. ",
     "Stop it from this R console with Esc (RStudio / Positron) or Ctrl+C (terminal)."
   )
-  shiny::runApp(app_dir, launch.browser = launch.browser, ...)
+  # TRUE → soft-fail launcher (missing browser must not abort shiny::runApp)
+  lb <- if (isTRUE(launch.browser)) smt_launch_browser else launch.browser
+  shiny::runApp(app_dir, launch.browser = lb, ...)
 }
 
 #' @keywords internal
