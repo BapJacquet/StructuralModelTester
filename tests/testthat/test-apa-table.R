@@ -25,6 +25,8 @@ test_that("smt_apa_datatable uses smt-apa-table class and HTML colnames", {
   html_names <- StructuralModelTester:::apa_stat_col_html(names(df))
   expect_true(any(grepl("<em>Estimate</em>", html_names, fixed = TRUE)))
   expect_true(any(grepl("<em>p</em>", html_names, fixed = TRUE)))
+  # Overflow scrolling is CSS-only; DT scrollX would always show a bar
+  expect_false(isTRUE(dt$x$options$scrollX))
 })
 
 test_that("header_help wraps colnames with smt-col-help data attributes", {

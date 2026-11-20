@@ -402,7 +402,10 @@ set_node_cat_mode <- function(state, node_id, cat_mode = c("split", "omnibus"), 
   col <- tryCatch(lavaan_var_name(state, node_id), error = function(e) NA_character_)
   if (is.na(col) || !col %in% names(data)) return(state)
   coding <- variable_coding_for_node(state, node_id, data)
-  if (!identical(coding$kind, "categorical") || !length(coding$levels)) return(state)
+  # Categorical always; binary in split mode also exposes non-base `levels`
+  if (!coding$kind %in% c("categorical", "binary") || !length(coding$levels)) {
+    return(state)
+  }
 
   for (to in tos) {
     hits <- which(
@@ -768,6 +771,43 @@ map_column_to_node <- function(state, node_id, column = NA_character_) {
   state
 }
 
+#' Typed NA matching an edge-table column
+#' @keywords internal
+edge_col_na <- function(x) {
+  if (is.logical(x)) return(NA)
+  if (is.integer(x)) return(NA_integer_)
+  if (is.double(x) || is.numeric(x)) return(NA_real_)
+  if (is.character(x)) return(NA_character_)
+  NA
+}
+
+#' Append an edge row, aligning columns after fits add extra fields
+#'
+#' Fit / Holm / Bayes may leave `pvalue_raw`, `ci_low`, … on `state$edges`.
+#' Plain `rbind()` then errors when [add_edge()] builds a shorter template row.
+#' @keywords internal
+rbind_edges <- function(edges, new_row) {
+  new_row <- as.data.frame(new_row, stringsAsFactors = FALSE)
+  if (is.null(edges) || (!nrow(edges) && !ncol(edges))) {
+    return(new_row)
+  }
+  edges <- as.data.frame(edges, stringsAsFactors = FALSE)
+  for (nm in setdiff(names(edges), names(new_row))) {
+    new_row[[nm]] <- edge_col_na(edges[[nm]])
+  }
+  if (nrow(edges)) {
+    for (nm in setdiff(names(new_row), names(edges))) {
+      edges[[nm]] <- rep(edge_col_na(new_row[[nm]]), nrow(edges))
+    }
+  } else {
+    for (nm in setdiff(names(new_row), names(edges))) {
+      edges[[nm]] <- edge_col_na(new_row[[nm]])[0]
+    }
+  }
+  cols <- union(names(edges), names(new_row))
+  rbind(edges[, cols, drop = FALSE], new_row[, cols, drop = FALSE])
+}
+
 #' Add a directed link
 #'
 #' @param level For categorical predictors: non-reference level this edge
@@ -848,7 +888,7 @@ add_edge <- function(state, from, to,
       prior_sd3 = 1,
       stringsAsFactors = FALSE
     )
-    state$edges <- rbind(state$edges, new_row)
+    state$edges <- rbind_edges(state$edges, new_row)
     state$next_edge <- state$next_edge + 1L
     state <- refresh_interaction_nodes(state)
     # If × already targets DVs, attach main effects for this newly wired factor
@@ -912,7 +952,7 @@ add_edge <- function(state, from, to,
     prior_sd3 = 1,
     stringsAsFactors = FALSE
   )
-  state$edges <- rbind(state$edges, new_row)
+  state$edges <- rbind_edges(state$edges, new_row)
   state$next_edge <- state$next_edge + 1L
 
   # Hierarchy: × → DV also creates fixed main-effect edges from wired factors

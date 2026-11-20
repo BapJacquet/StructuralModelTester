@@ -1928,6 +1928,18 @@ binary01_for_node <- function(state, node_id, x) {
   as_binary01(x)
 }
 
+#' Label of the level coded 1 under node treatment coding
+#'
+#' Used in path-coefficient `Level` and when tagging binary×… interaction terms.
+#' @keywords internal
+binary_one_level_label <- function(state, node_id, x = NULL) {
+  labs <- binary_plot_level_labels(state, node_id, x)
+  if (length(labs) >= 2L && nzchar(as.character(labs[[2]]))) {
+    return(as.character(labs[[2]]))
+  }
+  NA_character_
+}
+
 #' Level labels for a binary node matching path-model / [binary01_for_node] coding
 #' @keywords internal
 binary_plot_level_labels <- function(state, node_id, x = NULL) {

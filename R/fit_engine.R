@@ -974,6 +974,21 @@ interaction_factor_series <- function(state, dat, node_id, level = NA_character_
       call. = FALSE
     )
   }
+  # Binary mains / × sides: 0/1 vs declared base (matches simulate + path builder)
+  if (identical(kind, "binary") || identical(coding$kind, "binary")) {
+    one <- binary_one_level_label(state, node_id, x)
+    if (is.na(one) || !nzchar(one)) {
+      al <- as.character(coding$all_levels %||% character())
+      base <- as.character(coding$base %||% NA_character_)
+      rest <- setdiff(al, base)
+      if (length(rest)) one <- rest[[1]]
+    }
+    return(list(list(
+      tag = if (!is.na(one) && nzchar(one)) sanitize_id(one) else "bin",
+      level = if (is.na(one) || !nzchar(one)) NA_character_ else as.character(one),
+      values = as.numeric(binary01_for_node(state, node_id, x))
+    )))
+  }
   list(list(
     tag = "num",
     level = NA_character_,
@@ -1883,7 +1898,7 @@ build_path_terms <- function(state, dat, preds, response_level = NA_character_) 
     y_kind <- "binary"
     lhs_name <- dv_outcome_lhs(yname, response_level)
   } else if (identical(y_kind, "binary")) {
-    local_dat[[yname]] <- as_binary01(local_dat[[yname]])
+    local_dat[[yname]] <- binary01_for_node(state, y_id, local_dat[[yname]])
   } else if (!identical(y_transform, "none")) {
     local_dat[[yname]] <- apply_dv_transform(
       local_dat[[yname]], y_transform, yname = yname
@@ -2032,9 +2047,15 @@ build_path_terms <- function(state, dat, preds, response_level = NA_character_) 
       term_names <- c(term_names, dname)
       term_meta[[dname]] <- list(rhs = xn, level = as.character(lvl), kind = "effect")
     } else if (identical(kind, "binary")) {
-      local_dat[[xn]] <- as_binary01(dat_xn)
+      # Treatment coding vs declared base (not alphabetical as_binary01)
+      local_dat[[xn]] <- binary01_for_node(state, from_id, dat_xn)
+      one_lv <- binary_one_level_label(state, from_id, dat_xn)
       term_names <- c(term_names, xn)
-      term_meta[[xn]] <- list(rhs = xn, level = NA_character_, kind = "effect")
+      term_meta[[xn]] <- list(
+        rhs = xn,
+        level = if (is.na(one_lv) || !nzchar(one_lv)) NA_character_ else one_lv,
+        kind = "effect"
+      )
     } else {
       # Continuous (or interaction product already numeric): poly expansion
       expanded <- expand_continuous_predictor(
@@ -2319,7 +2340,7 @@ collect_path_equation_jobs <- function(state, dat, edges, dv_ids = NULL) {
         y_kind <- y_kind0
         lhs_disp <- yname
         if (identical(y_kind, "binary")) {
-          local_dat[[yname]] <- as_binary01(local_dat[[yname]])
+          local_dat[[yname]] <- binary01_for_node(state, dv, local_dat[[yname]])
         } else {
           y_tr <- node_dv_transform(state, dv)
           if (!identical(y_tr, "none")) {

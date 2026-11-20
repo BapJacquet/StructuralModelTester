@@ -1174,23 +1174,22 @@ table.smt-apa-table,
   border-collapse: collapse !important;
   border-top: 1.5px solid #222 !important;
   border-bottom: 1.5px solid #222 !important;
-  width: 100% !important;
+  /* Content width when wide; stretch only when narrower than the panel */
+  width: max-content !important;
+  min-width: 100%;
+  max-width: none !important;
+  table-layout: auto;
   background: transparent !important;
 }
 
-/* DT scrollX splits header/body into two tables. Each got the full booktabs
-   frame, so midrule + header-table border-bottom (or body border-top) stacked
-   as a double line. Keep only the thin thead midrule above the values. */
-.smt-results .dataTables_scrollHead table.dataTable.smt-apa-table {
-  border-bottom: none !important;
-}
-.smt-results .dataTables_scrollBody,
-.smt-results .dataTables_scrollBody > table.dataTable.smt-apa-table {
-  border-top: none !important;
-}
-.smt-results .dataTables_scrollBody > table.dataTable.smt-apa-table > thead th {
-  border: none !important;
-  border-bottom: none !important;
+/* Scroll the whole APA table only when it overflows the results panel */
+.smt-results .datatables:has(table.smt-apa-table),
+.smt-results .dataTables_wrapper:has(table.smt-apa-table),
+.smt-report-module-body .datatables:has(table.smt-apa-table),
+.smt-report-module-body .dataTables_wrapper:has(table.smt-apa-table) {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: visible;
 }
 
 /* Clickable path-coef headers → column help modal */
@@ -1228,6 +1227,10 @@ table.smt-apa-table tbody td,
   padding: 3px 8px !important;
   vertical-align: top;
   background: transparent !important;
+  /* Override .smt-results { overflow-wrap/word-break } — never wrap cells */
+  white-space: nowrap !important;
+  overflow-wrap: normal !important;
+  word-break: normal !important;
 }
 
 /* Kill DT stripe / hover fills on APA tables */

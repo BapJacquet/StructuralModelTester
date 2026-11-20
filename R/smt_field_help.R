@@ -559,15 +559,17 @@ path_coefficients_column_help_catalog <- function() {
         "or mediation path."
       ),
       details = c(
-        "Blank: continuous or binary predictor (single slope).",
-        "A category label: dummy/treatment contrast for that level vs the reference.",
+        "Blank: continuous predictor (single slope).",
+        "A category label: the level coded 1 in the treatment contrast (vs the reference base).",
+        "For binary predictors this is the non-base level (e.g. Female when Male is base).",
+        "A×B: product of the two sides’ coded-1 levels for an interaction term.",
         "omnibus: joint test that all levels of a categorical predictor are zero.",
         "via M: indirect effect a×b through mediator M (Sobel SE/p classically; posterior of a×b under Bayesian Run).",
         "total: direct + all via-mediator products for that Path."
       ),
       pros_title = "How to read it",
       pros = c(
-        "Ignore Level when blank — you are looking at the main slope.",
+        "Blank Level → continuous slope; named Level → contrast for that category vs base.",
         "Compare level rows within the same Path for category-specific slopes.",
         "Read via M and total together with the blank Level direct path for a mediation triad."
       ),

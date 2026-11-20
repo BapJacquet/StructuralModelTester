@@ -263,6 +263,45 @@ test_that("bayesian mediation table includes via M and total", {
   expect_true(all(nzchar(as.character(via[[grep("% HDI$", names(via))[[1]]]]))))
 })
 
+test_that("binary path Levels name the level coded as 1", {
+  csv <- StructuralModelTester:::smt_sample_path("interaction_demo.csv")
+  js <- StructuralModelTester:::smt_sample_path("interaction_demo_model.json")
+  skip_if_not(nzchar(csv) && nzchar(js), "interaction_demo sample files missing")
+  dat <- utils::read.csv(csv, stringsAsFactors = FALSE)
+  st <- StructuralModelTester:::model_from_json(
+    paste(readLines(js, warn = FALSE), collapse = "\n")
+  )
+  # Declared bases: Gender Male=0, Method T=0 → Female and I are coded 1
+  expect_identical(
+    StructuralModelTester:::binary_one_level_label(st, "Gender", dat$Gender),
+    "Female"
+  )
+  expect_identical(
+    StructuralModelTester:::binary_one_level_label(st, "Method", dat$Method),
+    "I"
+  )
+
+  res <- StructuralModelTester:::fit_pvalue_model(
+    st, dat, alpha = 0.05, mark_nonsig = TRUE, conf_adjust = "holm"
+  )
+  est <- res$estimates
+  g <- est[est$rhs == "Gender" & est$op == "~", , drop = FALSE]
+  m <- est[est$rhs == "Method" & est$op == "~", , drop = FALSE]
+  ix <- est[est$rhs == "ix" & est$op == "~", , drop = FALSE]
+  expect_equal(as.character(g$level), "Female")
+  expect_equal(as.character(m$level), "I")
+  expect_match(as.character(ix$level[[1]]), "Female", fixed = TRUE)
+  expect_match(as.character(ix$level[[1]]), "I", fixed = TRUE)
+
+  tab <- StructuralModelTester:::estimates_table(
+    st, estimates = est, conf_adjust = "holm", result = res
+  )
+  g_row <- tab[grepl("Gender", tab$Path, fixed = TRUE) &
+                 !startsWith(as.character(tab$Level), "via "), , drop = FALSE]
+  expect_true(nrow(g_row) >= 1L)
+  expect_identical(as.character(g_row$Level[[1]]), "Female")
+})
+
 test_that("estimates_table omits adjusted column when conf_adjust is none", {
   csv <- StructuralModelTester:::smt_sample_path("path_demo.csv")
   js <- StructuralModelTester:::smt_sample_path("path_demo_model.json")

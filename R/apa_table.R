@@ -66,7 +66,9 @@ smt_apa_datatable <- function(df, page_length = 0L, options = NULL,
     }
   }
   opts <- list(
-    scrollX = TRUE,
+    # No DT scrollX — a CSS wrapper scrolls only when content overflows.
+    # (scrollX always mounts a scroll body that often shows a bar when unused.)
+    scrollX = FALSE,
     ordering = FALSE,
     autoWidth = FALSE
   )

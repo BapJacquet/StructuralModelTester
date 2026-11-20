@@ -179,11 +179,11 @@ sim_edge_predictor <- function(state, dat, from_id, level = NA_character_) {
 
 #' Numeric series for one side of a simulated interaction (match fit coding)
 #'
-#' Mirrors `interaction_factor_series` / `factor_numeric_for_product`:
-#' binary → 0/1 (`as_binary01`), continuous → mean-centered, categorical →
-#' non-base (or level-restricted) indicators. Returns a list of numeric
-#' vectors (length 1 for binary/continuous/split; one per non-base level for
-#' omnibus categorical).
+#' Mirrors `interaction_factor_series`:
+#' binary → 0/1 vs declared base ([binary01_for_node]), continuous →
+#' mean-centered, categorical → non-base (or level-restricted) indicators.
+#' Returns a list of numeric vectors (length 1 for binary/continuous/split;
+#' one per non-base level for omnibus categorical).
 #' @keywords internal
 sim_interaction_factor_series <- function(state, dat, node_id,
                                          level = NA_character_) {
@@ -217,15 +217,7 @@ sim_interaction_factor_series <- function(state, dat, node_id,
   }
 
   if (identical(kind, "binary")) {
-    # Match fit: as_binary01 on factor uses level order (base first → 0)
-    if (is.factor(x)) {
-      return(list(as.numeric(as.integer(droplevels(x)) - 1L)))
-    }
-    levs <- node_sim_factor_levels(state, node_id, data = NULL)
-    if (length(levs) >= 2L) {
-      return(list(as.numeric(as.character(x) == levs[[length(levs)]])))
-    }
-    return(list(as.numeric(as_binary01(x))))
+    return(list(as.numeric(binary01_for_node(state, node_id, x))))
   }
 
   # Continuous: mean-centered product coding (same as factor_numeric_for_product)

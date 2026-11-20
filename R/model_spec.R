@@ -149,9 +149,19 @@ interaction_involves_categorical <- function(state, data, ix_id) {
   fac <- interaction_factors(state, ix_id)
   for (id in c(fac$a, fac$b)) {
     if (is.na(id) || !nzchar(id)) next
+    # Declared sim kind (binary / categorical) needs expand_interaction_terms
+    # so Level tags the coded-1 categories (e.g. Female×I).
+    declared <- tryCatch(
+      node_sim_var_kind(state, id, data = NULL),
+      error = function(e) NA_character_
+    )
+    if (identical(declared, "categorical") || identical(declared, "binary")) {
+      return(TRUE)
+    }
     col <- state$nodes$observed_column[match(id, state$nodes$id)]
     if (is.na(col) || !nzchar(col) || !col %in% names(data)) next
-    if (identical(classify_variable(data[[col]]), "categorical")) return(TRUE)
+    kind <- classify_variable(data[[col]])
+    if (identical(kind, "categorical") || identical(kind, "binary")) return(TRUE)
   }
   FALSE
 }
